@@ -7,21 +7,26 @@
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
 - **가져오기 도구**: Python + openpyxl (스프레드시트 xlsx → 정규화 JSON)
 
-서버 코드 구조·GraphQL 리졸버 위치·데이터베이스 ERD는 [server/README.md](server/README.md)에 있습니다.
+| 문서 | 내용 |
+|---|---|
+| [server/README.md](server/README.md) | 서버 코드 구조, GraphQL 리졸버 위치, 데이터베이스 ERD |
+| [web/README.md](web/README.md) | 프론트엔드 코드 구조, 화면 명세 |
 
 ## 화면
 
 | 화면 | 내용 |
 |---|---|
-| 대시보드 `/` | 이번 달 소비 vs N개월 평균, 예산 대비, 일별 누적 소비 차트, 여유자금(은행 잔고 − 카드 결제 예정), 다가오는 카드 결제, 카테고리별 이번 달 vs 평균, 예정/미확정 지출, 월별 추이 |
-| 가계부 `/transactions` | 스프레드시트처럼 보는 월별 내역. 셀을 눌러 바로 수정(Enter/Tab/방향키), 맨 아래 줄에서 바로 입력, 예정 항목 확정·건너뛰기, 오른쪽에 시트와 같은 요약(항목별·결제수단별 합계, 월잔액, 구성원 용돈) |
-| 결제 입력 `/entry` | 휴대폰에서도 쓰기 쉬운 입력 폼. 가맹점 자동완성(과거 분류 자동 채움), 할부·혜택·예정, 카드 승인 문자 붙여넣기 |
-| 카드 `/cards` | 카드 목록, 추가/삭제(거래가 있으면 보관), 다음 결제일·금액, 이번 달 실적 진행 |
-| 카드 상세 `/cards/:id` | 카드 정보 편집, 정산 일정(결제일·이용기간), 청구서별 결제 예정 금액과 내역, 월별 실적·혜택·다음 구간, 카드 거래(혜택 지정) |
-| 카드별 내역 `/card-transactions` | 카드 시트처럼 카드별 월 이용 내역과 혜택액. 이용월/결제월 기준 전환 |
-| 은행 잔고 `/accounts` | 계좌 추가, 잔고 기록(기준일), 이력, 여유자금 포함 여부 |
-| 지출 계획 `/plan` | 월 수입·배분·구성원 용돈, 카테고리 예산(고정비·합계 제외 설정), 반복 지출 규칙 |
+| 대시보드 `/` | 이번 달 소비 vs 평균·예산, 여유자금, 다가오는 카드 결제, 예정 지출, 월별 추이 |
+| 가계부 `/transactions` | 스프레드시트처럼 보고 바로 고치는 월별 내역과 시트식 요약 |
+| 결제 입력 `/entry` | 휴대폰용 입력 폼, 카드 승인 문자 붙여넣기 |
+| 카드 `/cards` | 카드 목록·추가·삭제, 다음 결제일·금액, 이번 달 실적 |
+| 카드 상세 `/cards/:id` | 카드 정보·정산 일정, 청구서별 결제 예정 금액, 실적·혜택, 카드 거래 |
+| 카드별 내역 `/card-transactions` | 카드별 월 이용 내역과 혜택액 (이용월/결제월 기준) |
+| 은행 잔고 `/accounts` | 계좌, 잔고 기록과 이력, 여유자금 포함 여부 |
+| 지출 계획 `/plan` | 카테고리 예산, 월 수입·배분, 반복 지출 규칙 |
 | 설정 `/settings` | 장부, 카드 외 결제수단, 자동 입력 API 토큰과 사용법 |
+
+화면별 구성, URL 파라미터, 쓰는 API는 [web/README.md](web/README.md#화면-명세)에 있습니다.
 
 ## 빠른 시작
 
@@ -38,7 +43,8 @@ cd ../server
 cargo run              # http://127.0.0.1:8000  (GraphQL 탐색기: /api/graphiql)
 ```
 
-개발 중에는 서버(`cargo run`)를 띄운 채로 `cd web && npm run dev` → http://127.0.0.1:5173 (Vite가 `/api`를 8000으로 넘김).
+개발 중에는 서버(`cargo run`)를 띄운 채로 `cd web && npm run dev` → http://127.0.0.1:5173 (Vite가 `/api`를 8000으로 넘김. 다른 서버로 넘기려면 `CASHBOOK_API=http://127.0.0.1:8001 npm run dev`).
+웹 타입 검사·린트: `cd web && npx tsc -b && npm run lint`.
 
 ### 스프레드시트 데이터 가져오기
 
@@ -223,6 +229,8 @@ sqlite3 server/data/cashbook.db ".backup /tmp/cashbook-e2e.db"
    CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 cargo run) &
 cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙, 토큰 권한·교차 사이트 차단 (18단계)
 ```
+
+E2E 환경 변수: `E2E_BASE_URL`(기본 `http://127.0.0.1:8001`), `E2E_PASSWORD`(기본 `e2e-pass`), `CHROME_PATH`(기본 macOS Google Chrome 경로).
 
 ## 알려진 제한
 
