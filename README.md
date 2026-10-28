@@ -7,6 +7,8 @@
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
 - **가져오기 도구**: Python + openpyxl (스프레드시트 xlsx → 정규화 JSON)
 
+서버 코드 구조·GraphQL 리졸버 위치·데이터베이스 ERD는 [server/README.md](server/README.md)에 있습니다.
+
 ## 화면
 
 | 화면 | 내용 |
@@ -200,37 +202,15 @@ GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 "전체 API" �
 
 ## GraphQL API
 
-엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 "전체 API" 토큰). 주요 항목:
+엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 "전체 API" 토큰).
+전체 스키마는 `/api/graphiql`에서 확인하세요. Query·Mutation 목록과 리졸버 위치는 [server/README.md](server/README.md#graphql-요청)에 있습니다.
 
-- 조회: `ledgers`, `categories`, `paymentMethods(cardsOnly)`, `paymentMethod(id) { statements nextPayment monthReport(month) benefits tiers }`,
-  `accounts { history }`, `transactions(filter, sort)`, `monthlySummary(month, ledgerId, averageMonths)`, `availableFunds`,
-  `cardsMonthly(month)`, `statementLines(paymentMethodId, month)`, `recurringRules`, `planItems`, `descriptionSuggestions`,
-  `suggestCategory`, `parseMessage`, `suggestedBilling(paymentDay)`, `apiTokens`, `appInfo`
-- 변경: `create/update/deleteTransaction`, `createTransactions`(일괄), `confirm/skip/restoreTransaction`, `ingestTransaction`,
-  `create/update/delete/restorePaymentMethod`(혜택·구간 포함), `create/update/deleteAccount`, `updateAccountBalance`,
-  `create/update/deleteCategory`, `create/update/deletePlanItem`, `create/update/deleteRecurringRule`, `generatePlanned`,
-  `create/update/deleteLedger`, `createApiToken`, `deleteApiToken`
-
-전체 스키마는 `/api/graphiql`에서 확인하세요. 그 밖의 REST: `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/health`.
+그 밖의 REST: `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/health`.
 
 ## 데이터베이스
 
-SQLite, 마이그레이션은 서버 시작 시 자동 적용 (`server/src/db/migration.rs`).
-
-| 테이블 | 내용 |
-|---|---|
-| `ledgers` | 장부 (가계부, 용돈) |
-| `categories` | 장부별 항목: 종류(지출/수입), 월 예산, 고정비, 합계 제외 |
-| `payment_methods` | 결제수단(신용/체크카드·현금·계좌이체·기타): 카드사, 끝 4자리, 별칭, 결제 계좌, 결제일·마감일·마감월, 실적 목표, 연회비, 보관 |
-| `card_benefits` / `card_tiers` | 카드 혜택 항목(혜택률·최소결제·건당 최대·월 한도·통합한도 포함·실적 제외) / 전월실적 구간별 한도 |
-| `accounts` / `account_balances` | 은행 계좌와 잔고(기준일), 잔고 기록 이력 |
-| `transactions` | 거래: 장부, 날짜, 금액, 항목, 결제수단, 내용, 메모, 구성원, 상태(확정/예정/건너뜀), 할부, 실적 제외, 반복 규칙·대상 월, 출처(직접/가져오기/자동/반복), 중복 방지 키, 원문 |
-| `transaction_benefits` | 거래에 지정한 카드 혜택 |
-| `recurring_rules` | 반복 지출/수입 규칙 (매월 N일, N개월마다, 시작~종료 월, 매칭 키워드) |
-| `plan_items` | 지출계획 고정 항목 (수입·배분·구성원 용돈) |
-| `api_tokens` | 자동 입력 토큰 (SHA-256 해시만 저장) |
-
-금액은 원 단위 정수(`i64`). 지출 카테고리는 양수=지출·음수=환불, 수입 카테고리는 양수=수입.
+SQLite(`server/data/cashbook.db`)이며 마이그레이션은 서버 시작 시 자동 적용됩니다.
+테이블 관계(ERD), 외래 키·제약, enum 값, 금액 부호 규칙은 [server/README.md](server/README.md#데이터베이스)에 있습니다.
 
 ## 테스트
 
