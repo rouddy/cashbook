@@ -202,6 +202,7 @@ curl -X POST https://<서버>/api/ingest -H 'Authorization: Bearer cb_...' \
 처리 순서: 원문 해석 → 중복 확인 → 결제수단 찾기(이름·별칭 → 끝 4자리 → 원문의 카드 이름 → 카드사가 하나뿐일 때) →
 장부/카테고리 추천 → 같은 결제수단 ±7일 예정 항목과 금액이나 내용(또는 반복 규칙 매칭 키워드)이 맞으면 그 항목을 확정 → 아니면 새로 저장.
 같은 카드사 카드가 여러 장이면 카드번호 끝 4자리를 등록해야 문자만으로 구분됩니다.
+자동 입력된 거래에는 받은 원문을 `raw_text`로 남깁니다: `text`(또는 text/plain 본문)는 받은 그대로, `text` 없이 필드만 보내면 받은 필드를 JSON으로(`merchant`·`card`는 `description`·`paymentMethod`로). 가계부 그리드의 "자동" 표시에 마우스를 올리면 보입니다.
 
 응답 예: `{"ok": true, "created": true, "duplicate": false, "matchedPlanned": false, "warnings": [], "transaction": {"id": 8612, "amount": 12500, "category": "외식", "paymentMethod": "MG+S", ...}}`
 

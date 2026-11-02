@@ -275,7 +275,7 @@ erDiagram
         string recurring_month "null, 규칙 대상 월 YYYY-MM"
         TxSource source
         string external_id UK "null, 자동 입력 중복 방지 키"
-        string raw_text "null, 자동 입력 원문"
+        string raw_text "null, 자동 입력 원문 (text 그대로, 없으면 받은 필드 JSON)"
         timestamptz created_at
         timestamptz updated_at
     }
