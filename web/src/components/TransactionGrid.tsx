@@ -3,8 +3,9 @@ import { Fragment, useId, useRef, useState, type KeyboardEvent, type ReactNode }
 import { type RefMaps, useMutate } from '../api/hooks'
 import { CONFIRM_TX, CREATE_TX, DELETE_TX, RESTORE_TX, SKIP_TX, UPDATE_TX } from '../api/queries'
 import type { Suggestion, Transaction, TransactionPage, TxStatus } from '../api/types'
-import { parseAmount, ratePercent, shortDate, SOURCE_LABEL, weekendClass, won } from '../lib/format'
+import { parseAmount, shortDate, SOURCE_LABEL, weekendClass, won } from '../lib/format'
 import { localToday } from '../lib/month'
+import BenefitChecks from './BenefitChecks'
 import DescriptionInput from './DescriptionInput'
 import { useToast } from './Toast'
 
@@ -43,8 +44,8 @@ interface Props {
   columns: GridColumn[]
   /** 새 행 입력 (없으면 새 행을 보여주지 않는다) */
   newRow?: { date: string; ledgerId: number | null; paymentMethodId?: number | null }
-  /** 거래별 계산된 혜택 금액 (카드 화면) */
-  benefitAmounts?: Map<number, number>
+  /** 거래별 계산된 혜택액 표시 (카드 화면, `txBenefitTexts`) */
+  benefitAmounts?: Map<number, string>
   emptyText?: string
   footer?: ReactNode
 }
@@ -165,7 +166,7 @@ export default function TransactionGrid({ rows, refMaps, columns, newRow, benefi
       }
       case 'benefitAmount': {
         const v = benefitAmounts?.get(tx.id)
-        return v ? won(v) : <span className="muted">-</span>
+        return v || <span className="muted">-</span>
       }
     }
   }
@@ -536,16 +537,7 @@ function BenefitEditor({
         </div>
       ) : (
         <div className="stack" style={{ gap: 6, marginBottom: 10 }}>
-          {benefits.map((b) => (
-            <label key={b.id} className="check">
-              <input
-                type="checkbox"
-                checked={selected.includes(b.id)}
-                onChange={(e) => setSelected((s) => (e.target.checked ? [...s, b.id] : s.filter((x) => x !== b.id)))}
-              />
-              {b.name} <span className="muted small">{ratePercent(b.rate)}</span>
-            </label>
-          ))}
+          <BenefitChecks benefits={benefits} selected={selected} onChange={setSelected} />
         </div>
       )}
       <div className="row">

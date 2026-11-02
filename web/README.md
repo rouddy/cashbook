@@ -31,12 +31,14 @@ web/
     │   └── types.ts          응답 타입 (스키마에 맞춰 손으로 작성)
     ├── lib/
     │   ├── month.ts          "YYYY-MM" 계산, URL 상태 훅 useMonthParam / useQueryParam
+    │   ├── benefits.ts       카드 혜택 종류·단위 표시, 혜택률(% / N원당 1마일), 중복 적용 선택 규칙
     │   └── format.ts         금액·날짜·비율 포맷, enum 표시 이름
     ├── components/
     │   ├── Layout.tsx        사이드바 메뉴 + 본문(Outlet)
     │   ├── TransactionGrid.tsx  스프레드시트식 거래 표 (셀 편집, 새 행 입력, 확정·건너뛰기·복원)
     │   ├── DescriptionInput.tsx 내용(가맹점) 자동완성, 고르면 과거 분류를 넘겨줌
-    │   ├── CardForm.tsx      결제수단 추가/편집 (정산 일정 자동 추정, 혜택 항목, 실적 구간)
+    │   ├── CardForm.tsx      결제수단 추가/편집 (정산 일정 자동 추정, 혜택 항목·종류·중복 적용, 실적 구간)
+    │   ├── BenefitChecks.tsx 거래 혜택 선택 (중복 적용이 아닌 혜택은 하나만)
     │   ├── Common.tsx        Loading, ErrorBox, Panel, Amount, Delta, Meter, StatTile
     │   ├── LedgerTabs.tsx    장부 선택 탭 (전체 포함 여부 선택)
     │   ├── MonthPicker.tsx   이전/다음 달 이동
@@ -167,7 +169,7 @@ GraphQL 요청이 401을 받으면 `client.ts`가 `cashbook:unauthorized` 이벤
 |---|---|
 | 카드 정보 | 카드사·상품명·카드번호·결제 계좌·정산 일정·전월실적 목표·연회비·유효기간·자동입력 별칭·거래 수·메모, 삭제(보관)·복원. `?edit=1`이면 `CardForm` 편집 모드 |
 | 결제 / 결제 예정 금액 | 다음 결제, 청구서(결제월)별 이용기간·확정·예정 금액·상태(이용 전 / 이용 중 / 결제 예정 / 결제됨). 청구서를 누르면 결제분 내역 모달(할부 회차 포함) |
-| 월 실적 · 혜택 | 전월실적 목표 대비 미터, 혜택 한도 사용 미터, 혜택 항목별 사용·잔여, 다음 구간까지 남은 금액 |
+| 월 실적 · 혜택 | 전월실적 목표 대비 미터, 혜택 한도 사용 미터(통합 한도에서 차감된 혜택만), 종류별 혜택 합계(원·P·마일), 혜택 항목별 사용·잔여·한도 방식·중복 적용, 다음 구간까지 남은 금액 |
 | 카드 거래 | 그리드. 열: 날짜·금액·항목·내용·혜택·혜택액·구성원·메모. 혜택 칸에서 거래별 혜택 항목 지정 |
 
 - 데이터: `CARD_DETAIL_QUERY`, `STATEMENT_LINES_QUERY`, `TRANSACTIONS_QUERY`

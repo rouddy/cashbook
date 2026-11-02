@@ -3,7 +3,8 @@ import { useState, type FormEvent } from 'react'
 import { gql } from '../api/client'
 import { type RefMaps, useMutate } from '../api/hooks'
 import { CREATE_PM, SUGGEST_BILLING, UPDATE_PM } from '../api/queries'
-import type { PaymentKind, PaymentMethod } from '../api/types'
+import type { BenefitKind, PaymentKind, PaymentMethod } from '../api/types'
+import { BENEFIT_KIND_LABEL, BENEFIT_KINDS, BENEFIT_UNIT, rateToWonPerMile, wonPerMileToRate } from '../lib/benefits'
 import { parseAmount, percentToRate, rateToPercent, won } from '../lib/format'
 import { useToast } from './Toast'
 
@@ -12,13 +13,19 @@ const ISSUERS = ['KB국민', '신한', '현대', '삼성', '롯데', '하나', '
 interface BenefitRow {
   id?: number
   name: string
-  ratePercent: string
+  kind: BenefitKind
+  /** 할인·포인트는 %, 마일리지는 "N원당 1마일"의 N */
+  rateInput: string
   minAmount: string
   perTxMax: string
   monthlyCap: string
   sharesCardLimit: boolean
   excludesPerformance: boolean
+  stackable: boolean
 }
+
+const rateToInput = (kind: BenefitKind, rate: number) => (kind === 'MILEAGE' ? rateToWonPerMile(rate) : rateToPercent(rate))
+const inputToRate = (kind: BenefitKind, input: string) => (kind === 'MILEAGE' ? wonPerMileToRate(input) : percentToRate(input))
 
 interface TierRow {
   minSpending: string
@@ -67,12 +74,14 @@ export default function CardForm({
     (card?.benefits ?? []).map((b) => ({
       id: b.id,
       name: b.name,
-      ratePercent: rateToPercent(b.rate),
+      kind: b.kind,
+      rateInput: rateToInput(b.kind, b.rate),
       minAmount: numStr(b.minAmount),
       perTxMax: numStr(b.perTxMax),
       monthlyCap: numStr(b.monthlyCap),
       sharesCardLimit: b.sharesCardLimit,
       excludesPerformance: b.excludesPerformance,
+      stackable: b.stackable,
     })),
   )
   const [tiers, setTiers] = useState<TierRow[]>((card?.tiers ?? []).map((t) => ({ minSpending: String(t.minSpending), benefitLimit: String(t.benefitLimit) })))
@@ -115,12 +124,14 @@ export default function CardForm({
             .map((b) => ({
               id: b.id ?? null,
               name: b.name.trim(),
-              rate: percentToRate(b.ratePercent),
+              kind: b.kind,
+              rate: inputToRate(b.kind, b.rateInput),
               minAmount: amountOrNull(b.minAmount),
               perTxMax: amountOrNull(b.perTxMax),
               monthlyCap: amountOrNull(b.monthlyCap),
               sharesCardLimit: b.sharesCardLimit,
               excludesPerformance: b.excludesPerformance,
+              stackable: b.stackable,
             }))
         : [],
       tiers: isCard
@@ -134,7 +145,7 @@ export default function CardForm({
       return
     }
     // 이름만 지운 기존 혜택이 조용히 삭제되지 않게 막는다 (지우려면 행의 삭제 버튼)
-    if (isCard && benefits.some((b) => !b.name.trim() && (b.id != null || b.ratePercent.trim() !== ''))) {
+    if (isCard && benefits.some((b) => !b.name.trim() && (b.id != null || b.rateInput.trim() !== ''))) {
       toast('혜택 이름을 입력하세요. 혜택을 없애려면 그 행의 삭제를 누르세요', 'error')
       return
     }
@@ -297,11 +308,13 @@ export default function CardForm({
                 <thead>
                   <tr>
                     <th>이름</th>
-                    <th className="num">혜택률(%)</th>
+                    <th>종류</th>
+                    <th className="num">혜택률</th>
                     <th className="num">건당 최소결제</th>
                     <th className="num">건당 최대</th>
                     <th className="num">항목 월한도</th>
-                    <th>통합한도 포함</th>
+                    <th>통합한도 차감</th>
+                    <th>중복 적용</th>
                     <th>실적 제외</th>
                     <th />
                   </tr>
@@ -309,25 +322,62 @@ export default function CardForm({
                 <tbody>
                   {benefits.map((b, i) => {
                     const upd = (patch: Partial<BenefitRow>) => setBenefits((list) => list.map((x, j) => (j === i ? { ...x, ...patch } : x)))
+                    // 종류를 바꾸면 같은 혜택률을 새 단위로 다시 적는다 (% ↔ N원당 1마일)
+                    const changeKind = (kind: BenefitKind) =>
+                      upd({ kind, rateInput: b.rateInput.trim() === '' ? '' : rateToInput(kind, inputToRate(b.kind, b.rateInput)) })
                     return (
                       <tr key={b.id ?? `new-${i}`}>
                         <td>
                           <input className="input" value={b.name} onChange={(e) => upd({ name: e.target.value })} style={{ width: 130 }} />
                         </td>
                         <td>
-                          <input className="input num" inputMode="decimal" value={b.ratePercent} onChange={(e) => upd({ ratePercent: e.target.value })} style={{ width: 70 }} />
+                          <select className="input" value={b.kind} onChange={(e) => changeKind(e.target.value as BenefitKind)} aria-label="혜택 종류">
+                            {BENEFIT_KINDS.map((k) => (
+                              <option key={k} value={k}>
+                                {BENEFIT_KIND_LABEL[k]}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="nowrap">
+                          <input
+                            className="input num"
+                            inputMode="decimal"
+                            value={b.rateInput}
+                            onChange={(e) => upd({ rateInput: e.target.value })}
+                            style={{ width: 70 }}
+                            aria-label={b.kind === 'MILEAGE' ? '1마일당 이용금액' : '혜택률(%)'}
+                          />{' '}
+                          <span className="small text-2">{b.kind === 'MILEAGE' ? '원당 1마일' : '%'}</span>
                         </td>
                         <td>
                           <input className="input num" inputMode="numeric" value={b.minAmount} onChange={(e) => upd({ minAmount: e.target.value })} style={{ width: 90 }} />
                         </td>
                         <td>
-                          <input className="input num" inputMode="numeric" value={b.perTxMax} onChange={(e) => upd({ perTxMax: e.target.value })} style={{ width: 80 }} />
+                          <input
+                            className="input num"
+                            inputMode="numeric"
+                            value={b.perTxMax}
+                            onChange={(e) => upd({ perTxMax: e.target.value })}
+                            style={{ width: 80 }}
+                            placeholder={BENEFIT_UNIT[b.kind]}
+                          />
                         </td>
                         <td>
-                          <input className="input num" inputMode="numeric" value={b.monthlyCap} onChange={(e) => upd({ monthlyCap: e.target.value })} style={{ width: 90 }} />
+                          <input
+                            className="input num"
+                            inputMode="numeric"
+                            value={b.monthlyCap}
+                            onChange={(e) => upd({ monthlyCap: e.target.value })}
+                            style={{ width: 90 }}
+                            placeholder={BENEFIT_UNIT[b.kind]}
+                          />
                         </td>
                         <td>
-                          <input type="checkbox" checked={b.sharesCardLimit} onChange={(e) => upd({ sharesCardLimit: e.target.checked })} aria-label="통합한도 포함" />
+                          <input type="checkbox" checked={b.sharesCardLimit} onChange={(e) => upd({ sharesCardLimit: e.target.checked })} aria-label="통합한도 차감" />
+                        </td>
+                        <td>
+                          <input type="checkbox" checked={b.stackable} onChange={(e) => upd({ stackable: e.target.checked })} aria-label="다른 혜택과 중복 적용" />
                         </td>
                         <td>
                           <input type="checkbox" checked={b.excludesPerformance} onChange={(e) => upd({ excludesPerformance: e.target.checked })} aria-label="혜택받은 금액 실적 제외" />
@@ -348,11 +398,33 @@ export default function CardForm({
               className="btn sm"
               style={{ marginTop: 6 }}
               onClick={() =>
-                setBenefits((list) => [...list, { name: '', ratePercent: '', minAmount: '', perTxMax: '', monthlyCap: '', sharesCardLimit: true, excludesPerformance: false }])
+                setBenefits((list) => [
+                  ...list,
+                  {
+                    name: '',
+                    kind: 'DISCOUNT',
+                    rateInput: '',
+                    minAmount: '',
+                    perTxMax: '',
+                    monthlyCap: '',
+                    sharesCardLimit: true,
+                    excludesPerformance: false,
+                    stackable: false,
+                  },
+                ])
               }
             >
               + 혜택 추가
             </button>
+            <ul className="small text-2" style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+              <li>
+                <b>통합한도 차감</b>: 전월실적 구간 한도에서 빠지는 혜택. 끄고 항목 월한도도 비우면 한도 없이 받습니다(예: 기본 0.8% 적립).
+              </li>
+              <li>
+                <b>중복 적용</b>: 다른 혜택과 함께 받는 혜택(예: 백화점 1% + 간편결제 3%). 중복 적용이 아닌 혜택은 거래당 하나만 고릅니다.
+              </li>
+              <li>건당 최대·항목 월한도는 혜택 단위(할인 원, 포인트 P, 마일리지 마일)로 적습니다.</li>
+            </ul>
           </div>
           <div>
             <div className="row" style={{ marginBottom: 6 }}>

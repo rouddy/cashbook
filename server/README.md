@@ -220,12 +220,14 @@ erDiagram
         int id PK
         int payment_method_id FK
         string name
-        double rate "0.1 = 10%"
+        string kind "DISCOUNT/POINT/MILEAGE"
+        double rate "1원당 혜택, 0.1 = 10%, 마일리지 1/1500 = 1,500원당 1마일"
         bigint min_amount "null, 건당 최소 결제금액"
-        bigint per_tx_max "null, 건당 최대 혜택"
-        bigint monthly_cap "null, 항목별 월 한도"
-        bool shares_card_limit "통합 한도에 포함"
+        bigint per_tx_max "null, 건당 최대 혜택 (kind 단위)"
+        bigint monthly_cap "null, 항목별 월 한도 (kind 단위)"
+        bool shares_card_limit "통합 한도에서 차감, 아니고 monthly_cap도 없으면 한도 없음"
         bool excludes_performance "혜택 받은 금액은 실적 제외"
+        bool stackable "다른 혜택과 중복 적용, 아니면 거래당 하나"
         int sort_order
     }
 

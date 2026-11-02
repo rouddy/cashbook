@@ -11,6 +11,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20261023_000001_init::Migration),
             Box::new(m20261023_000002_api_token_scope::Migration),
+            Box::new(m20261102_000003_card_benefit_kind_stackable::Migration),
         ]
     }
 }
@@ -625,6 +626,49 @@ mod m20261023_000002_api_token_scope {
                     Table::alter()
                         .table(ApiTokens::Table)
                         .add_column(string(ApiTokens::Scope).default("INGEST"))
+                        .to_owned(),
+                )
+                .await
+        }
+    }
+}
+
+/// 카드 혜택 종류(할인/포인트/마일리지)와 중복 적용 여부. 기존 혜택은 할인, 중복 적용 아님.
+mod m20261102_000003_card_benefit_kind_stackable {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261102_000003_card_benefit_kind_stackable"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum CardBenefits {
+        Table,
+        Kind,
+        Stackable,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            // SQLite는 ALTER TABLE 한 번에 컬럼 하나만 추가할 수 있다.
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(CardBenefits::Table)
+                        .add_column(string(CardBenefits::Kind).default("DISCOUNT"))
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(CardBenefits::Table)
+                        .add_column(boolean(CardBenefits::Stackable).default(false))
                         .to_owned(),
                 )
                 .await

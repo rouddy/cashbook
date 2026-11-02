@@ -5,6 +5,7 @@ import { gql } from '../api/client'
 import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { CREATE_TX, INGEST, PARSE_MESSAGE_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
 import type { ParsedMessage, Suggestion, Transaction, TransactionPage, TxStatus } from '../api/types'
+import BenefitChecks from '../components/BenefitChecks'
 import { ErrorBox, Loading, Panel } from '../components/Common'
 import DescriptionInput from '../components/DescriptionInput'
 import { useToast } from '../components/Toast'
@@ -283,16 +284,7 @@ function EntryForm({ refMaps }: { refMaps: RefMaps }) {
               <div className="field">
                 {pm.name} 혜택
                 <div className="row wrap" style={{ gap: 10 }}>
-                  {pm.benefits.map((b) => (
-                    <label key={b.id} className="check">
-                      <input
-                        type="checkbox"
-                        checked={f.benefitIds.includes(b.id)}
-                        onChange={(e) => set({ benefitIds: e.target.checked ? [...f.benefitIds, b.id] : f.benefitIds.filter((x) => x !== b.id) })}
-                      />
-                      {b.name}
-                    </label>
-                  ))}
+                  <BenefitChecks benefits={pm.benefits} selected={f.benefitIds} onChange={(ids) => set({ benefitIds: ids })} />
                   <label className="check">
                     <input type="checkbox" checked={f.excludeFromPerformance} onChange={(e) => set({ excludeFromPerformance: e.target.checked })} />
                     전월실적 제외

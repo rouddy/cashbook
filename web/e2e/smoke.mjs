@@ -261,6 +261,74 @@ await step('카드별 내역: 혜택 태그 편집과 결제월 기준 보기', 
   await footer.getByText(total.toLocaleString('ko-KR')).waitFor()
 })
 
+await step('카드 혜택: 중복 적용·한도 없는 혜택·혜택 종류', async () => {
+  const created = await gql(
+    `mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id name } } }`,
+    {
+      input: {
+        name: `E2E혜택${STAMP}`,
+        kind: 'CREDIT_CARD',
+        benefits: [
+          { name: '백화점', rate: 0.01 },
+          { name: '할인점', rate: 0.01 },
+          { name: '간편결제', rate: 0.03, stackable: true },
+          { name: '기본적립', kind: 'POINT', rate: 0.001, sharesCardLimit: false },
+        ],
+        tiers: [{ minSpending: 0, benefitLimit: 3000 }],
+      },
+    },
+  )
+  const card = created.data.createPaymentMethod
+  const id = Object.fromEntries(card.benefits.map((b) => [b.name, b.id]))
+  const tx = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id } }`, {
+    input: { date: '2026-08-10', amount: 100000, paymentMethodId: card.id, description: `E2E혜택거래${STAMP}` },
+  })
+  const txId = tx.data.createTransaction.id
+  await page.goto(`${BASE}/cards/${card.id}?month=2026-08`)
+  const row = page.locator('table.sheet tbody tr', { hasText: `E2E혜택거래${STAMP}` })
+  await row.locator('button.cell-btn').nth(4).click()
+  // 중복 적용이 아닌 혜택은 하나만: 할인점을 고르면 백화점이 풀린다
+  await row.getByRole('checkbox', { name: /백화점/ }).check()
+  await row.getByRole('checkbox', { name: /할인점/ }).check()
+  assert.equal(await row.getByRole('checkbox', { name: /백화점/ }).isChecked(), false)
+  await row.getByRole('checkbox', { name: /간편결제/ }).check()
+  await row.getByRole('button', { name: '적용' }).click()
+  await row.locator('button.cell-btn', { hasText: '할인점, 간편결제' }).waitFor()
+  // 1% + 3% = 4,000원이지만 통합 한도 3,000원
+  await row.getByText('3,000', { exact: true }).waitFor()
+  const bad = await gql(`mutation($id: Int!, $ids: [Int!]) { updateTransaction(id: $id, input: { benefitIds: $ids }) { id } }`, {
+    id: txId,
+    ids: [id['백화점'], id['할인점']],
+  })
+  assert.match(bad.errors[0].message, /함께 받을 수 없습니다/)
+  // 한도 없는 포인트 적립 + 간편결제: 한도 3,000원을 다 써도 포인트 100P는 따로 받는다
+  await gql(`mutation($id: Int!, $ids: [Int!]) { updateTransaction(id: $id, input: { benefitIds: $ids }) { id } }`, {
+    id: txId,
+    ids: [id['기본적립'], id['간편결제']],
+  })
+  const report = await gql(`query($id: Int!) { paymentMethod(id: $id) { monthReport(month: "2026-08") { discountTotal pointTotal limitUsed } } }`, {
+    id: card.id,
+  })
+  assert.deepEqual(report.data.paymentMethod.monthReport, { discountTotal: 3000, pointTotal: 100, limitUsed: 3000 })
+  await page.reload()
+  await page.getByText('3,000원 · 100P').first().waitFor()
+  await page.locator('tr', { hasText: '기본적립' }).getByText('한도 없음').waitFor()
+  await page.locator('tr', { hasText: '간편결제' }).getByText('중복 적용').first().waitFor()
+  // 종류를 마일리지로 바꾸면 혜택률을 "N원당 1마일"로 다시 적는다 (0.1% → 1,000원당 1마일)
+  await page.goto(`${BASE}/cards/${card.id}?edit=1&month=2026-08`)
+  const form = page.locator('form').first()
+  const pointRow = form.locator('tbody tr').nth(3)
+  await pointRow.getByLabel('혜택 종류').selectOption('MILEAGE')
+  assert.equal(await pointRow.getByLabel('1마일당 이용금액').inputValue(), '1000')
+  await form.getByRole('button', { name: '저장' }).click()
+  await page.locator('tr', { hasText: '기본적립' }).getByText('1,000원당 1마일').waitFor()
+  const saved = await gql(`query($id: Int!) { paymentMethod(id: $id) { benefits { name kind rate stackable } } }`, { id: card.id })
+  assert.deepEqual(saved.data.paymentMethod.benefits[3], { name: '기본적립', kind: 'MILEAGE', rate: 0.001, stackable: false })
+  await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: txId })
+  const del = await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: card.id })
+  assert.equal(del.data.deletePaymentMethod.deleted, true)
+})
+
 await step('은행 잔고: 계좌 추가 → 잔고 기록 → 이력', async () => {
   await page.goto(`${BASE}/accounts`)
   await page.getByRole('button', { name: '+ 계좌 추가' }).click()

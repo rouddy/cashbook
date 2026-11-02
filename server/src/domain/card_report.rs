@@ -7,7 +7,11 @@ use async_graphql::SimpleObject;
 use super::benefits::{self, BenefitRule, CardTx, Tier};
 use super::dates::YearMonth;
 use super::summary::outflow;
-use crate::entity::{card_benefit, card_tier, category, enums::TxStatus, payment_method, transaction};
+use crate::entity::{
+    card_benefit, card_tier, category,
+    enums::{BenefitKind, TxStatus},
+    payment_method, transaction,
+};
 
 #[derive(SimpleObject, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TierInfo {
@@ -25,17 +29,19 @@ impl From<Tier> for TierInfo {
 pub struct BenefitUsage {
     pub card_benefit_id: i32,
     pub name: String,
+    pub kind: BenefitKind,
     pub rate: f64,
     pub monthly_cap: Option<i64>,
     pub shares_card_limit: bool,
+    pub stackable: bool,
     /// 이 혜택이 붙은 이용금액
     pub spending: i64,
     pub count: i32,
-    /// 한도 적용 전 혜택
+    /// 한도 적용 전 혜택 (`kind` 단위)
     pub raw: i64,
-    /// 한도 적용 후 혜택
+    /// 한도 적용 후 혜택 (`kind` 단위)
     pub amount: i64,
-    /// 더 받을 수 있는 혜택 (없으면 제한 없음)
+    /// 더 받을 수 있는 혜택 (`kind` 단위, 없으면 제한 없음)
     pub remaining: Option<i64>,
     /// 남은 혜택을 다 받으려면 더 써야 하는 금액
     pub spend_to_max: Option<i64>,
@@ -44,6 +50,8 @@ pub struct BenefitUsage {
 #[derive(SimpleObject, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxBenefitAmount {
     pub transaction_id: i32,
+    pub kind: BenefitKind,
+    /// `kind` 단위 (원·P·마일)
     pub amount: i64,
 }
 
@@ -70,9 +78,18 @@ pub struct CardMonthReport {
     pub achieved_tier: Option<TierInfo>,
     pub next_tier: Option<TierInfo>,
     pub remaining_to_next_tier: Option<i64>,
+    /// 원으로 셀 수 있는 혜택 합계 (할인 + 포인트)
     pub benefit_total: i64,
+    pub discount_total: i64,
+    pub point_total: i64,
+    /// 마일
+    pub mileage_total: i64,
+    /// 통합 한도에서 차감된 혜택 (한도 없는 혜택·별도 한도 혜택은 빠진다)
+    pub limit_used: i64,
+    /// 통합 한도 중 남은 금액
     pub benefit_remaining: Option<i64>,
     pub benefits: Vec<BenefitUsage>,
+    /// 거래·혜택 종류별 혜택액
     pub transaction_benefits: Vec<TxBenefitAmount>,
 }
 
@@ -129,9 +146,11 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
             BenefitUsage {
                 card_benefit_id: model.id,
                 name: model.name.clone(),
+                kind: model.kind,
                 rate: model.rate,
                 monthly_cap: model.monthly_cap,
                 shares_card_limit: model.shares_card_limit,
+                stackable: model.stackable,
                 spending: u.spending,
                 count: u.count as i32,
                 raw: u.raw,
@@ -145,10 +164,12 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
     let mut transaction_benefits: Vec<TxBenefitAmount> = outcome
         .per_tx
         .iter()
-        .map(|(id, amount)| TxBenefitAmount { transaction_id: *id, amount: *amount })
+        .map(|((id, kind), amount)| TxBenefitAmount { transaction_id: *id, kind: *kind, amount: *amount })
         .collect();
-    transaction_benefits.sort_by_key(|t| t.transaction_id);
+    transaction_benefits.sort_by_key(|t| (t.transaction_id, t.kind as u8));
 
+    let discount_total = outcome.total_of(BenefitKind::Discount);
+    let point_total = outcome.total_of(BenefitKind::Point);
     let target = input.payment_method.monthly_target.filter(|t| *t > 0);
     let next_tier = benefits::next_tier(&tiers, performance);
     CardMonthReport {
@@ -166,7 +187,11 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
         achieved_tier: benefits::tier_for(&tiers, performance).map(TierInfo::from),
         next_tier: next_tier.map(TierInfo::from),
         remaining_to_next_tier: next_tier.map(|t| t.min_spending - performance),
-        benefit_total: outcome.total,
+        benefit_total: discount_total + point_total,
+        discount_total,
+        point_total,
+        mileage_total: outcome.total_of(BenefitKind::Mileage),
+        limit_used: outcome.shared_used,
         benefit_remaining: outcome.remaining_limit(),
         benefits: usages,
         transaction_benefits,

@@ -6,6 +6,8 @@ export type CategoryKind = 'EXPENSE' | 'INCOME'
 export type PaymentKind = 'CREDIT_CARD' | 'CHECK_CARD' | 'CASH' | 'BANK_TRANSFER' | 'OTHER'
 export type AccountKind = 'CHECKING' | 'SAVINGS' | 'DEPOSIT' | 'INVESTMENT' | 'CASH' | 'OTHER'
 export type PlanItemKind = 'INCOME' | 'ALLOCATION' | 'MEMBER_ALLOWANCE'
+/** 할인 / 포인트 적립 / 마일리지 적립 */
+export type BenefitKind = 'DISCOUNT' | 'POINT' | 'MILEAGE'
 
 export interface AppInfo {
   version: string
@@ -40,12 +42,17 @@ export interface CardBenefit {
   id: number
   paymentMethodId: number
   name: string
+  kind: BenefitKind
+  /** 이용금액 1원당 혜택 (할인·포인트 0.1 = 10%, 마일리지 1/1500 = 1,500원당 1마일) */
   rate: number
   minAmount: number | null
   perTxMax: number | null
   monthlyCap: number | null
+  /** 통합 한도에서 차감. 아니고 monthlyCap도 없으면 한도 없음 */
   sharesCardLimit: boolean
   excludesPerformance: boolean
+  /** 다른 혜택과 함께 받을 수 있음. 아니면 거래당 하나만 */
+  stackable: boolean
   sortOrder: number
 }
 
@@ -274,9 +281,11 @@ export interface TierInfo {
 export interface BenefitUsage {
   cardBenefitId: number
   name: string
+  kind: BenefitKind
   rate: number
   monthlyCap: number | null
   sharesCardLimit: boolean
+  stackable: boolean
   spending: number
   count: number
   raw: number
@@ -300,10 +309,17 @@ export interface CardMonthReport {
   achievedTier: TierInfo | null
   nextTier: TierInfo | null
   remainingToNextTier: number | null
+  /** 할인 + 포인트 (원) */
   benefitTotal: number
+  discountTotal: number
+  pointTotal: number
+  mileageTotal: number
+  /** 통합 한도에서 차감된 혜택 */
+  limitUsed: number
   benefitRemaining: number | null
   benefits: BenefitUsage[]
-  transactionBenefits: { transactionId: number; amount: number }[]
+  /** 거래·혜택 종류별 혜택액 (종류의 단위) */
+  transactionBenefits: { transactionId: number; kind: BenefitKind; amount: number }[]
 }
 
 export interface StatementLine {

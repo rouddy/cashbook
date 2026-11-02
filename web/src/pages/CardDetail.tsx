@@ -10,7 +10,8 @@ import Modal from '../components/Modal'
 import MonthPicker from '../components/MonthPicker'
 import { useToast } from '../components/Toast'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
-import { longDate, PAYMENT_KIND_LABEL, ratePercent, shortDate, won } from '../lib/format'
+import { benefitRateText, benefitTotalsText, benefitValueText, separateLimitLabel, txBenefitTexts } from '../lib/benefits'
+import { longDate, PAYMENT_KIND_LABEL, shortDate, won } from '../lib/format'
 import { defaultDateFor, localToday, monthLabel, useMonthParam } from '../lib/month'
 
 type Detail = PaymentMethod & {
@@ -321,12 +322,13 @@ export function ReportPanel({ report: r, card }: { report: CardMonthReport; card
         </div>
         <div>
           <div className="stat-label">이번 달 혜택</div>
-          <div className="stat-value">{won(r.benefitTotal)}원</div>
+          <div className="stat-value">{benefitTotalsText(r)}</div>
           <div className="small text-2">
             {r.currentLimit != null ? (
               <>
                 지난달 실적 {won(r.previousPerformance)}원 → 한도 {won(r.currentLimit)}원
                 {r.benefitRemaining != null && ` · 남은 한도 ${won(r.benefitRemaining)}원`}
+                {r.benefitTotal > r.limitUsed && ` · 한도와 무관한 혜택 ${won(r.benefitTotal - r.limitUsed)}원`}
               </>
             ) : (
               `지난달 실적 ${won(r.previousPerformance)}원 · 통합 한도 없음`
@@ -334,7 +336,7 @@ export function ReportPanel({ report: r, card }: { report: CardMonthReport; card
           </div>
           {r.currentLimit != null && r.currentLimit > 0 && (
             <div style={{ marginTop: 6 }}>
-              <Meter value={r.currentLimit - (r.benefitRemaining ?? 0)} max={r.currentLimit} label="혜택 한도 사용" />
+              <Meter value={r.limitUsed} max={r.currentLimit} label="혜택 한도 사용" />
             </div>
           )}
         </div>
@@ -375,17 +377,26 @@ export function ReportPanel({ report: r, card }: { report: CardMonthReport; card
                 <tr key={b.cardBenefitId}>
                   <td>
                     {b.name}
-                    {!b.sharesCardLimit && <span className="badge" style={{ marginLeft: 6 }}>별도 한도</span>}
+                    {separateLimitLabel(b) && (
+                      <span className="badge" style={{ marginLeft: 6 }}>
+                        {separateLimitLabel(b)}
+                      </span>
+                    )}
+                    {b.stackable && (
+                      <span className="badge" style={{ marginLeft: 6 }} title="다른 혜택과 함께 받는 혜택">
+                        중복 적용
+                      </span>
+                    )}
                   </td>
-                  <td className="num">{ratePercent(b.rate)}</td>
+                  <td className="num">{benefitRateText(b)}</td>
                   <td className="num">
                     {won(b.spending)} <span className="muted small">({b.count}건)</span>
                   </td>
                   <td className="num">
-                    {won(b.amount)}
-                    {b.raw !== b.amount && <div className="small muted">한도 전 {won(b.raw)}</div>}
+                    {benefitValueText(b.kind, b.amount)}
+                    {b.raw !== b.amount && <div className="small muted">한도 전 {benefitValueText(b.kind, b.raw)}</div>}
                   </td>
-                  <td className="num">{b.remaining == null ? '제한 없음' : won(b.remaining)}</td>
+                  <td className="num">{b.remaining == null ? '제한 없음' : benefitValueText(b.kind, b.remaining)}</td>
                   <td className="num">{b.spendToMax == null ? '-' : b.spendToMax === 0 ? '한도 소진' : won(b.spendToMax)}</td>
                 </tr>
               ))}
@@ -400,7 +411,7 @@ export function ReportPanel({ report: r, card }: { report: CardMonthReport; card
 function CardMonthTransactions({ card, month, refMaps, report }: { card: PaymentMethod; month: string; refMaps: RefMaps; report: CardMonthReport }) {
   const filter = { month, paymentMethodId: card.id, statuses: ['CONFIRMED', 'PLANNED'] }
   const q = useGql<{ transactions: TransactionPage }>(['transactions', filter], TRANSACTIONS_QUERY, { filter, sort: 'DATE_ASC', limit: 2000 })
-  const benefitAmounts = new Map(report.transactionBenefits.map((t) => [t.transactionId, t.amount]))
+  const benefitAmounts = txBenefitTexts(report)
   const page = q.data?.transactions
   return (
     <Panel title={`${monthLabel(month)} ${card.name} 거래`} sub="혜택 칸을 눌러 거래별 혜택 항목을 지정하세요" flush>

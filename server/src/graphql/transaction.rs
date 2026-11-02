@@ -1,7 +1,5 @@
 //! 거래(결제 내역) API.
 
-use std::collections::HashSet;
-
 use async_graphql::{ComplexObject, Context, Enum, InputObject, MaybeUndefined, Object, Result, SimpleObject};
 use chrono::{NaiveDate, Utc};
 use sea_orm::{
@@ -11,6 +9,7 @@ use sea_orm::{
 };
 
 use super::{config, db, lookup, trim_opt, user_error};
+use crate::domain::benefits::stacking_conflict;
 use crate::domain::billing::BillingCycle;
 use crate::domain::dates::YearMonth;
 use crate::domain::ingest::{self, IngestInput, IngestOutcome, Suggestion};
@@ -338,6 +337,7 @@ async fn check_payment_method<C: ConnectionTrait>(db: &C, id: Option<i32>) -> Re
 }
 
 /// 거래의 혜택 항목을 바꾼다. 다른 카드의 혜택 id는 버린다.
+/// 중복 적용 혜택이 아닌 것을 둘 이상 고르면 거절한다.
 async fn set_benefits<C: ConnectionTrait>(db: &C, tx_id: i32, payment_method_id: Option<i32>, ids: &[i32]) -> Result<()> {
     transaction_benefit::Entity::delete_many()
         .filter(transaction_benefit::Column::TransactionId.eq(tx_id))
@@ -347,16 +347,20 @@ async fn set_benefits<C: ConnectionTrait>(db: &C, tx_id: i32, payment_method_id:
     if ids.is_empty() {
         return Ok(());
     }
-    let valid: HashSet<i32> = card_benefit::Entity::find()
+    let valid = card_benefit::Entity::find()
         .filter(card_benefit::Column::PaymentMethodId.eq(pid))
         .filter(card_benefit::Column::Id.is_in(ids.to_vec()))
         .all(db)
-        .await?
-        .into_iter()
-        .map(|b| b.id)
-        .collect();
-    for bid in ids.iter().filter(|id| valid.contains(id)).collect::<HashSet<_>>() {
-        transaction_benefit::ActiveModel { transaction_id: Set(tx_id), card_benefit_id: Set(*bid) }.insert(db).await?;
+        .await?;
+    if let Some(names) = stacking_conflict(&valid) {
+        let names: Vec<String> = names.iter().map(|n| format!("'{n}'")).collect();
+        return Err(user_error(format!(
+            "{} 혜택은 함께 받을 수 없습니다. 다른 혜택과 함께 받는 혜택이면 카드 설정에서 '중복 적용'으로 표시하세요",
+            names.join(", ")
+        )));
+    }
+    for b in valid {
+        transaction_benefit::ActiveModel { transaction_id: Set(tx_id), card_benefit_id: Set(b.id) }.insert(db).await?;
     }
     Ok(())
 }
