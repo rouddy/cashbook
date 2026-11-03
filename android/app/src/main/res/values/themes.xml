@@ -1,0 +1,5 @@
+<resources>
+    <color name="ic_launcher_background">#2A78D6</color>
+    <!-- 화면은 Compose(Material3)가 그린다. 창 배경만 정한다. -->
+    <style name="Theme.CashbookRelay" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

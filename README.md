@@ -6,11 +6,13 @@
 - **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
 - **가져오기 도구**: Python + openpyxl (스프레드시트 xlsx → 정규화 JSON)
+- **안드로이드 자동 입력 앱**: Kotlin · Jetpack Compose (카드 승인 문자·결제 앱 알림 → 자동 입력 API)
 
 | 문서 | 내용 |
 |---|---|
 | [server/README.md](server/README.md) | 서버 코드 구조, GraphQL 리졸버 위치, 데이터베이스 ERD |
 | [web/README.md](web/README.md) | 프론트엔드 코드 구조, 화면 명세 |
+| [android/README.md](android/README.md) | 안드로이드 자동 입력 앱: 문자·앱 알림 규칙, 형식 템플릿, 빌드·시험 |
 
 ## 화면
 
@@ -206,7 +208,7 @@ curl -X POST https://<서버>/api/ingest -H 'Authorization: Bearer cb_...' \
 
 응답 예: `{"ok": true, "created": true, "duplicate": false, "matchedPlanned": false, "warnings": [], "transaction": {"id": 8612, "amount": 12500, "category": "외식", "paymentMethod": "MG+S", ...}}`
 
-플랫폼별 연결: 아이폰은 단축어 자동화(메시지 수신 → "URL의 콘텐츠 가져오기"로 POST), 안드로이드는 문자 전달 앱·MacroDroid·Tasker의 HTTP 요청으로 같은 엔드포인트를 호출합니다 (설정 화면에 단계별 안내).
+플랫폼별 연결: 아이폰은 단축어 자동화(메시지 수신 → "URL의 콘텐츠 가져오기"로 POST), 안드로이드는 이 저장소의 **자동 입력 앱**([android/](android/README.md) — 보내는 번호·앱별 규칙과 문자 형식 템플릿, 장문 LMS, 재시도)이나 문자 전달 앱·MacroDroid·Tasker의 HTTP 요청으로 같은 엔드포인트를 호출합니다 (설정 화면에 단계별 안내).
 
 GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 "전체 API" 토큰): `mutation { ingestTransaction(input: {text: "..."}) { created duplicate transaction { id } } }`
 

@@ -7,6 +7,7 @@
 - `server/` — Rust 2024, Rocket 0.5 + async-graphql 7 + SeaORM 2 + SQLite. 바이너리 이름 `cashbook`.
 - `web/` — React 19 + TypeScript + Vite. `npm run build` 결과(`web/dist`)를 Rocket이 `/`에서 서빙(SPA fallback).
 - `tools/` — 스프레드시트 xlsx → `import/normalized.json` 변환(Python, openpyxl). `import/`는 개인 금융 데이터라 git 제외.
+- `android/` — 카드 승인 문자·앱 알림을 규칙(보내는 번호/앱 + 형식 템플릿)으로 골라 `/api/ingest`로 올리는 앱. Kotlin + Compose, AGP 9(내장 Kotlin, KGP는 루트에서 `kotlin-android` apply false로 버전 고정), DataStore(JSON) + WorkManager. 구조·형식 문법은 `android/README.md`.
 
 ## 명령
 
@@ -16,6 +17,7 @@ cd server && cargo run -- import <json> [--replace]
 cd server && cargo test
 cd web && npm run dev | npm run build | npx tsc -b | npx oxlint
 cd web && npm run e2e                           # 테스트용 DB 사본 서버(8001) 필요 — README 참고, 실제 DB로 돌리지 말 것
+cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug   # 에뮬레이터 시험은 android/README.md (adb reverse로 8001 사본 서버)
 ```
 
 ## 서버 구조
@@ -41,4 +43,5 @@ cd web && npm run e2e                           # 테스트용 DB 사본 서버(
 - 프론트는 뮤테이션 성공 시 `queryClient.invalidateQueries()`로 전부 다시 읽는다(`api/hooks.ts`의 `useMutate`). `run()`은 실패해도 던지지 않고 토스트 후 `undefined`를 돌려주므로, 성공해야 하는 후속 동작은 결과를 확인한다.
 - URL 쿼리 상태(`lib/month.ts`의 `useMonthParam`/`useQueryParam`)는 한 핸들러에서 여러 개를 바꿀 수 있게 항상 `window.location.search`에서 시작해 갱신한다.
 - 가계부 그리드 편집은 blur로 끝나면 포커스를 옮기지 않는다(다른 칸을 누른 사용자 입력을 뺏지 않기). Enter/Tab/Esc일 때만 다음 칸으로 이동.
+- 안드로이드 앱은 서버 `ingest`에 `text`(원문)를 항상 보내고 형식에서 뽑은 값만 명시 필드로 넣는다(서버 중복 방지는 원문 해시). 템플릿 문법을 바꾸면 `MessageFormatTest`와 `android/README.md` 표를 같이 고친다.
 - 차트 색은 dataviz 기준(이번 달=accent 파랑, 비교 맥락=회색, 2px 선, 툴팁·표 보기). 새 차트도 같은 규칙을 따른다.

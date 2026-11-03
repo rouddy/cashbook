@@ -303,9 +303,14 @@ function ApiGuide({ authEnabled }: { authEnabled: boolean }) {
           </ol>
         </div>
         <div>
-          <h3>4. 안드로이드 (문자 전달 앱 / MacroDroid / Tasker)</h3>
+          <h3>4. 안드로이드 (가계부 자동 입력 앱 / 문자 전달 앱 / MacroDroid / Tasker)</h3>
           <p className="small text-2" style={{ margin: 0 }}>
-            카드사 번호에서 온 문자를 받으면 HTTP POST로 <code>{base}/api/ingest</code>에 문자 내용(본문)을 보내도록 설정합니다. Content-Type은 <code>text/plain</code>
+            <b>가계부 자동 입력 앱</b>(저장소의 <code>android/</code>): 서버 주소에 <code>{base}</code>
+            {authEnabled ? ', API 토큰에 발급한 토큰' : ''}을 넣고, 카드사 문자 번호나 결제 앱 알림을 규칙으로 등록하면 받는 즉시 올립니다
+            (문자 형식 템플릿, 장문 LMS, 재시도·기록).
+          </p>
+          <p className="small text-2" style={{ margin: 0 }}>
+            다른 앱을 쓸 때: 카드사 번호에서 온 문자를 받으면 HTTP POST로 <code>{base}/api/ingest</code>에 문자 내용(본문)을 보내도록 설정합니다. Content-Type은 <code>text/plain</code>
             {authEnabled ? ', 헤더에 Authorization: Bearer 토큰' : ''}. JSON 템플릿을 쓸 수 있으면 <code>{'{"text": "%문자내용%"}'}</code> 형태도 됩니다.
           </p>
         </div>

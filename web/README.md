@@ -219,7 +219,7 @@ GraphQL 요청이 401을 받으면 `client.ts`가 `cashbook:unauthorized` 이벤
 | 장부 | 추가·이름 변경·삭제, 기본 장부 지정 (자동 입력과 대시보드의 기본값) |
 | 카드 외 결제수단 | 현금·계좌이체 등 추가/편집(`CardForm`), 연결 계좌 지정, 삭제·복원 |
 | 자동 입력 API 토큰 | 이름·권한(자동 입력 전용 / 전체 API)으로 발급, 원문은 발급 모달에서 한 번만 표시, 폐기 |
-| 자동 입력 API 사용법 | 문자 원문 / JSON / 아이폰 단축어 / 안드로이드(문자 전달 앱·MacroDroid·Tasker) / GraphQL 단계별 안내 |
+| 자동 입력 API 사용법 | 문자 원문 / JSON / 아이폰 단축어 / 안드로이드(자동 입력 앱·문자 전달 앱·MacroDroid·Tasker) / GraphQL 단계별 안내 |
 
 - 데이터: `TOKENS_QUERY`
 - 변경: `CREATE/UPDATE/DELETE_LEDGER`, `CREATE_PM`·`UPDATE_PM`(CardForm), `DELETE_PM`, `RESTORE_PM`, `CREATE_TOKEN`, `DELETE_TOKEN`
