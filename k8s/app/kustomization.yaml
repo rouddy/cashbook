@@ -18,4 +18,4 @@ components:
 images:
   - name: cashbook-server
     newName: rouddy/cashbook
-    newTag: "0.1.0"
+    newTag: "0.1.1"
