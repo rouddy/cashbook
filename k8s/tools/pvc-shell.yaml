@@ -1,0 +1,72 @@
+# 두 PVC를 마운트하는 작업용 Pod. 웹 빌드 올리기·DB 복원·SQLite↔MySQL 복사에 쓴다 (k8s/scripts가 만들고 지운다).
+# 서버 이미지(sh, tar, sqlite3 포함)를 그대로 쓰므로 image를 서버 이미지로 바꿔서 적용한다:
+#   sed "s#image: cashbook-server#image: rouddy/cashbook:<tag>#" k8s/tools/pvc-shell.yaml | kubectl apply -f -
+#
+# PVC가 ReadWriteOnce라서 서버 Pod와 같은 노드에 떠야 마운트된다 (podAffinity).
+# Service가 고르지 않도록 component 라벨은 server가 아니다.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cashbook-pvc-shell
+  namespace: cashbook
+  labels:
+    app.kubernetes.io/name: cashbook
+    app.kubernetes.io/component: pvc-shell
+spec:
+  restartPolicy: Never
+  enableServiceLinks: false
+  automountServiceAccountToken: false
+  terminationGracePeriodSeconds: 1
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  affinity:
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: cashbook
+                app.kubernetes.io/component: server
+  containers:
+    - name: shell
+      image: cashbook-server
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "3600"]
+      # copy-db 등에서 "$DATABASE_URL"로 쓴다 (명령줄에 DB 비밀번호를 적지 않도록)
+      env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: cashbook-secret
+              key: DATABASE_URL
+              optional: true
+      volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: web
+          mountPath: /web
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 128Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: cashbook-data
+    - name: web
+      persistentVolumeClaim:
+        claimName: cashbook-web

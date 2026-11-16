@@ -1,0 +1,19 @@
+# 서버 환경 변수 (루트 README "설정" 표와 같음). 비밀번호와 DATABASE_URL은 Secret(cashbook-secret)에 둔다.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cashbook-config
+  labels:
+    app.kubernetes.io/name: cashbook
+data:
+  # 세션 쿠키 키(데이터 PVC)와 웹 빌드 PVC의 현재 릴리스
+  CASHBOOK_SECRET_FILE: /data/secret.key
+  CASHBOOK_WEB_DIR: /web/current
+  CASHBOOK_TZ: Asia/Seoul
+  CASHBOOK_PLAN_MONTHS: "2"
+  # Ingress에서 HTTPS로 끝나므로 세션 쿠키에 Secure를 붙인다
+  CASHBOOK_SECURE_COOKIE: "1"
+  # 브라우저 요청의 Origin으로 허용할 공개 주소 (앞단 프록시가 Host 헤더를 바꿔도 403이 나지 않게)
+  CASHBOOK_ALLOWED_ORIGINS: https://cashbook.ster.pe.kr
+  ROCKET_ADDRESS: 0.0.0.0
+  ROCKET_PORT: "8000"

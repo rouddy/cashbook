@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cashbook
+  labels:
+    app.kubernetes.io/name: cashbook
+    app.kubernetes.io/component: server
+spec:
+  # SQLite는 한 프로세스만 쓴다. MySQL이어도 로그인 실패 제한(메모리)·세션 키(RWO PVC) 때문에 1개로 둔다.
+  replicas: 1
+  # 새 Pod가 뜨기 전에 기존 Pod를 내린다 (같은 DB 파일을 두 Pod가 열지 않도록, RWO 볼륨 재연결)
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cashbook
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cashbook
+        app.kubernetes.io/component: server
+    spec:
+      # Service 이름(cashbook)으로 CASHBOOK_PORT 같은 변수가 주입되지 않게
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Docker Hub 저장소(rouddy/cashbook)가 비공개면 (k8s/README.md 1장)
+      # imagePullSecrets:
+      #   - name: registry-credentials
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: cashbook-server
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: cashbook-config
+          env:
+            # DB 연결 (MySQL이면 비밀번호가 들어가므로 Secret). 예:
+            #   sqlite:///data/cashbook.db?mode=rwc            (데이터 PVC의 SQLite)
+            #   mysql://사용자:비밀번호@호스트:3306/cashbook    (비밀번호의 특수문자는 %XX로)
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: cashbook-secret
+                  key: DATABASE_URL
+            # 외부(0.0.0.0)로 열려면 반드시 필요. Secret이 없으면 Pod가 시작하지 않는다.
+            - name: CASHBOOK_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cashbook-secret
+                  key: CASHBOOK_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: web
+              mountPath: /web
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          # 시작할 때 마이그레이션과 예정 거래 생성을 하므로 넉넉히 기다린다
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: cashbook-data
+        - name: web
+          persistentVolumeClaim:
+            claimName: cashbook-web
+        # SQLite 임시 파일, 백업 스크립트의 임시 사본
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi

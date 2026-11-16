@@ -13,6 +13,7 @@
 | [server/README.md](server/README.md) | 서버 코드 구조, GraphQL 리졸버 위치, 데이터베이스 ERD |
 | [web/README.md](web/README.md) | 프론트엔드 코드 구조, 화면 명세 |
 | [android/README.md](android/README.md) | 안드로이드 자동 입력 앱: 문자·앱 알림 규칙, 형식 템플릿, 빌드·시험 |
+| [k8s/README.md](k8s/README.md) | Kubernetes 배포: 서버 이미지, 웹 빌드 PVC, DB(SQLite PVC 또는 MySQL), 백업·복원 |
 
 ## 화면
 
@@ -102,6 +103,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 
 - 세션 쿠키 키는 `data/secret.key`에 자동으로 만들어 두고 재시작해도 그대로 씁니다(로그인 유지).
 - DB 백업: `sqlite3 data/cashbook.db ".backup backup-$(date +%F).db"` (서버 실행 중에도 안전).
+- Kubernetes로 배포하려면 [k8s/README.md](k8s/README.md) (서버 이미지 + 웹 빌드 PVC + SQLite PVC 또는 MySQL, `DATABASE_URL`은 Secret).
 - 반복 규칙의 예정 거래는 서버가 시작할 때와 매시간 채웁니다. 수동 실행: `./target/release/cashbook generate-planned`.
 
 ## 설정 (환경 변수)

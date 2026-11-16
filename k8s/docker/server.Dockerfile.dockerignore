@@ -1,0 +1,7 @@
+# 허용 목록: 서버 소스만 빌드 컨텍스트에 넣는다.
+# (server/data의 실제 DB, import/의 개인 금융 데이터, .env가 이미지에 들어가지 않도록)
+*
+!server/Cargo.toml
+!server/Cargo.lock
+!server/Rocket.toml
+!server/src/

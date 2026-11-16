@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cashbook
+  labels:
+    app.kubernetes.io/name: cashbook
+spec:
+  selector:
+    app.kubernetes.io/name: cashbook
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
