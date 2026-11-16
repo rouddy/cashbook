@@ -1,0 +1,17 @@
+# Traefik(k3s 기본 Ingress)용: HTTP로 온 요청을 HTTPS로 영구 리다이렉트.
+# ingress-nginx를 쓰면 k8s/app/kustomization.yaml의 components에서 이 컴포넌트를 빼면 된다
+# (ingress-nginx는 ingress.yaml의 force-ssl-redirect 주석으로 리다이렉트).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - middleware.yaml
+
+patches:
+  - target:
+      kind: Ingress
+      name: cashbook
+    patch: |-
+      - op: add
+        path: /metadata/annotations/traefik.ingress.kubernetes.io~1router.middlewares
+        value: cashbook-redirect-https@kubernetescrd

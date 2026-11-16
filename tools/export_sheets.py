@@ -108,7 +108,9 @@ CARD_BENEFITS = {
             {"name": "이동통신", "rate": 0.05, "minAmount": 10000},
             {"name": "전기차충전", "rate": 0.05, "minAmount": 10000},
             {"name": "할인점", "rate": 0.01, "minAmount": 10000},
-            {"name": "간편결제", "rate": 0.03, "minAmount": 10000},
+            # 간편결제는 다른 항목과 함께 받는다 (예: 백화점 1% + 간편결제 3%)
+            {"name": "간편결제", "rate": 0.03, "minAmount": 10000, "stackable": True},
+            # etc는 통합한도에서 차감되지 않고 한도 없이 받는다
             {"name": "etc", "rate": 0.008, "minAmount": 10000, "sharesCardLimit": False},
         ],
         "tiers": [
@@ -478,12 +480,14 @@ def build_payment_methods(transactions):
             pm["benefits"] = [
                 {
                     "name": b["name"],
+                    "kind": b.get("kind", "DISCOUNT"),
                     "rate": b["rate"],
                     "minAmount": b.get("minAmount"),
                     "perTxMax": b.get("perTxMax"),
                     "monthlyCap": b.get("monthlyCap"),
                     "sharesCardLimit": b.get("sharesCardLimit", True),
                     "excludesPerformance": b.get("excludesPerformance", False),
+                    "stackable": b.get("stackable", False),
                 }
                 for b in card["benefits"]
             ]

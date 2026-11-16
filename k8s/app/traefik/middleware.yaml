@@ -1,0 +1,12 @@
+# 이미 HTTPS인 요청은 그대로 통과한다. cert-manager의 HTTP-01 확인 요청은 별도 Ingress(더 긴 경로)라
+# 이 리다이렉트를 거치지 않는다.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+  labels:
+    app.kubernetes.io/name: cashbook
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

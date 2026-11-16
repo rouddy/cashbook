@@ -1,0 +1,90 @@
+# (선택) 웹 이미지(k8s/docker/web.Dockerfile)의 /dist를 cashbook-web PVC에 새 릴리스로 올리고
+# /web/current 링크를 바꾸는 Job. 로컬에서 npm 빌드 없이 CI/레지스트리로 배포할 때 쓴다.
+# 이름이 매번 새로 붙도록 apply가 아니라 create로 실행한다:
+#   kubectl create -f k8s/tools/web-sync-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: cashbook-web-sync-
+  namespace: cashbook
+  labels:
+    app.kubernetes.io/name: cashbook
+    app.kubernetes.io/component: web-sync
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cashbook
+        app.kubernetes.io/component: web-sync
+    spec:
+      restartPolicy: Never
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Docker Hub 저장소가 비공개면 (k8s/README.md 1장)
+      # imagePullSecrets:
+      #   - name: registry-credentials
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      # RWO PVC를 서버 Pod와 같은 노드에서 마운트
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cashbook
+                    app.kubernetes.io/component: server
+      containers:
+        - name: sync
+          # 올릴 웹 이미지 (태그를 바꿔 가며 실행)
+          image: rouddy/cashbook:web-0.1.0
+          env:
+            # 릴리스 디렉터리 이름 뒷부분 (앞에 시각이 붙어 이름순 = 시간순)
+            - name: RELEASE
+              value: "0.1.0"
+            # 현재 것을 포함해 남길 릴리스 수 (롤백용)
+            - name: KEEP_RELEASES
+              value: "3"
+          command: ["sh", "-euc"]
+          args:
+            - |
+              release="$(date -u +%Y%m%d-%H%M%S)-$RELEASE"
+              mkdir -p /web/releases
+              # 다 복사한 뒤에 이름을 바꿔야 반쯤 올라간 릴리스를 가리키지 않는다
+              cp -R /dist "/web/releases/.incoming-$release"
+              mv "/web/releases/.incoming-$release" "/web/releases/$release"
+              # 링크 교체는 rename으로 한 번에 (서버는 재시작하지 않아도 다음 요청부터 새 파일)
+              ln -sfn "releases/$release" /web/current.new
+              mv -Tf /web/current.new /web/current
+              cd /web/releases
+              ls -1 | sort -r | grep -vx "$release" | tail -n "+$KEEP_RELEASES" | xargs -r rm -rf
+              echo "current -> $(readlink /web/current)"
+              ls -1 | sort -r
+          volumeMounts:
+            - name: web
+              mountPath: /web
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: web
+          persistentVolumeClaim:
+            claimName: cashbook-web

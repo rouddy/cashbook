@@ -1,0 +1,33 @@
+# cert-manager로 Let's Encrypt 인증서를 받는 ClusterIssuer (cert-manager 설치 후 한 번 적용).
+# HTTP-01: Let's Encrypt가 http://cashbook.ster.pe.kr/.well-known/acme-challenge/... 로 확인하므로
+# 공인 IP의 80번 포트가 클러스터 Ingress 컨트롤러로 와야 한다 (README "HTTPS" 참고).
+#
+# - letsencrypt-staging: 시험용(브라우저가 신뢰하지 않는 인증서, 발급 횟수 제한 넉넉함). 설정 확인에 먼저 쓴다.
+# - letsencrypt-prod: 실제 인증서 (ingress.yaml의 cert-manager.io/cluster-issuer 기본값)
+# solver에 IngressClass를 적지 않으면 클러스터 기본 IngressClass(k3s는 traefik)로 확인용 Ingress를 만든다.
+# 만료 알림 메일을 받으려면 각 acme에 email: 을 추가한다 (선택).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress: {}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress: {}

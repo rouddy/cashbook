@@ -6,6 +6,7 @@ import type { CardMonthReport, PaymentMethod, StatementLine, TransactionPage } f
 import { ErrorBox, Loading, Meter, Panel } from '../components/Common'
 import MonthPicker from '../components/MonthPicker'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
+import { benefitTotalsText, hasBenefit, txBenefitTexts } from '../lib/benefits'
 import { shortDate, won } from '../lib/format'
 import { defaultDateFor, monthLabel, useMonthParam, useQueryParam } from '../lib/month'
 import { ReportPanel } from './CardDetail'
@@ -69,10 +70,10 @@ export default function CardTransactions() {
                     ) : (
                       <div className="small muted">실적 {won(r.performance)}</div>
                     )}
-                    {(r.benefitTotal !== 0 || r.currentLimit) && (
+                    {(hasBenefit(r) || r.currentLimit) && (
                       <div className="small text-2">
-                        혜택 {won(r.benefitTotal)}
-                        {r.currentLimit != null && ` / ${won(r.currentLimit)}`}
+                        혜택 {benefitTotalsText(r)}
+                        {r.currentLimit != null && ` · 한도 ${won(r.limitUsed)} / ${won(r.currentLimit)}`}
                       </div>
                     )}
                   </button>
@@ -123,9 +124,9 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
           rows={page.items}
           refMaps={refMaps}
           columns={['date', 'amount', 'category', 'description', 'benefits', 'benefitAmount', 'ledger', 'memo']}
-          benefitAmounts={new Map(report.transactionBenefits.map((t) => [t.transactionId, t.amount]))}
+          benefitAmounts={txBenefitTexts(report)}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
-          footer={<PageTotals page={page} extra={<span>혜택 {won(report.benefitTotal)}</span>} />}
+          footer={<PageTotals page={page} extra={<span>혜택 {benefitTotalsText(report)}</span>} />}
         />
       )}
     </Panel>

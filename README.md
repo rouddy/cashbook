@@ -3,23 +3,33 @@
 구글 스프레드시트로 쓰던 가계부(월급사용내역·용돈·카드별 시트)를 데이터베이스로 옮겨,
 지출/지출 예정, 카드 실적·혜택, 카드 결제 예정 금액, 은행 잔고 기반 여유자금을 한 화면에서 보는 서비스입니다.
 
-- **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite
+- **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite 또는 MySQL
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
 - **가져오기 도구**: Python + openpyxl (스프레드시트 xlsx → 정규화 JSON)
+- **안드로이드 자동 입력 앱**: Kotlin · Jetpack Compose (카드 승인 문자·결제 앱 알림 → 자동 입력 API)
+
+| 문서 | 내용 |
+|---|---|
+| [server/README.md](server/README.md) | 서버 코드 구조, GraphQL 리졸버 위치, 데이터베이스 ERD |
+| [web/README.md](web/README.md) | 프론트엔드 코드 구조, 화면 명세 |
+| [android/README.md](android/README.md) | 안드로이드 자동 입력 앱: 문자·앱 알림 규칙, 형식 템플릿, 빌드·시험 |
+| [k8s/README.md](k8s/README.md) | Kubernetes 배포: 서버 이미지, 웹 빌드 PVC, DB(SQLite PVC 또는 MySQL), 백업·복원 |
 
 ## 화면
 
 | 화면 | 내용 |
 |---|---|
-| 대시보드 `/` | 이번 달 소비 vs N개월 평균, 예산 대비, 일별 누적 소비 차트, 여유자금(은행 잔고 − 카드 결제 예정), 다가오는 카드 결제, 카테고리별 이번 달 vs 평균, 예정/미확정 지출, 월별 추이 |
-| 가계부 `/transactions` | 스프레드시트처럼 보는 월별 내역. 셀을 눌러 바로 수정(Enter/Tab/방향키), 맨 아래 줄에서 바로 입력, 예정 항목 확정·건너뛰기, 오른쪽에 시트와 같은 요약(항목별·결제수단별 합계, 월잔액, 구성원 용돈) |
-| 결제 입력 `/entry` | 휴대폰에서도 쓰기 쉬운 입력 폼. 가맹점 자동완성(과거 분류 자동 채움), 할부·혜택·예정, 카드 승인 문자 붙여넣기 |
-| 카드 `/cards` | 카드 목록, 추가/삭제(거래가 있으면 보관), 다음 결제일·금액, 이번 달 실적 진행 |
-| 카드 상세 `/cards/:id` | 카드 정보 편집, 정산 일정(결제일·이용기간), 청구서별 결제 예정 금액과 내역, 월별 실적·혜택·다음 구간, 카드 거래(혜택 지정) |
-| 카드별 내역 `/card-transactions` | 카드 시트처럼 카드별 월 이용 내역과 혜택액. 이용월/결제월 기준 전환 |
-| 은행 잔고 `/accounts` | 계좌 추가, 잔고 기록(기준일), 이력, 여유자금 포함 여부 |
-| 지출 계획 `/plan` | 월 수입·배분·구성원 용돈, 카테고리 예산(고정비·합계 제외 설정), 반복 지출 규칙 |
+| 대시보드 `/` | 이번 달 소비 vs 평균·예산, 여유자금, 다가오는 카드 결제, 예정 지출, 월별 추이 |
+| 가계부 `/transactions` | 스프레드시트처럼 보고 바로 고치는 월별 내역과 시트식 요약 |
+| 결제 입력 `/entry` | 휴대폰용 입력 폼, 카드 승인 문자 붙여넣기 |
+| 카드 `/cards` | 카드 목록·추가·삭제, 다음 결제일·금액, 이번 달 실적 |
+| 카드 상세 `/cards/:id` | 카드 정보·정산 일정, 청구서별 결제 예정 금액, 실적·혜택, 카드 거래 |
+| 카드별 내역 `/card-transactions` | 카드별 월 이용 내역과 혜택액 (이용월/결제월 기준) |
+| 은행 잔고 `/accounts` | 계좌, 잔고 기록과 이력, 여유자금 포함 여부 |
+| 지출 계획 `/plan` | 카테고리 예산, 월 수입·배분, 반복 지출 규칙 |
 | 설정 `/settings` | 장부, 카드 외 결제수단, 자동 입력 API 토큰과 사용법 |
+
+화면별 구성, URL 파라미터, 쓰는 API는 [web/README.md](web/README.md#화면-명세)에 있습니다.
 
 ## 빠른 시작
 
@@ -36,7 +46,8 @@ cd ../server
 cargo run              # http://127.0.0.1:8000  (GraphQL 탐색기: /api/graphiql)
 ```
 
-개발 중에는 서버(`cargo run`)를 띄운 채로 `cd web && npm run dev` → http://127.0.0.1:5173 (Vite가 `/api`를 8000으로 넘김).
+개발 중에는 서버(`cargo run`)를 띄운 채로 `cd web && npm run dev` → http://127.0.0.1:5173 (Vite가 `/api`를 8000으로 넘김. 다른 서버로 넘기려면 `CASHBOOK_API=http://127.0.0.1:8001 npm run dev`).
+웹 타입 검사·린트: `cd web && npx tsc -b && npm run lint`.
 
 ### 스프레드시트 데이터 가져오기
 
@@ -92,6 +103,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 
 - 세션 쿠키 키는 `data/secret.key`에 자동으로 만들어 두고 재시작해도 그대로 씁니다(로그인 유지).
 - DB 백업: `sqlite3 data/cashbook.db ".backup backup-$(date +%F).db"` (서버 실행 중에도 안전).
+- Kubernetes로 배포하려면 [k8s/README.md](k8s/README.md) (서버 이미지 + 웹 빌드 PVC + SQLite PVC 또는 MySQL, `DATABASE_URL`은 Secret).
 - 반복 규칙의 예정 거래는 서버가 시작할 때와 매시간 채웁니다. 수동 실행: `./target/release/cashbook generate-planned`.
 
 ## 설정 (환경 변수)
@@ -100,7 +112,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `DATABASE_URL` | `sqlite://data/cashbook.db?mode=rwc` | SQLite 파일 (실행 위치 기준) |
+| `DATABASE_URL` | `sqlite://data/cashbook.db?mode=rwc` | SQLite 파일 (실행 위치 기준) 또는 MySQL `mysql://사용자:비밀번호@호스트:3306/DB` (비밀번호 특수문자는 URL 인코딩) |
 | `CASHBOOK_PASSWORD` | (없음) | 설정하면 웹 로그인과 API 토큰 인증을 요구 |
 | `CASHBOOK_TZ` | `Asia/Seoul` | "오늘" 기준 시간대 |
 | `CASHBOOK_PLAN_MONTHS` | `2` | 반복 규칙으로 이번 달 + N개월 예정 거래 생성 |
@@ -157,6 +169,9 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 - 실적 = 해당 달(이용일 기준) 카드 이용금액 합계. `실적 제외` 표시 거래와 "혜택받은 금액은 실적 제외" 혜택이 붙은 거래는 뺍니다.
 - 이번 달 통합 혜택 한도 = 지난달 실적이 도달한 구간의 한도. 다음 구간까지 남은 금액도 보여줍니다.
 - 건별 혜택 = 이용금액 × 혜택률 (건당 최소 결제금액 미만이면 0, 건당 최대로 제한) → 항목별 월 한도 → 통합 한도를 날짜순으로 누적 적용. 환불은 그 달에 받은 혜택까지만 되돌립니다.
+- 한도 방식: `통합한도 차감`이면 전월실적 구간 한도에서 빠집니다. 끄고 항목 월한도를 넣으면 별도 한도, 둘 다 없으면 한도 없이 받습니다(예: 카드의정석 etc 0.8%). 카드 화면의 한도 사용액은 통합 한도에서 차감된 혜택만 셉니다.
+- 거래 하나에 고른 혜택은 모두 더합니다(백화점 1% + 간편결제 3% = 4%). `중복 적용`이 아닌 혜택은 거래당 하나만 고를 수 있고, 서버도 둘 이상이면 거절합니다.
+- 혜택 종류: 할인(원) / 포인트 적립(P, 1P = 1원) / 마일리지 적립(마일). 마일리지 혜택률은 "N원당 1마일"로 입력하고, 건당 최대·항목 월한도도 그 단위로 적습니다. 혜택 합계는 종류별로 따로 보여줍니다.
 - 거래에 혜택 항목을 지정해야 계산됩니다(가계부/카드별 내역의 "혜택" 칸, 결제 입력 폼). 자동 입력은 같은 가맹점의 과거 혜택 지정을 따라갑니다.
 
 ## 자동 입력 API
@@ -191,58 +206,49 @@ curl -X POST https://<서버>/api/ingest -H 'Authorization: Bearer cb_...' \
 처리 순서: 원문 해석 → 중복 확인 → 결제수단 찾기(이름·별칭 → 끝 4자리 → 원문의 카드 이름 → 카드사가 하나뿐일 때) →
 장부/카테고리 추천 → 같은 결제수단 ±7일 예정 항목과 금액이나 내용(또는 반복 규칙 매칭 키워드)이 맞으면 그 항목을 확정 → 아니면 새로 저장.
 같은 카드사 카드가 여러 장이면 카드번호 끝 4자리를 등록해야 문자만으로 구분됩니다.
+자동 입력된 거래에는 받은 원문을 `raw_text`로 남깁니다: `text`(또는 text/plain 본문)는 받은 그대로, `text` 없이 필드만 보내면 받은 필드를 JSON으로(`merchant`·`card`는 `description`·`paymentMethod`로). 가계부 그리드의 "자동" 표시에 마우스를 올리면 보입니다.
 
 응답 예: `{"ok": true, "created": true, "duplicate": false, "matchedPlanned": false, "warnings": [], "transaction": {"id": 8612, "amount": 12500, "category": "외식", "paymentMethod": "MG+S", ...}}`
 
-플랫폼별 연결: 아이폰은 단축어 자동화(메시지 수신 → "URL의 콘텐츠 가져오기"로 POST), 안드로이드는 문자 전달 앱·MacroDroid·Tasker의 HTTP 요청으로 같은 엔드포인트를 호출합니다 (설정 화면에 단계별 안내).
+플랫폼별 연결: 아이폰은 단축어 자동화(메시지 수신 → "URL의 콘텐츠 가져오기"로 POST), 안드로이드는 이 저장소의 **자동 입력 앱**([android/](android/README.md) — 보내는 번호·앱별 규칙과 문자 형식 템플릿, 장문 LMS, 재시도)이나 문자 전달 앱·MacroDroid·Tasker의 HTTP 요청으로 같은 엔드포인트를 호출합니다 (설정 화면에 단계별 안내).
 
 GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 "전체 API" 토큰): `mutation { ingestTransaction(input: {text: "..."}) { created duplicate transaction { id } } }`
 
 ## GraphQL API
 
-엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 "전체 API" 토큰). 주요 항목:
+엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 "전체 API" 토큰).
+전체 스키마는 `/api/graphiql`에서 확인하세요. Query·Mutation 목록과 리졸버 위치는 [server/README.md](server/README.md#graphql-요청)에 있습니다.
 
-- 조회: `ledgers`, `categories`, `paymentMethods(cardsOnly)`, `paymentMethod(id) { statements nextPayment monthReport(month) benefits tiers }`,
-  `accounts { history }`, `transactions(filter, sort)`, `monthlySummary(month, ledgerId, averageMonths)`, `availableFunds`,
-  `cardsMonthly(month)`, `statementLines(paymentMethodId, month)`, `recurringRules`, `planItems`, `descriptionSuggestions`,
-  `suggestCategory`, `parseMessage`, `suggestedBilling(paymentDay)`, `apiTokens`, `appInfo`
-- 변경: `create/update/deleteTransaction`, `createTransactions`(일괄), `confirm/skip/restoreTransaction`, `ingestTransaction`,
-  `create/update/delete/restorePaymentMethod`(혜택·구간 포함), `create/update/deleteAccount`, `updateAccountBalance`,
-  `create/update/deleteCategory`, `create/update/deletePlanItem`, `create/update/deleteRecurringRule`, `generatePlanned`,
-  `create/update/deleteLedger`, `createApiToken`, `deleteApiToken`
-
-전체 스키마는 `/api/graphiql`에서 확인하세요. 그 밖의 REST: `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/health`.
+그 밖의 REST: `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/health`.
 
 ## 데이터베이스
 
-SQLite, 마이그레이션은 서버 시작 시 자동 적용 (`server/src/db/migration.rs`).
+기본은 SQLite(`server/data/cashbook.db`)이고, `DATABASE_URL=mysql://...`로 MySQL 8.x도 씁니다(문자셋 utf8mb4, 정렬 `utf8mb4_bin` 권장 — SQLite와 같은 대소문자 구분·정렬).
+마이그레이션은 서버 시작 시 자동 적용되므로 빈 DB를 주면 테이블을 만듭니다.
 
-| 테이블 | 내용 |
-|---|---|
-| `ledgers` | 장부 (가계부, 용돈) |
-| `categories` | 장부별 항목: 종류(지출/수입), 월 예산, 고정비, 합계 제외 |
-| `payment_methods` | 결제수단(신용/체크카드·현금·계좌이체·기타): 카드사, 끝 4자리, 별칭, 결제 계좌, 결제일·마감일·마감월, 실적 목표, 연회비, 보관 |
-| `card_benefits` / `card_tiers` | 카드 혜택 항목(혜택률·최소결제·건당 최대·월 한도·통합한도 포함·실적 제외) / 전월실적 구간별 한도 |
-| `accounts` / `account_balances` | 은행 계좌와 잔고(기준일), 잔고 기록 이력 |
-| `transactions` | 거래: 장부, 날짜, 금액, 항목, 결제수단, 내용, 메모, 구성원, 상태(확정/예정/건너뜀), 할부, 실적 제외, 반복 규칙·대상 월, 출처(직접/가져오기/자동/반복), 중복 방지 키, 원문 |
-| `transaction_benefits` | 거래에 지정한 카드 혜택 |
-| `recurring_rules` | 반복 지출/수입 규칙 (매월 N일, N개월마다, 시작~종료 월, 매칭 키워드) |
-| `plan_items` | 지출계획 고정 항목 (수입·배분·구성원 용돈) |
-| `api_tokens` | 자동 입력 토큰 (SHA-256 해시만 저장) |
+DB 사이에 데이터를 옮길 때는 `copy-db`를 씁니다. 대상은 빈 DB여야 하고, id를 그대로 한 트랜잭션으로 옮기며 원본도 한 시점 스냅샷으로 읽습니다.
 
-금액은 원 단위 정수(`i64`). 지출 카테고리는 양수=지출·음수=환불, 수입 카테고리는 양수=수입.
+```bash
+cd server
+cargo run -- copy-db "sqlite://data/cashbook.db?mode=rwc" "mysql://cashbook:비밀번호@127.0.0.1:3306/cashbook"
+cargo run -- copy-db "mysql://cashbook:비밀번호@127.0.0.1:3306/cashbook" "sqlite:///tmp/snapshot.db?mode=rwc"   # MySQL → SQLite 사본
+```
+
+테이블 관계(ERD), 외래 키·제약, enum 값, 금액 부호 규칙은 [server/README.md](server/README.md#데이터베이스)에 있습니다.
 
 ## 테스트
 
 ```bash
-cd server && cargo test        # 정산 일정·할부·혜택·여유자금·월 요약·문자 해석·자동 입력·반복 규칙·인증 (37개)
+cd server && cargo test        # 정산 일정·할부·혜택·여유자금·월 요약·문자 해석·자동 입력·반복 규칙·인증·DB 복사 (44개)
 
 # 브라우저 E2E (시스템 Chrome + playwright-core). 반드시 테스트용 DB 사본으로 띄운 서버에 대해 실행
 sqlite3 server/data/cashbook.db ".backup /tmp/cashbook-e2e.db"
 (cd server && DATABASE_URL="sqlite:///tmp/cashbook-e2e.db?mode=rwc" CASHBOOK_PASSWORD=e2e-pass \
    CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 cargo run) &
-cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙, 토큰 권한·교차 사이트 차단 (18단계)
+cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙, 토큰 권한·교차 사이트 차단 (19단계)
 ```
+
+E2E 환경 변수: `E2E_BASE_URL`(기본 `http://127.0.0.1:8001`), `E2E_PASSWORD`(기본 `e2e-pass`), `CHROME_PATH`(기본 macOS Google Chrome 경로).
 
 ## 알려진 제한
 

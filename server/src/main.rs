@@ -4,6 +4,7 @@
 //! cashbook [serve]                        서버 실행 (기본)
 //! cashbook import <file.json> [--replace] 스프레드시트 변환 JSON 가져오기
 //! cashbook generate-planned               반복 규칙의 예정 거래 채우기
+//! cashbook copy-db <원본 URL> <대상 URL>    DB 데이터 복사 (SQLite ↔ MySQL, 대상은 빈 DB)
 //! ```
 
 mod auth;
@@ -36,7 +37,9 @@ pub struct AppState {
 const USAGE: &str = "사용법:
   cashbook [serve]                        서버 실행
   cashbook import <file.json> [--replace] 스프레드시트 변환 JSON 가져오기
-  cashbook generate-planned               반복 규칙의 예정 거래 채우기";
+  cashbook generate-planned               반복 규칙의 예정 거래 채우기
+  cashbook copy-db <원본 URL> <대상 URL>    DB 데이터 복사 (SQLite ↔ MySQL, 대상은 빈 DB)
+                                          예: copy-db sqlite://data/cashbook.db mysql://cash:pw@db:3306/cashbook";
 
 #[rocket::main]
 async fn main() {
@@ -57,6 +60,17 @@ async fn run() -> Result<(), Box<dyn Error>> {
             let db = db::connect(&config.database_url).await?;
             let n = recurring::ensure_planned(&db, config.today(), config.plan_months_ahead, None).await?;
             println!("예정 거래 {n}건을 만들었습니다");
+            Ok(())
+        }
+        Some("copy-db") => {
+            let (Some(from), Some(to)) = (args.get(1), args.get(2)) else {
+                return Err(format!("원본과 대상 DB URL을 지정하세요\n{USAGE}").into());
+            };
+            println!("복사: {} → {}", db::copy::redact(from), db::copy::redact(to));
+            for (table, n) in db::copy::run(from, to).await? {
+                println!("  {table}: {n}");
+            }
+            println!("완료");
             Ok(())
         }
         Some("-h" | "--help" | "help") => {

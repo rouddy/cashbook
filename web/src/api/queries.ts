@@ -1,6 +1,6 @@
 // GraphQL 문서. 화면마다 필요한 필드만 가져온다.
 
-export const BENEFIT_FIELDS = `id paymentMethodId name rate minAmount perTxMax monthlyCap sharesCardLimit excludesPerformance sortOrder`
+export const BENEFIT_FIELDS = `id paymentMethodId name kind rate minAmount perTxMax monthlyCap sharesCardLimit excludesPerformance stackable sortOrder`
 
 export const PAYMENT_METHOD_FIELDS = `id name kind issuer productName last4 aliases accountId paymentDay closingDay closingMonthOffset
   monthlyTarget annualFee expiresOn color memo sortOrder archived isCard billingConfigured usagePeriodLabel
@@ -56,9 +56,10 @@ export const FUNDS_QUERY = `query Funds {
 
 export const CARD_REPORT_FIELDS = `paymentMethodId month spending plannedSpending transactionCount performance projectedPerformance
   previousPerformance target remainingToTarget currentLimit achievedTier { minSpending benefitLimit }
-  nextTier { minSpending benefitLimit } remainingToNextTier benefitTotal benefitRemaining
-  benefits { cardBenefitId name rate monthlyCap sharesCardLimit spending count raw amount remaining spendToMax }
-  transactionBenefits { transactionId amount }`
+  nextTier { minSpending benefitLimit } remainingToNextTier benefitTotal discountTotal pointTotal mileageTotal
+  limitUsed benefitRemaining
+  benefits { cardBenefitId name kind rate monthlyCap sharesCardLimit stackable spending count raw amount remaining spendToMax }
+  transactionBenefits { transactionId kind amount }`
 
 export const CARDS_MONTHLY_QUERY = `query CardsMonthly($month: YearMonth!) {
   cardsMonthly(month: $month) { ${CARD_REPORT_FIELDS} }

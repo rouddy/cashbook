@@ -9,6 +9,7 @@ import LineChart from '../components/charts/LineChart'
 import { Delta, ErrorBox, Loading, Meter, Panel, StatTile } from '../components/Common'
 import LedgerTabs from '../components/LedgerTabs'
 import MonthPicker from '../components/MonthPicker'
+import { benefitTotalsText } from '../lib/benefits'
 import { compactWon, longDate, percent, shortDate, won } from '../lib/format'
 import { addDays, currentMonth, localToday, monthLabel, shortMonthLabel, useMonthParam, useQueryParam } from '../lib/month'
 
@@ -611,8 +612,12 @@ function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) 
                       )}
                     </td>
                     <td className="num">
-                      {won(r.benefitTotal)}
-                      {r.currentLimit != null && <span className="muted"> / {won(r.currentLimit)}</span>}
+                      {benefitTotalsText(r)}
+                      {r.currentLimit != null && (
+                        <div className="small muted">
+                          한도 {won(r.limitUsed)} / {won(r.currentLimit)}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )

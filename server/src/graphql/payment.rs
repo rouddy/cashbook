@@ -16,7 +16,7 @@ use crate::domain::dates::YearMonth;
 use crate::domain::funds::{CardDue, StatementInfo, statement_parts, statement_range};
 use crate::entity::{
     account, card_benefit, card_tier,
-    enums::{PaymentKind, TxStatus},
+    enums::{BenefitKind, PaymentKind, TxStatus},
     payment_method, recurring_rule, transaction,
 };
 
@@ -322,6 +322,9 @@ pub struct CardBenefitInput {
     /// 기존 혜택을 수정할 때 id
     pub id: Option<i32>,
     pub name: String,
+    #[graphql(default)]
+    pub kind: BenefitKind,
+    /// 이용금액 1원당 혜택 (할인·포인트 0.1 = 10%, 마일리지 1/1500 = 1,500원당 1마일)
     pub rate: f64,
     pub min_amount: Option<i64>,
     pub per_tx_max: Option<i64>,
@@ -330,6 +333,9 @@ pub struct CardBenefitInput {
     pub shares_card_limit: bool,
     #[graphql(default = false)]
     pub excludes_performance: bool,
+    /// 다른 혜택과 함께 받을 수 있는 혜택
+    #[graphql(default = false)]
+    pub stackable: bool,
 }
 
 #[derive(InputObject, Clone)]
@@ -440,12 +446,14 @@ async fn save_children<C: sea_orm::ConnectionTrait>(
                 None => card_benefit::ActiveModel { payment_method_id: Set(pm_id), ..Default::default() },
             };
             active.name = Set(b.name.trim().to_string());
+            active.kind = Set(b.kind);
             active.rate = Set(b.rate);
             active.min_amount = Set(b.min_amount.filter(|v| *v > 0));
             active.per_tx_max = Set(b.per_tx_max.filter(|v| *v > 0));
             active.monthly_cap = Set(b.monthly_cap.filter(|v| *v >= 0));
             active.shares_card_limit = Set(b.shares_card_limit);
             active.excludes_performance = Set(b.excludes_performance);
+            active.stackable = Set(b.stackable);
             active.sort_order = Set(i as i32);
             active.save(db).await?;
         }

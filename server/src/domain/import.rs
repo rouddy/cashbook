@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::entity::{
     account, account_balance, card_benefit, card_tier, category,
-    enums::{AccountKind, CategoryKind, PaymentKind, PlanItemKind, TxSource, TxStatus},
+    enums::{AccountKind, BenefitKind, CategoryKind, PaymentKind, PlanItemKind, TxSource, TxStatus},
     ledger, payment_method, plan_item, recurring_rule, transaction, transaction_benefit,
 };
 
@@ -59,6 +59,8 @@ pub struct ImportCategory {
 #[serde(rename_all = "camelCase")]
 pub struct ImportBenefit {
     pub name: String,
+    #[serde(default)]
+    pub kind: BenefitKind,
     pub rate: f64,
     pub min_amount: Option<i64>,
     pub per_tx_max: Option<i64>,
@@ -67,6 +69,8 @@ pub struct ImportBenefit {
     pub shares_card_limit: bool,
     #[serde(default)]
     pub excludes_performance: bool,
+    #[serde(default)]
+    pub stackable: bool,
 }
 
 fn default_true() -> bool {
@@ -285,12 +289,14 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(db: &C, data: ImportData
             let benefit = card_benefit::ActiveModel {
                 payment_method_id: Set(saved.id),
                 name: Set(b.name.clone()),
+                kind: Set(b.kind),
                 rate: Set(b.rate),
                 min_amount: Set(b.min_amount),
                 per_tx_max: Set(b.per_tx_max),
                 monthly_cap: Set(b.monthly_cap),
                 shares_card_limit: Set(b.shares_card_limit),
                 excludes_performance: Set(b.excludes_performance),
+                stackable: Set(b.stackable),
                 sort_order: Set(i as i32),
                 ..Default::default()
             }

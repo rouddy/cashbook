@@ -7,6 +7,8 @@
 //! 4. 장부/카테고리: 명시값 → 같은 가맹점의 과거 거래에서 가장 많이 쓴 분류 → 기본 장부
 //! 5. 같은 결제수단의 ±7일 예정 거래와 금액(또는 내용/키워드)이 맞으면 그 예정 거래를 확정 처리
 //! 6. 아니면 새 확정 거래를 만든다.
+//!
+//! 거래의 `raw_text`에는 받은 원문을 남긴다: `text`는 받은 그대로, `text` 없이 필드만 오면 받은 필드의 JSON.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -17,17 +19,18 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
     QuerySelect, Set, sea_query::Expr,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::sms::{self, ParsedMessage};
+use crate::db::sql;
 use crate::entity::{
     category,
     enums::{TxSource, TxStatus},
     ledger, payment_method, recurring_rule, transaction, transaction_benefit,
 };
 
-#[derive(InputObject, Deserialize, Clone, Debug, Default)]
+#[derive(InputObject, Deserialize, Serialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct IngestInput {
     /// 금액(원). 없으면 `text`에서 찾는다.
@@ -187,13 +190,17 @@ pub async fn suggest<C: ConnectionTrait>(
     if d.chars().count() < 2 {
         return Ok(None);
     }
+    let contained_in_d = format!(
+        "({}(description) >= 2 AND instr(?, description) > 0)",
+        sql::char_length(db.get_database_backend())
+    );
     let rows = transaction::Entity::find()
         .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
         .filter(
             Condition::any()
                 .add(transaction::Column::Description.eq(d))
                 .add(Expr::cust_with_values("instr(description, ?) > 0", [d]))
-                .add(Expr::cust_with_values("(length(description) >= 2 AND instr(?, description) > 0)", [d])),
+                .add(Expr::cust_with_values(contained_in_d, [d])),
         )
         .order_by_desc(transaction::Column::Date)
         .order_by_desc(transaction::Column::Id)
@@ -225,6 +232,7 @@ pub async fn suggest<C: ConnectionTrait>(
     let benefit_ids = match benefit_source {
         Some(src) => transaction_benefit::Entity::find()
             .filter(transaction_benefit::Column::TransactionId.eq(src.id))
+            .order_by_asc(transaction_benefit::Column::CardBenefitId)
             .all(db)
             .await?
             .into_iter()
@@ -315,6 +323,18 @@ async fn find_planned_match<C: ConnectionTrait>(
     Ok(best)
 }
 
+/// 거래에 남길 자동 입력 원문. 승인 문자(`text`)는 받은 그대로, 없으면 받은 필드를 JSON으로.
+fn raw_input(input: &IngestInput) -> Option<String> {
+    if let Some(t) = input.text.as_deref().filter(|t| !t.trim().is_empty()) {
+        return Some(t.to_string());
+    }
+    let mut value = serde_json::to_value(input).ok()?;
+    if let Some(fields) = value.as_object_mut() {
+        fields.retain(|_, v| !v.is_null());
+    }
+    Some(value.to_string())
+}
+
 fn hash_text(text: &str) -> String {
     let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let digest = Sha256::digest(normalized.as_bytes());
@@ -323,6 +343,7 @@ fn hash_text(text: &str) -> String {
 
 pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: NaiveDate) -> Result<IngestOutcome, IngestError> {
     let mut warnings = Vec::new();
+    let raw_text = raw_input(&input);
     let text = non_empty(input.text.as_deref()).map(str::to_string);
     let parsed = text.as_deref().map(|t| sms::parse(t, today));
     let p = parsed.clone().unwrap_or_default();
@@ -450,7 +471,7 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
                 active.installment_months = Set(installment_months);
                 active.source = Set(TxSource::Api);
                 active.external_id = Set(external_id.clone());
-                active.raw_text = Set(text.clone());
+                active.raw_text = Set(raw_text);
                 active.memo = Set(non_empty(Some(&memo)).map(str::to_string));
                 if member.is_some() {
                     active.member = Set(member.clone());
@@ -483,7 +504,7 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
         recurring_month: Set(None),
         source: Set(TxSource::Api),
         external_id: Set(external_id),
-        raw_text: Set(text),
+        raw_text: Set(raw_text),
         created_at: Set(now),
         updated_at: Set(now),
         ..Default::default()
@@ -615,9 +636,10 @@ mod tests {
     async fn sms_ingest_categorizes_and_dedupes() {
         let db = setup().await;
         insert_tx(&db, "스타벅스", 5_000, 1, 1, TxStatus::Confirmed, NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()).await;
-        let sms = "[Web발신]\n신한카드(1234)승인 홍*동 12,500원(일시불)10/23 12:34 스타벅스 누적1,234,567원";
+        let sms = "[Web발신]\n신한카드(1234)승인 홍*동 12,500원(일시불)10/23 12:34 스타벅스 누적1,234,567원\n";
         let out = ingest(&db, IngestInput { text: Some(sms.into()), ..Default::default() }, today()).await.unwrap();
         assert!(out.created);
+        assert_eq!(out.transaction.raw_text.as_deref(), Some(sms), "원문은 줄바꿈까지 그대로");
         assert_eq!(out.transaction.amount, 12_500);
         assert_eq!(out.transaction.payment_method_id, Some(1));
         assert_eq!(out.transaction.category_id, Some(1));
@@ -648,6 +670,17 @@ mod tests {
         assert_eq!(out.transaction.id, planned.id);
         assert_eq!(out.transaction.status, TxStatus::Confirmed);
         assert_eq!(out.transaction.amount, 302_590);
+        // text 없이 필드만 보내면 받은 필드를 JSON으로 남긴다 (보내지 않은 필드는 빼고)
+        let raw: serde_json::Value = serde_json::from_str(out.transaction.raw_text.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            raw,
+            serde_json::json!({
+                "amount": 302_590,
+                "description": "위례아파트관리비",
+                "paymentMethod": "알뜰교통 신한카드",
+                "date": "2026-10-24",
+            })
+        );
     }
 
     #[tokio::test]

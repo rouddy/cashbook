@@ -8,6 +8,7 @@ import CardForm from '../components/CardForm'
 import { ErrorBox, Loading, Meter } from '../components/Common'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
+import { benefitTotalsText, hasBenefit } from '../lib/benefits'
 import { PAYMENT_KIND_LABEL, shortDate, won } from '../lib/format'
 import { currentMonth } from '../lib/month'
 
@@ -116,13 +117,18 @@ export default function Cards() {
                     {r.target ? (
                       <Meter goal value={r.performance} max={r.target} label={`${c.name} 전월실적 목표 대비`} />
                     ) : null}
-                    {(r.benefitTotal !== 0 || r.currentLimit != null) && (
+                    {(hasBenefit(r) || r.currentLimit != null) && (
                       <div className="row small" style={{ marginTop: 6 }}>
                         <span className="text-2">혜택</span>
                         <span className="spacer" />
                         <span>
-                          {won(r.benefitTotal)}
-                          {r.currentLimit != null && <span className="muted"> / 한도 {won(r.currentLimit)}</span>}
+                          {benefitTotalsText(r)}
+                          {r.currentLimit != null && (
+                            <span className="muted">
+                              {' '}
+                              · 한도 {won(r.limitUsed)} / {won(r.currentLimit)}
+                            </span>
+                          )}
                         </span>
                       </div>
                     )}

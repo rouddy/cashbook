@@ -4,16 +4,20 @@
 //! - 건별 혜택 = 이용금액 × 혜택률 (건당 최소 결제금액 미만이면 0, 건당 최대 혜택으로 제한)
 //! - 항목별 월 한도(`monthly_cap`)와 카드 통합 한도(전월실적 구간, `CardTier`)를 날짜순으로 누적 적용
 //! - 전월실적 = 이번 달 이용금액 합계 (실적 제외 거래, 실적 제외 혜택을 받은 거래는 빼고)
+//! - 한 거래에 고른 혜택은 모두 더한다 (백화점 1% + 간편결제 3% = 4%). 함께 받을 수 없는 조합은
+//!   입력할 때 `stacking_conflict`로 막는다.
+//! - 혜택액은 혜택 종류의 단위(할인·포인트는 원, 마일리지는 마일)로 센다.
 
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
 
-use crate::entity::{card_benefit, card_tier};
+use crate::entity::{card_benefit, card_tier, enums::BenefitKind};
 
 #[derive(Clone, Debug)]
 pub struct BenefitRule {
     pub id: i32,
+    pub kind: BenefitKind,
     pub rate: f64,
     pub min_amount: Option<i64>,
     pub per_tx_max: Option<i64>,
@@ -26,6 +30,7 @@ impl From<&card_benefit::Model> for BenefitRule {
     fn from(m: &card_benefit::Model) -> Self {
         Self {
             id: m.id,
+            kind: m.kind,
             rate: m.rate,
             min_amount: m.min_amount,
             per_tx_max: m.per_tx_max,
@@ -103,13 +108,20 @@ pub fn limit_for(tiers: &[Tier], previous_performance: i64) -> Option<i64> {
     Some(tier_for(tiers, previous_performance).map_or(0, |t| t.benefit_limit))
 }
 
+/// 중복 적용(`stackable`)이 아닌 혜택은 거래당 하나만 받는다. 둘 이상 골랐으면 그 이름들.
+pub fn stacking_conflict(selected: &[card_benefit::Model]) -> Option<Vec<String>> {
+    let names: Vec<String> = selected.iter().filter(|b| !b.stackable).map(|b| b.name.clone()).collect();
+    (names.len() > 1).then_some(names)
+}
+
 /// 한도 적용 전 건별 혜택.
 pub fn raw_benefit(rule: &BenefitRule, amount: i64) -> i64 {
     if let Some(min) = rule.min_amount
         && amount.abs() < min {
             return 0;
         }
-    let mut v = (amount as f64 * rule.rate).trunc() as i64;
+    // 1,500 × (1/1500) = 0.999…처럼 부동소수 오차로 1이 깎이지 않게 소수 6자리에서 반올림한 뒤 버린다.
+    let mut v = ((amount as f64 * rule.rate * 1e6).round() / 1e6).trunc() as i64;
     if let Some(max) = rule.per_tx_max {
         v = v.clamp(-max.abs(), max.abs());
     }
@@ -119,6 +131,7 @@ pub fn raw_benefit(rule: &BenefitRule, amount: i64) -> i64 {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuleUsage {
     pub rule_id: i32,
+    pub kind: BenefitKind,
     /// 이 혜택이 붙은 이용금액 합계
     pub spending: i64,
     pub count: usize,
@@ -132,15 +145,18 @@ pub struct RuleUsage {
 pub struct BenefitOutcome {
     /// `rules` 순서대로
     pub per_rule: Vec<RuleUsage>,
-    /// 거래별 적용 혜택
-    pub per_tx: HashMap<i32, i64>,
-    pub total: i64,
+    /// 거래·혜택 종류별 적용 혜택
+    pub per_tx: HashMap<(i32, BenefitKind), i64>,
     /// 통합 한도에 포함되는 혜택 사용액
     pub shared_used: i64,
     pub limit: Option<i64>,
 }
 
 impl BenefitOutcome {
+    pub fn total_of(&self, kind: BenefitKind) -> i64 {
+        self.per_rule.iter().filter(|u| u.kind == kind).map(|u| u.applied).sum()
+    }
+
     pub fn remaining_limit(&self) -> Option<i64> {
         self.limit.map(|l| (l - self.shared_used).max(0))
     }
@@ -164,9 +180,9 @@ pub fn compute(txs: &[CardTx], rules: &[BenefitRule], limit: Option<i64>) -> Ben
     let index: HashMap<i32, usize> = rules.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
     let mut usage: Vec<RuleUsage> = rules
         .iter()
-        .map(|r| RuleUsage { rule_id: r.id, ..Default::default() })
+        .map(|r| RuleUsage { rule_id: r.id, kind: r.kind, ..Default::default() })
         .collect();
-    let mut per_tx: HashMap<i32, i64> = HashMap::new();
+    let mut per_tx: HashMap<(i32, BenefitKind), i64> = HashMap::new();
     let mut shared_used = 0i64;
     for tx in ordered {
         for bid in &tx.benefit_ids {
@@ -196,16 +212,25 @@ pub fn compute(txs: &[CardTx], rules: &[BenefitRule], limit: Option<i64>) -> Ben
             if rule.shares_card_limit {
                 shared_used += applied;
             }
-            *per_tx.entry(tx.id).or_default() += applied;
+            *per_tx.entry((tx.id, rule.kind)).or_default() += applied;
         }
     }
-    let total = usage.iter().map(|u| u.applied).sum();
-    BenefitOutcome { per_rule: usage, per_tx, total, shared_used, limit }
+    BenefitOutcome { per_rule: usage, per_tx, shared_used, limit }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl BenefitOutcome {
+        fn total(&self) -> i64 {
+            self.per_rule.iter().map(|u| u.applied).sum()
+        }
+
+        fn tx_total(&self, tx_id: i32) -> i64 {
+            self.per_tx.iter().filter(|((id, _), _)| *id == tx_id).map(|(_, v)| v).sum()
+        }
+    }
 
     fn d(day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 8, day).unwrap()
@@ -214,6 +239,7 @@ mod tests {
     fn rule(id: i32, rate: f64) -> BenefitRule {
         BenefitRule {
             id,
+            kind: BenefitKind::Discount,
             rate,
             min_amount: None,
             per_tx_max: None,
@@ -242,10 +268,10 @@ mod tests {
         assert_eq!(limit_for(&tiers, 299_999), Some(0));
         let txs = [tx(1, 1, 10_500, &[1]), tx(2, 1, 7_900, &[1]), tx(3, 3, 66_110, &[1])];
         let out = compute(&txs, &[easy.clone()], limit);
-        assert_eq!(out.per_tx[&1], 1_050);
-        assert_eq!(out.per_tx[&2], 0);
-        assert_eq!(out.per_tx[&3], 6_611);
-        assert_eq!(out.total, 7_661);
+        assert_eq!(out.tx_total(1), 1_050);
+        assert_eq!(out.tx_total(2), 0);
+        assert_eq!(out.tx_total(3), 6_611);
+        assert_eq!(out.total(), 7_661);
         assert_eq!(out.remaining_limit(), Some(60_000 - 7_661));
         assert_eq!(out.remaining_for(&easy), Some(60_000 - 7_661));
     }
@@ -267,11 +293,11 @@ mod tests {
             tx(5, 15, 51_980, &[1]),
         ];
         let out = compute(&txs, &[mart, ev], Some(10_000));
-        assert_eq!(out.per_tx[&1], 5_000); // 5,020 → 건당 최대 5,000
-        assert_eq!(out.per_tx[&2], 2_724);
-        assert_eq!(out.per_tx[&5], 2_276); // 통합한도 1만원 중 남은 금액
-        assert_eq!(out.per_tx[&3], 15_000);
-        assert_eq!(out.per_tx[&4], 5_000); // 전기차 월 2만원 한도
+        assert_eq!(out.tx_total(1), 5_000); // 5,020 → 건당 최대 5,000
+        assert_eq!(out.tx_total(2), 2_724);
+        assert_eq!(out.tx_total(5), 2_276); // 통합한도 1만원 중 남은 금액
+        assert_eq!(out.tx_total(3), 15_000);
+        assert_eq!(out.tx_total(4), 5_000); // 전기차 월 2만원 한도
         assert_eq!(out.shared_used, 10_000);
         assert_eq!(out.remaining_limit(), Some(0));
     }
@@ -287,9 +313,9 @@ mod tests {
         let txs = [tx(1, 1, 47_510, &[1]), tx(2, 7, -24_300, &[1]), excluded, tx(4, 9, 30_000, &[])];
         assert_eq!(performance(&txs, &rules), 30_000);
         let out = compute(&txs, &[shop], None);
-        assert_eq!(out.per_tx[&1], 9_502);
-        assert_eq!(out.per_tx[&2], -4_860);
-        assert_eq!(out.total, 4_642);
+        assert_eq!(out.tx_total(1), 9_502);
+        assert_eq!(out.tx_total(2), -4_860);
+        assert_eq!(out.total(), 4_642);
     }
 
     #[test]
@@ -299,14 +325,87 @@ mod tests {
         shop.monthly_cap = Some(15_000);
         let txs = [tx(1, 1, 100_000, &[1]), tx(2, 4, -100_000, &[1])];
         let out = compute(&txs, &[shop.clone()], Some(20_000));
-        assert_eq!(out.per_tx[&1], 15_000);
-        assert_eq!(out.per_tx[&2], -15_000);
-        assert_eq!(out.total, 0);
+        assert_eq!(out.tx_total(1), 15_000);
+        assert_eq!(out.tx_total(2), -15_000);
+        assert_eq!(out.total(), 0);
         assert_eq!(out.remaining_for(&shop), Some(15_000));
         assert_eq!(out.remaining_limit(), Some(20_000));
         // 혜택이 없던 달의 환불은 혜택을 음수로 만들지 않는다
         let out = compute(&[tx(3, 2, -50_000, &[1])], &[shop], Some(20_000));
-        assert_eq!(out.total, 0);
+        assert_eq!(out.total(), 0);
+    }
+
+    #[test]
+    fn stacked_and_unlimited_benefits() {
+        // 카드의정석: 백화점 1% + 간편결제 3%(중복 적용) = 4%, etc 0.8%는 통합한도를 쓰지 않는다
+        let mut dept = rule(1, 0.01);
+        dept.min_amount = Some(10_000);
+        let mut easy = rule(2, 0.03);
+        easy.min_amount = Some(10_000);
+        let mut etc = rule(3, 0.008);
+        etc.min_amount = Some(10_000);
+        etc.shares_card_limit = false;
+        let rules = [dept, easy, etc.clone()];
+        let txs = [
+            tx(1, 1, 200_000, &[1, 2]),
+            tx(2, 2, 100_000, &[3, 2]),
+            tx(3, 3, 300_000, &[3]),
+            tx(4, 4, 50_000, &[1, 2]),
+        ];
+        let out = compute(&txs, &rules, Some(10_000));
+        assert_eq!(out.tx_total(1), 8_000); // 2,000 + 6,000
+        assert_eq!(out.tx_total(2), 2_000 + 800); // 간편결제는 남은 한도 2,000원까지
+        assert_eq!(out.tx_total(3), 2_400); // 한도를 다 써도 etc는 그대로
+        assert_eq!(out.tx_total(4), 0);
+        assert_eq!(out.shared_used, 10_000);
+        assert_eq!(out.remaining_limit(), Some(0));
+        assert_eq!(out.remaining_for(&etc), None);
+        // 전월실적 미달(한도 0)이어도 한도 없는 혜택은 받는다
+        let out = compute(&txs, &rules, Some(0));
+        assert_eq!(out.total(), 800 + 2_400);
+    }
+
+    #[test]
+    fn stacking_conflict_allows_one_exclusive() {
+        let b = |id: i32, name: &str, stackable: bool| card_benefit::Model {
+            id,
+            payment_method_id: 1,
+            name: name.into(),
+            kind: BenefitKind::Discount,
+            rate: 0.01,
+            min_amount: None,
+            per_tx_max: None,
+            monthly_cap: None,
+            shares_card_limit: true,
+            excludes_performance: false,
+            stackable,
+            sort_order: 0,
+        };
+        assert_eq!(stacking_conflict(&[b(1, "백화점", false), b(2, "간편결제", true)]), None);
+        assert_eq!(stacking_conflict(&[b(2, "간편결제", true), b(3, "해외", true)]), None);
+        assert_eq!(
+            stacking_conflict(&[b(1, "백화점", false), b(4, "할인점", false), b(2, "간편결제", true)]),
+            Some(vec!["백화점".to_string(), "할인점".to_string()])
+        );
+    }
+
+    #[test]
+    fn mileage_counts_in_miles() {
+        // 1,500원당 1마일, 월 최대 1,000마일 (통합 한도와 무관)
+        let mut mile = rule(1, 1.0 / 1500.0);
+        mile.kind = BenefitKind::Mileage;
+        mile.shares_card_limit = false;
+        mile.monthly_cap = Some(1_000);
+        let disc = rule(2, 0.29);
+        let txs = [tx(1, 1, 1_500, &[1]), tx(2, 2, 10_000, &[1]), tx(3, 3, 100, &[2]), tx(4, 4, 3_000_000, &[1])];
+        let out = compute(&txs, &[mile, disc], None);
+        assert_eq!(out.tx_total(1), 1);
+        assert_eq!(out.tx_total(2), 6);
+        assert_eq!(out.tx_total(3), 29); // 0.29 × 100 = 28.999…가 아니라 29
+        assert_eq!(out.tx_total(4), 1_000 - 7);
+        assert_eq!(out.total_of(BenefitKind::Mileage), 1_000);
+        assert_eq!(out.total_of(BenefitKind::Discount), 29);
+        assert_eq!(out.per_tx[&(2, BenefitKind::Mileage)], 6);
     }
 
     #[test]

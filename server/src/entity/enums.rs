@@ -123,6 +123,36 @@ pub enum PlanItemKind {
     MemberAllowance,
 }
 
+/// 카드 혜택 종류. 혜택액 단위가 할인·포인트는 원(1P = 1원), 마일리지는 마일이다.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    EnumIter,
+    DeriveActiveEnum,
+    async_graphql::Enum,
+    Serialize,
+    Deserialize,
+)]
+#[sea_orm(rs_type = "String", db_type = "String(StringLen::N(16))")]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum BenefitKind {
+    /// 청구 할인
+    #[default]
+    #[sea_orm(string_value = "DISCOUNT")]
+    Discount,
+    /// 포인트 적립
+    #[sea_orm(string_value = "POINT")]
+    Point,
+    /// 마일리지 적립
+    #[sea_orm(string_value = "MILEAGE")]
+    Mileage,
+}
+
 /// API 토큰 권한.
 #[derive(
     Copy, Clone, Debug, PartialEq, Eq, Hash, EnumIter, DeriveActiveEnum, async_graphql::Enum, Serialize, Deserialize,

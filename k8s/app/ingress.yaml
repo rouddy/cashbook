@@ -1,0 +1,34 @@
+# 공개 주소 https://cashbook.ster.pe.kr
+# - 인증서: cert-manager가 Let's Encrypt(HTTP-01)로 받아 Secret cashbook-tls에 넣고 갱신한다
+#   (ClusterIssuer는 k8s/setup/cluster-issuer.yaml, 처음엔 letsencrypt-staging으로 확인 후 prod)
+# - HTTP → HTTPS: Traefik은 traefik/ 컴포넌트의 Middleware, ingress-nginx는 아래 주석으로 리다이렉트
+# Host 헤더를 그대로 넘기므로 서버의 교차 사이트 차단(Origin ≠ Host → 403)을 통과한다.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cashbook
+  labels:
+    app.kubernetes.io/name: cashbook
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # ingress-nginx: HTTPS로 리다이렉트하고 요청 본문 한도를 서버 한도(1MiB)보다 크게
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "2m"
+spec:
+  # 비우면 클러스터 기본 IngressClass (k3s는 traefik). ingress-nginx면 nginx
+  # ingressClassName: traefik
+  tls:
+    - hosts:
+        - cashbook.ster.pe.kr
+      secretName: cashbook-tls
+  rules:
+    - host: cashbook.ster.pe.kr
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cashbook
+                port:
+                  name: http

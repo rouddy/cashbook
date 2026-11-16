@@ -8,7 +8,7 @@ use crate::domain::dates::today_in;
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
-    /// `DATABASE_URL` (기본: `sqlite://data/cashbook.db?mode=rwc`)
+    /// `DATABASE_URL` (기본: `sqlite://data/cashbook.db?mode=rwc`). MySQL은 `mysql://사용자:비밀번호@호스트:3306/DB`
     pub database_url: String,
     /// `CASHBOOK_PASSWORD`. 설정하면 웹 UI 로그인과 API 토큰 인증을 요구한다.
     pub password: Option<String>,
