@@ -3,7 +3,7 @@
 구글 스프레드시트로 쓰던 가계부(월급사용내역·용돈·카드별 시트)를 데이터베이스로 옮겨,
 지출/지출 예정, 카드 실적·혜택, 카드 결제 예정 금액, 은행 잔고 기반 여유자금을 한 화면에서 보는 서비스입니다.
 
-- **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite
+- **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite 또는 MySQL
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
 - **가져오기 도구**: Python + openpyxl (스프레드시트 xlsx → 정규화 JSON)
 - **안드로이드 자동 입력 앱**: Kotlin · Jetpack Compose (카드 승인 문자·결제 앱 알림 → 자동 입력 API)
@@ -110,7 +110,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `DATABASE_URL` | `sqlite://data/cashbook.db?mode=rwc` | SQLite 파일 (실행 위치 기준) |
+| `DATABASE_URL` | `sqlite://data/cashbook.db?mode=rwc` | SQLite 파일 (실행 위치 기준) 또는 MySQL `mysql://사용자:비밀번호@호스트:3306/DB` (비밀번호 특수문자는 URL 인코딩) |
 | `CASHBOOK_PASSWORD` | (없음) | 설정하면 웹 로그인과 API 토큰 인증을 요구 |
 | `CASHBOOK_TZ` | `Asia/Seoul` | "오늘" 기준 시간대 |
 | `CASHBOOK_PLAN_MONTHS` | `2` | 반복 규칙으로 이번 달 + N개월 예정 거래 생성 |
@@ -221,13 +221,23 @@ GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 "전체 API" �
 
 ## 데이터베이스
 
-SQLite(`server/data/cashbook.db`)이며 마이그레이션은 서버 시작 시 자동 적용됩니다.
+기본은 SQLite(`server/data/cashbook.db`)이고, `DATABASE_URL=mysql://...`로 MySQL 8.x도 씁니다(문자셋 utf8mb4, 정렬 `utf8mb4_bin` 권장 — SQLite와 같은 대소문자 구분·정렬).
+마이그레이션은 서버 시작 시 자동 적용되므로 빈 DB를 주면 테이블을 만듭니다.
+
+DB 사이에 데이터를 옮길 때는 `copy-db`를 씁니다. 대상은 빈 DB여야 하고, id를 그대로 한 트랜잭션으로 옮기며 원본도 한 시점 스냅샷으로 읽습니다.
+
+```bash
+cd server
+cargo run -- copy-db "sqlite://data/cashbook.db?mode=rwc" "mysql://cashbook:비밀번호@127.0.0.1:3306/cashbook"
+cargo run -- copy-db "mysql://cashbook:비밀번호@127.0.0.1:3306/cashbook" "sqlite:///tmp/snapshot.db?mode=rwc"   # MySQL → SQLite 사본
+```
+
 테이블 관계(ERD), 외래 키·제약, enum 값, 금액 부호 규칙은 [server/README.md](server/README.md#데이터베이스)에 있습니다.
 
 ## 테스트
 
 ```bash
-cd server && cargo test        # 정산 일정·할부·혜택·여유자금·월 요약·문자 해석·자동 입력·반복 규칙·인증 (40개)
+cd server && cargo test        # 정산 일정·할부·혜택·여유자금·월 요약·문자 해석·자동 입력·반복 규칙·인증·DB 복사 (44개)
 
 # 브라우저 E2E (시스템 Chrome + playwright-core). 반드시 테스트용 DB 사본으로 띄운 서버에 대해 실행
 sqlite3 server/data/cashbook.db ".backup /tmp/cashbook-e2e.db"

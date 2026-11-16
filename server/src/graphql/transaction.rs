@@ -5,10 +5,11 @@ use chrono::{NaiveDate, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, Select, Set, TransactionTrait,
-    sea_query::{Expr, Func},
+    sea_query::Expr,
 };
 
 use super::{config, db, lookup, trim_opt, user_error};
+use crate::db::sql;
 use crate::domain::benefits::stacking_conflict;
 use crate::domain::billing::BillingCycle;
 use crate::domain::dates::YearMonth;
@@ -177,7 +178,7 @@ impl TransactionQuery {
             .select_only()
             .column(transaction::Column::Status)
             .column(transaction::Column::CategoryId)
-            .column_as(Expr::from(Func::sum(Expr::col(transaction::Column::Amount))), "total")
+            .column_as(sql::sum_i64(db.get_database_backend(), Expr::col(transaction::Column::Amount)), "total")
             .group_by(transaction::Column::Status)
             .group_by(transaction::Column::CategoryId)
             .into_tuple()
@@ -234,7 +235,10 @@ impl TransactionQuery {
         }
         let descriptions: Vec<String> = select
             .group_by(transaction::Column::Description)
+            // 횟수가 같으면 최근에 쓴 것, 그다음 이름순 (DB와 관계없이 같은 결과)
             .order_by_desc(Expr::cust("count(*)"))
+            .order_by_desc(Expr::cust("max(date)"))
+            .order_by_asc(transaction::Column::Description)
             .limit(limit.min(30))
             .into_tuple()
             .all(db)

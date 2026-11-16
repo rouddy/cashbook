@@ -13,7 +13,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use async_graphql::{Context, EmptySubscription, ErrorExtensions, MergedObject, Schema, SimpleObject};
-use sea_orm::{DatabaseConnection, DbErr, EntityTrait};
+use sea_orm::{DatabaseConnection, DbErr, EntityTrait, QueryOrder};
 
 use crate::config::AppConfig;
 use crate::entity::{account as account_entity, card_benefit, card_tier, category, ledger as ledger_entity, payment_method, transaction_benefit};
@@ -157,7 +157,13 @@ impl Lookup {
     pub async fn tx_benefits(&self) -> Result<Arc<HashMap<i32, Vec<i32>>>, DbErr> {
         cached(&self.tx_benefits, || async {
             let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
-            for tb in transaction_benefit::Entity::find().all(&self.db).await? {
+            // DB마다 기본 순서가 달라(SQLite 입력순, MySQL 기본 키순) 혜택 id 순으로 고정한다
+            let rows = transaction_benefit::Entity::find()
+                .order_by_asc(transaction_benefit::Column::TransactionId)
+                .order_by_asc(transaction_benefit::Column::CardBenefitId)
+                .all(&self.db)
+                .await?;
+            for tb in rows {
                 map.entry(tb.transaction_id).or_default().push(tb.card_benefit_id);
             }
             Ok(map)

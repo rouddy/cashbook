@@ -12,6 +12,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261023_000001_init::Migration),
             Box::new(m20261023_000002_api_token_scope::Migration),
             Box::new(m20261102_000003_card_benefit_kind_stackable::Migration),
+            Box::new(m20261109_000004_mysql_text_columns::Migration),
         ]
     }
 }
@@ -672,6 +673,86 @@ mod m20261102_000003_card_benefit_kind_stackable {
                         .to_owned(),
                 )
                 .await
+        }
+    }
+}
+
+/// MySQL에서 `string()`은 varchar(255)라 긴 자동 입력 원문·메모가 들어가지 않는다. 긴 글 컬럼을 TEXT로 넓힌다.
+/// SQLite는 길이를 따지지 않으므로 아무것도 하지 않는다. (인덱스가 걸린 description·external_id는 그대로)
+mod m20261109_000004_mysql_text_columns {
+    use super::*;
+    use sea_orm::DbBackend;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261109_000004_mysql_text_columns"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum Ledgers {
+        Table,
+        Description,
+    }
+
+    #[derive(DeriveIden)]
+    enum Accounts {
+        Table,
+        Memo,
+    }
+
+    #[derive(DeriveIden)]
+    enum AccountBalances {
+        Table,
+        Memo,
+    }
+
+    #[derive(DeriveIden)]
+    enum PaymentMethods {
+        Table,
+        Aliases,
+        Memo,
+    }
+
+    #[derive(DeriveIden)]
+    enum RecurringRules {
+        Table,
+        Memo,
+        MatchKeyword,
+    }
+
+    #[derive(DeriveIden)]
+    enum Transactions {
+        Table,
+        Memo,
+        RawText,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            if manager.get_database_backend() != DbBackend::MySql {
+                return Ok(());
+            }
+            let columns: [(DynIden, DynIden); 9] = [
+                (Ledgers::Table.into_iden(), Ledgers::Description.into_iden()),
+                (Accounts::Table.into_iden(), Accounts::Memo.into_iden()),
+                (AccountBalances::Table.into_iden(), AccountBalances::Memo.into_iden()),
+                (PaymentMethods::Table.into_iden(), PaymentMethods::Aliases.into_iden()),
+                (PaymentMethods::Table.into_iden(), PaymentMethods::Memo.into_iden()),
+                (RecurringRules::Table.into_iden(), RecurringRules::Memo.into_iden()),
+                (RecurringRules::Table.into_iden(), RecurringRules::MatchKeyword.into_iden()),
+                (Transactions::Table.into_iden(), Transactions::Memo.into_iden()),
+                (Transactions::Table.into_iden(), Transactions::RawText.into_iden()),
+            ];
+            for (table, column) in columns {
+                manager
+                    .alter_table(Table::alter().table(table).modify_column(text_null(column)).to_owned())
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

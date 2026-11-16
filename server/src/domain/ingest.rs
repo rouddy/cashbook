@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::sms::{self, ParsedMessage};
+use crate::db::sql;
 use crate::entity::{
     category,
     enums::{TxSource, TxStatus},
@@ -189,13 +190,17 @@ pub async fn suggest<C: ConnectionTrait>(
     if d.chars().count() < 2 {
         return Ok(None);
     }
+    let contained_in_d = format!(
+        "({}(description) >= 2 AND instr(?, description) > 0)",
+        sql::char_length(db.get_database_backend())
+    );
     let rows = transaction::Entity::find()
         .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
         .filter(
             Condition::any()
                 .add(transaction::Column::Description.eq(d))
                 .add(Expr::cust_with_values("instr(description, ?) > 0", [d]))
-                .add(Expr::cust_with_values("(length(description) >= 2 AND instr(?, description) > 0)", [d])),
+                .add(Expr::cust_with_values(contained_in_d, [d])),
         )
         .order_by_desc(transaction::Column::Date)
         .order_by_desc(transaction::Column::Id)
@@ -227,6 +232,7 @@ pub async fn suggest<C: ConnectionTrait>(
     let benefit_ids = match benefit_source {
         Some(src) => transaction_benefit::Entity::find()
             .filter(transaction_benefit::Column::TransactionId.eq(src.id))
+            .order_by_asc(transaction_benefit::Column::CardBenefitId)
             .all(db)
             .await?
             .into_iter()

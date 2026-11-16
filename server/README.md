@@ -1,6 +1,6 @@
 # cashbook server
 
-가계부 백엔드. Rust 2024 · Rocket 0.5 · async-graphql 7 · SeaORM 2 · SQLite.
+가계부 백엔드. Rust 2024 · Rocket 0.5 · async-graphql 7 · SeaORM 2 · SQLite 또는 MySQL (`DATABASE_URL`).
 
 이 문서는 서버 코드 구조와 데이터 모델을 설명합니다. 다음 내용은 루트 README에 있습니다.
 
@@ -24,8 +24,9 @@ server/
     ├── auth.rs             비밀번호 세션·API 토큰, Auth / FullAccess 가드, Origin·Host 검사, 로그인 시도 제한
     ├── routes.rs           REST 라우트, /api 오류 catcher(JSON), SPA 서빙
     ├── db/
-    │   ├── mod.rs          연결 + 마이그레이션 자동 적용, 테스트용 인메모리 DB
-    │   └── migration.rs    손으로 쓴 마이그레이션
+    │   ├── mod.rs          연결 + 마이그레이션 자동 적용, SQLite·MySQL 차이를 감추는 SQL 조각(sql), 테스트용 인메모리 DB
+    │   ├── migration.rs    손으로 쓴 마이그레이션
+    │   └── copy.rs         copy-db: DB 사이 데이터 복사 (SQLite ↔ MySQL)
     ├── entity/             테이블당 SeaORM 엔티티 하나 (대부분 GraphQL 타입 겸용)
     │   ├── enums.rs        문자열로 저장하는 enum (DeriveActiveEnum + graphql Enum)
     │   └── *.rs            ledger, category, plan_item, payment_method, card_benefit, card_tier,
@@ -59,7 +60,7 @@ server/
 flowchart LR
     Web["웹 (React SPA)"] -->|"POST /api/graphql"| Routes
     Auto["단축어·문자 전달 앱"] -->|"POST /api/ingest"| Routes
-    CLI["cashbook import<br/>generate-planned"] --> Domain
+    CLI["cashbook import<br/>generate-planned<br/>copy-db"] --> Domain
     Timer["시작 시·매시간<br/>(main.rs)"] --> Domain
 
     subgraph server
@@ -69,7 +70,7 @@ flowchart LR
         GraphQL --> Entity
         Domain --> Entity["entity/<br/>(SeaORM)"]
     end
-    Entity --> DB[("SQLite<br/>data/cashbook.db")]
+    Entity --> DB[("SQLite data/cashbook.db<br/>또는 MySQL")]
 ```
 
 - 의존 방향은 `routes → graphql → domain → entity` 한쪽입니다. `domain/`은 `graphql/`을 참조하지 않으므로 CLI·REST·GraphQL이 같은 함수를 씁니다.
@@ -359,12 +360,22 @@ erDiagram
 |---|---|
 | `m20261023_000001_init` | 전체 테이블·외래 키·인덱스 |
 | `m20261023_000002_api_token_scope` | `api_tokens.scope` 추가 (기존 토큰은 `INGEST`) |
+| `m20261102_000003_card_benefit_kind_stackable` | `card_benefits.kind`(기본 `DISCOUNT`)·`stackable`(기본 false) 추가 |
+| `m20261109_000004_mysql_text_columns` | MySQL에서만: 긴 글 컬럼(`raw_text`, 각 `memo`, `aliases`, `match_keyword`, `ledgers.description`)을 varchar(255) → TEXT. SQLite는 기록만 |
 
 스키마를 바꿀 때:
 
 1. 기존 마이그레이션은 고치지 않고 `migration.rs`에 새 모듈을 추가해 `Migrator::migrations()`에 등록합니다.
 2. `entity/`의 모델을 맞춥니다. 타입 매핑: `i64`→`big_integer`, `NaiveDate`→`date`, `DateTimeUtc`→`timestamp_with_time_zone`, `Option<T>`→`*_null`.
 3. 이 문서의 ERD를 갱신합니다.
+4. SQLite와 MySQL에서 모두 동작해야 합니다. `string()`은 MySQL에서 varchar(255)라 긴 글은 `text`/`text_null`로 만들고,
+   인덱스가 걸린 문자열 컬럼만 `string`으로 둡니다. 컬럼 하나씩 `alter_table`합니다(SQLite 제약).
+
+쿼리를 쓸 때:
+
+- `Expr::cust`로 직접 쓰는 SQL은 두 DB에 모두 있는 함수(`instr`, `coalesce`, `count`, `max`)만 쓰고, 다른 것은 `db::sql`을 씁니다
+  (`char_length`: MySQL `LENGTH`는 바이트 수, `sum_i64`: MySQL `SUM(BIGINT)`은 DECIMAL이라 i64로 읽으려면 CAST).
+- `ORDER BY` 없는 결과 순서는 DB마다 다릅니다(SQLite 입력순, MySQL 기본 키순). 화면이나 계산에 순서가 드러나면 정렬을 명시하고, `LIMIT` 앞의 정렬은 동점까지 정합니다.
 
 ## 테스트
 
