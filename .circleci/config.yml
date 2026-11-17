@@ -1,0 +1,199 @@
+version: 2.1
+
+# master 브랜치에 푸시할 때만 세 갈래를 병렬로 돌린다 (다른 브랜치·git 태그 푸시는 워크플로 없음).
+#
+#   서버 이미지  server-image-amd64 · server-image-arm64 → server-image-manifest
+#               Docker Hub rouddy/cashbook:<version> (server/Cargo.toml, 태그 규칙은 k8s/docker/image_tag.sh).
+#               태그가 이미 있으면 빌드하지 않고 성공 — 새 이미지는 version을 올려야 나온다.
+#               다른 아키텍처를 QEMU로 컴파일하면 Rust 빌드가 매우 느려서, 아키텍처마다 그 아키텍처 머신에서
+#               빌드해 digest로만 올리고 마지막에 태그 하나(멀티 아키텍처 목록)로 묶는다.
+#   android-apk 서명한 릴리스 APK cashbook_<versionName>_<versionCode>.apk → 아티팩트 apk/
+#   web-zip     npm run build 결과(dist 안쪽) → cashbook_web_<package.json version>.zip → 아티팩트 web/
+#
+# 프로젝트 환경 변수 (Project Settings → Environment Variables)
+#   DOCKERHUB_USERNAME, DOCKERHUB_TOKEN   Docker Hub 계정과 Read & Write 액세스 토큰
+#   CASHBOOK_KEYSTORE_BASE64              릴리스 키스토어 파일을 base64로 (macOS: base64 -i release.jks | pbcopy)
+#   CASHBOOK_KEYSTORE_PASSWORD, CASHBOOK_KEY_ALIAS, CASHBOOK_KEY_PASSWORD
+
+executors:
+  docker-machine:
+    parameters:
+      resource_class:
+        type: string
+        default: medium
+    machine:
+      image: ubuntu-2404:current
+    resource_class: << parameters.resource_class >>
+    environment:
+      IMAGE: rouddy/cashbook
+
+commands:
+  image-tag-or-halt:
+    description: 이미지 태그를 정해 TAG로 내보내고, Docker Hub에 이미 있으면 남은 단계를 건너뛰고 성공으로 끝낸다
+    steps:
+      - run:
+          name: Docker Hub 로그인 · 태그 확인
+          command: |
+            : "${DOCKERHUB_USERNAME:?프로젝트 환경 변수 DOCKERHUB_USERNAME이 없습니다}"
+            : "${DOCKERHUB_TOKEN:?프로젝트 환경 변수 DOCKERHUB_TOKEN이 없습니다}"
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+            BRANCH="${CIRCLE_BRANCH:-}"
+            source k8s/docker/image_tag.sh
+            echo "export TAG=$TAG" >> "$BASH_ENV"
+
+            if out="$(docker buildx imagetools inspect "$IMAGE:$TAG" 2>&1)"; then
+              echo "$IMAGE:$TAG 가 이미 있습니다 — 빌드하지 않고 성공으로 끝냅니다"
+              circleci-agent step halt
+              exit 0
+            fi
+            # 네트워크·권한 오류를 "없음"으로 보고 빌드(덮어쓰기)하지 않도록 not found일 때만 진행
+            if [[ "$out" != *"not found"* ]]; then
+              echo "$out" >&2
+              exit 1
+            fi
+            echo "$IMAGE:$TAG 가 없어 빌드합니다"
+
+jobs:
+  server-image:
+    parameters:
+      arch:
+        type: enum
+        enum: [amd64, arm64]
+      resource_class:
+        type: string
+    executor:
+      name: docker-machine
+      resource_class: << parameters.resource_class >>
+    steps:
+      - checkout
+      - image-tag-or-halt
+      - run:
+          name: linux/<< parameters.arch >> 빌드 → digest로 푸시
+          no_output_timeout: 30m
+          command: |
+            docker buildx create --name cashbook --driver docker-container --use
+            docker buildx build \
+              --platform linux/<< parameters.arch >> \
+              -f k8s/docker/server.Dockerfile \
+              --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
+              --metadata-file /tmp/build-metadata.json \
+              .
+            digest="$(jq -r '."containerimage.digest"' /tmp/build-metadata.json)"
+            [[ "$digest" == sha256:* ]] || { echo "digest를 읽지 못했습니다: $digest" >&2; exit 1; }
+            mkdir -p /tmp/digests
+            echo "$digest" > /tmp/digests/<< parameters.arch >>
+            echo "linux/<< parameters.arch >> → $IMAGE@$digest"
+      - persist_to_workspace:
+          root: /tmp/digests
+          paths:
+            - << parameters.arch >>
+
+  server-image-manifest:
+    executor: docker-machine
+    steps:
+      - checkout
+      - image-tag-or-halt
+      - attach_workspace:
+          at: /tmp/digests
+      - run:
+          name: 아키텍처별 이미지를 태그 하나로 묶기
+          command: |
+            docker buildx imagetools create -t "$IMAGE:$TAG" \
+              "$IMAGE@$(cat /tmp/digests/amd64)" \
+              "$IMAGE@$(cat /tmp/digests/arm64)"
+            docker buildx imagetools inspect "$IMAGE:$TAG"
+
+  android-apk:
+    docker:
+      - image: cimg/android:2026.11.1
+    # Gradle 데몬(-Xmx2g)과 Kotlin 데몬이 같이 떠서 medium(4GB)은 빠듯하다
+    resource_class: large
+    steps:
+      - checkout
+      - run:
+          name: 서명 키스토어 준비
+          command: |
+            : "${CASHBOOK_KEYSTORE_BASE64:?프로젝트 환경 변수 CASHBOOK_KEYSTORE_BASE64가 없습니다 (서명 없는 APK는 설치할 수 없음)}"
+            : "${CASHBOOK_KEYSTORE_PASSWORD:?프로젝트 환경 변수 CASHBOOK_KEYSTORE_PASSWORD가 없습니다}"
+            : "${CASHBOOK_KEY_ALIAS:?프로젝트 환경 변수 CASHBOOK_KEY_ALIAS가 없습니다}"
+            : "${CASHBOOK_KEY_PASSWORD:?프로젝트 환경 변수 CASHBOOK_KEY_PASSWORD가 없습니다}"
+            echo "$CASHBOOK_KEYSTORE_BASE64" | base64 -d > "$HOME/release.jks"
+            echo "export CASHBOOK_KEYSTORE_FILE=$HOME/release.jks" >> "$BASH_ENV"
+      - restore_cache:
+          keys:
+            - gradle-v1-{{ checksum "android/gradle/wrapper/gradle-wrapper.properties" }}-{{ checksum "android/gradle/libs.versions.toml" }}
+            - gradle-v1-
+      - run:
+          name: 릴리스 APK 빌드
+          working_directory: android
+          command: ./gradlew --no-daemon assembleRelease
+      - save_cache:
+          key: gradle-v1-{{ checksum "android/gradle/wrapper/gradle-wrapper.properties" }}-{{ checksum "android/gradle/libs.versions.toml" }}
+          paths:
+            - ~/.gradle/caches
+            - ~/.gradle/wrapper
+      - run:
+          name: APK 모으기
+          command: |
+            mkdir -p /tmp/artifacts
+            cp android/app/build/outputs/apk/release/cashbook_*.apk /tmp/artifacts/
+            ls -l /tmp/artifacts
+      - store_artifacts:
+          path: /tmp/artifacts
+          destination: apk
+
+  web-zip:
+    docker:
+      - image: cimg/node:24.22
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - npm-v1-{{ checksum "web/package-lock.json" }}
+            - npm-v1-
+      - run:
+          name: npm ci
+          working_directory: web
+          command: npm ci
+      - save_cache:
+          key: npm-v1-{{ checksum "web/package-lock.json" }}
+          paths:
+            - ~/.npm
+      - run:
+          name: npm run build
+          working_directory: web
+          command: npm run build
+      - run:
+          name: dist 압축
+          working_directory: web
+          command: |
+            version="$(node -p "require('./package.json').version")"
+            command -v zip >/dev/null || { sudo apt-get update && sudo apt-get install -y zip; }
+            mkdir -p /tmp/artifacts
+            # dist 안쪽을 압축한다 (풀면 index.html, assets/가 바로 나온다)
+            (cd dist && zip -qr "/tmp/artifacts/cashbook_web_${version}.zip" .)
+            ls -l /tmp/artifacts
+      - store_artifacts:
+          path: /tmp/artifacts
+          destination: web
+
+workflows:
+  build:
+    when:
+      equal: [master, << pipeline.git.branch >>]
+    jobs:
+      - server-image:
+          name: server-image-amd64
+          arch: amd64
+          resource_class: medium
+      - server-image:
+          name: server-image-arm64
+          arch: arm64
+          resource_class: arm.medium
+      - server-image-manifest:
+          requires:
+            - server-image-amd64
+            - server-image-arm64
+      - android-apk
+      - web-zip

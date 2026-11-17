@@ -8,6 +8,7 @@
 - `web/` — React 19 + TypeScript + Vite. `npm run build` 결과(`web/dist`)를 Rocket이 `/`에서 서빙(SPA fallback).
 - `tools/` — 스프레드시트 xlsx → `import/normalized.json` 변환(Python, openpyxl). `import/`는 개인 금융 데이터라 git 제외.
 - `k8s/` — 서버 이미지(`docker/`, 저장소 루트 컨텍스트 + 허용 목록 dockerignore, Docker Hub `rouddy/cashbook`에 `docker/build_and_push.sh`로 amd64+arm64 푸시 — 태그는 master면 Cargo `version`, 그 밖은 `version-<short sha>`), 앱 kustomization(`app/`), 데이터 PVC(`setup/`, 앱과 분리), 웹 빌드 PVC 업로드·DB 백업/복원 스크립트. SQLite라 replicas 1 + Recreate 고정. 공개 주소 `https://cashbook.ster.pe.kr`(Traefik Ingress + cert-manager Let's Encrypt, `app/traefik` 컴포넌트가 HTTP→HTTPS). 사용법은 `k8s/README.md`.
+- `.circleci/config.yml` — master 푸시에서만 병렬: 서버 이미지(태그 규칙 `k8s/docker/image_tag.sh`, Docker Hub에 태그가 있으면 건너뜀, amd64·arm64 네이티브 빌드 → digest를 태그 하나로 묶음), 서명한 릴리스 APK, 웹 dist zip(`cashbook_web_<package.json version>.zip`)을 아티팩트로.
 - `android/` — 카드 승인 문자·앱 알림을 규칙(보내는 번호/앱 + 형식 템플릿)으로 골라 `/api/ingest`로 올리는 앱. Kotlin + Compose, AGP 9(내장 Kotlin, KGP는 루트에서 `kotlin-android` apply false로 버전 고정), DataStore(JSON) + WorkManager. 구조·형식 문법은 `android/README.md`.
 
 ## 명령

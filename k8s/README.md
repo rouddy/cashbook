@@ -22,6 +22,7 @@ Ingress (Traefik, TLS: cert-manager + Let's Encrypt → Secret cashbook-tls, HTT
 | `docker/server.Dockerfile` | 서버 이미지 (Rust 빌드 → debian slim, uid 10001, sqlite3 포함) |
 | `docker/web.Dockerfile` | (선택) 웹 빌드만 담은 이미지 — CI에서 Job으로 PVC에 올릴 때 |
 | `docker/build_and_push.sh` | 서버 이미지 빌드 → Docker Hub `rouddy/cashbook` 푸시 → `app/kustomization.yaml` 태그 변경 |
+| `docker/image_tag.sh` | 이미지 태그 규칙 (`build_and_push.sh`와 CircleCI `.circleci/config.yml`이 같이 source) |
 | `tools/pvc-shell.yaml` | 두 PVC를 마운트하는 작업용 Pod (웹 업로드·DB 복원에 스크립트가 사용) |
 | `tools/web-sync-job.yaml` | (선택) 웹 이미지 → PVC 복사 Job |
 | `scripts/deploy-web.sh` | 웹 빌드 → PVC 새 릴리스 → `current` 교체 |
@@ -80,6 +81,13 @@ TAG=0.1.0
 docker buildx build --platform linux/amd64,linux/arm64 -f k8s/docker/server.Dockerfile -t rouddy/cashbook:$TAG --push .
 # kustomization.yaml의 newTag를 $TAG로
 ```
+
+### CircleCI
+
+**master 브랜치에 푸시할 때만** `.circleci/config.yml`이 같은 규칙(`docker/image_tag.sh`)으로 태그(`<version>`)를 정해,
+Docker Hub에 그 태그가 **없을 때만** 빌드·푸시합니다(있으면 빌드하지 않고 성공 — 새 이미지는 `version`을 올려야 나옵니다). amd64·arm64를 각 아키텍처 머신에서 따로 빌드한 뒤 태그 하나로 묶으므로 QEMU보다 빠릅니다.
+`kustomization.yaml`은 바꾸지 않으니 배포할 때 `newTag`를 직접 맞춥니다. 같은 워크플로에서 안드로이드 APK와 웹 빌드 zip도
+아티팩트로 남깁니다. 필요한 프로젝트 환경 변수는 설정 파일 맨 위 주석에 있습니다(`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` 등).
 
 Docker Hub 저장소를 **비공개**로 두면 클러스터가 받을 수 있게 Read-only 액세스 토큰으로 Secret을 만들고
 `app/deployment.yaml`(웹 이미지 Job을 쓰면 `tools/web-sync-job.yaml`도)의 `imagePullSecrets` 주석을 풉니다.

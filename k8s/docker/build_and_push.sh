@@ -2,7 +2,7 @@
 # 서버 이미지를 빌드해 Docker Hub(rouddy/cashbook)에 푸시하고 k8s/app/kustomization.yaml의 태그를 바꾼다.
 # 클러스터에는 손대지 않는다 — 푸시한 뒤 kubectl apply -k k8s/app 으로 배포.
 #
-# 태그 (version = server/Cargo.toml [package]의 version)
+# 태그 (version = server/Cargo.toml [package]의 version, 규칙은 image_tag.sh — CI와 같이 쓴다)
 #   master 브랜치        <version>          예: 0.1.0
 #   그 밖 (detached 포함) <version>-<커밋>   예: 0.1.0-5ed0dae
 #
@@ -25,19 +25,8 @@ die() {
   exit 1
 }
 
-# [package] 섹션의 version (의존성 테이블의 version은 건너뛴다)
-version="$(awk -F'"' '/^\[/ { pkg = ($0 == "[package]") } pkg && /^version[[:space:]]*=/ { print $2; exit }' \
-  "$REPO_DIR/server/Cargo.toml")"
-[[ -n "$version" ]] || die "server/Cargo.toml [package]에서 version을 찾지 못했습니다"
-
-branch="$(git -C "$REPO_DIR" symbolic-ref --quiet --short HEAD || true)" # detached HEAD면 비어 있음
-sha="$(git -C "$REPO_DIR" rev-parse --short HEAD)"
-if [[ "$branch" == master ]]; then
-  TAG="$version"
-else
-  TAG="$version-$sha"
-fi
-[[ "$TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || die "Docker 태그로 쓸 수 없는 값입니다: $TAG"
+# version, branch, sha, TAG
+source "$DOCKER_DIR/image_tag.sh"
 
 if [[ -n "$(git -C "$REPO_DIR" status --porcelain -- server/Cargo.toml server/Cargo.lock server/Rocket.toml server/src \
   k8s/docker/server.Dockerfile k8s/docker/server.Dockerfile.dockerignore)" ]]; then
