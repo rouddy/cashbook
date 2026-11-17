@@ -303,6 +303,9 @@ export interface CardMonthReport {
   performance: number
   projectedPerformance: number
   previousPerformance: number
+  /** 전월실적 단계 (실적 목표 + 구간 기준 금액, 오름차순) */
+  performanceSteps: number[]
+  /** 지금 실적의 목표 단계: 아직 못 넘은 가장 낮은 단계, 다 넘었으면 마지막 단계 */
   target: number | null
   remainingToTarget: number | null
   currentLimit: number | null

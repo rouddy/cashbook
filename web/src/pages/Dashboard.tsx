@@ -6,7 +6,7 @@ import { CARDS_MONTHLY_QUERY, CONFIRM_TX, FUNDS_QUERY, SKIP_TX, SUMMARY_QUERY, T
 import type { AvailableFunds, CardMonthReport, MonthlySummary, TransactionPage } from '../api/types'
 import ColumnChart from '../components/charts/ColumnChart'
 import LineChart from '../components/charts/LineChart'
-import { Delta, ErrorBox, Loading, Meter, Panel, StatTile } from '../components/Common'
+import { Delta, ErrorBox, Loading, Meter, Panel, PerformanceMeter, StatTile } from '../components/Common'
 import LedgerTabs from '../components/LedgerTabs'
 import MonthPicker from '../components/MonthPicker'
 import { benefitTotalsText } from '../lib/benefits'
@@ -110,7 +110,7 @@ function Kpis({ s }: { s: MonthlySummary }) {
       >
         {s.budgetTotal ? (
           <div style={{ marginTop: 8 }}>
-            <Meter value={projected} max={s.budgetTotal} tick={s.spending} label="예산 대비 예정 포함 소비" />
+            <Meter value={projected} max={s.budgetTotal} ticks={[s.spending]} label="예산 대비 예정 포함 소비" />
           </div>
         ) : null}
       </StatTile>
@@ -593,7 +593,7 @@ function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) 
                       <Link to={`/cards/${r.paymentMethodId}?month=${month}`}>{pm?.name}</Link>
                     </td>
                     <td className="hide-sm">
-                      {r.target ? <Meter goal value={r.performance} max={r.target} label={`${pm?.name} 실적`} /> : <span className="muted small">목표 없음</span>}
+                      {r.target ? <PerformanceMeter report={r} label={`${pm?.name} 실적`} /> : <span className="muted small">목표 없음</span>}
                     </td>
                     <td className="num">
                       {won(r.performance)}

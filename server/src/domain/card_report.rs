@@ -70,6 +70,9 @@ pub struct CardMonthReport {
     pub projected_performance: i64,
     /// 지난 달 실적 (이번 달 혜택 한도 기준)
     pub previous_performance: i64,
+    /// 전월실적 단계: 카드의 실적 목표와 구간 기준 금액 (오름차순, 중복 없음)
+    pub performance_steps: Vec<i64>,
+    /// 지금 실적의 목표 단계: 아직 넘지 못한 가장 낮은 단계, 다 넘었으면 마지막 단계 (단계가 없으면 None)
     pub target: Option<i64>,
     pub remaining_to_target: Option<i64>,
     /// 지난 달 실적으로 정해진 이번 달 통합 혜택 한도 (None = 한도 없음)
@@ -117,6 +120,19 @@ fn card_txs(input: &CardReportInput, month: YearMonth, status: TxStatus) -> Vec<
             benefit_ids: input.tx_benefits.get(&t.id).cloned().unwrap_or_default(),
         })
         .collect()
+}
+
+/// 전월실적 단계: 실적 목표와 구간 기준 금액을 합쳐 0보다 큰 것만 오름차순으로.
+pub fn performance_steps(target: Option<i64>, tiers: &[Tier]) -> Vec<i64> {
+    let mut steps: Vec<i64> = target.into_iter().chain(tiers.iter().map(|t| t.min_spending)).filter(|s| *s > 0).collect();
+    steps.sort_unstable();
+    steps.dedup();
+    steps
+}
+
+/// `performance`가 아직 넘지 못한 가장 낮은 단계. 다 넘었으면 마지막 단계 (구간과 같이 "이상"이면 넘은 것).
+pub fn step_target(steps: &[i64], performance: i64) -> Option<i64> {
+    steps.iter().copied().find(|s| performance < *s).or(steps.last().copied())
 }
 
 pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthReport {
@@ -170,7 +186,8 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
 
     let discount_total = outcome.total_of(BenefitKind::Discount);
     let point_total = outcome.total_of(BenefitKind::Point);
-    let target = input.payment_method.monthly_target.filter(|t| *t > 0);
+    let performance_steps = performance_steps(input.payment_method.monthly_target, &tiers);
+    let target = step_target(&performance_steps, performance);
     let next_tier = benefits::next_tier(&tiers, performance);
     CardMonthReport {
         payment_method_id: input.payment_method.id,
@@ -181,6 +198,7 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
         performance,
         projected_performance,
         previous_performance,
+        performance_steps,
         target,
         remaining_to_target: target.map(|t| (t - performance).max(0)),
         current_limit: limit,
@@ -195,5 +213,34 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
         benefit_remaining: outcome.remaining_limit(),
         benefits: usages,
         transaction_benefits,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tier(min_spending: i64) -> Tier {
+        Tier { min_spending, benefit_limit: 0 }
+    }
+
+    #[test]
+    fn steps_merge_target_and_tiers() {
+        let tiers = [tier(1_000_000), tier(300_000), tier(600_000)];
+        assert_eq!(performance_steps(Some(300_000), &tiers), vec![300_000, 600_000, 1_000_000]);
+        assert_eq!(performance_steps(None, &tiers), vec![300_000, 600_000, 1_000_000]);
+        assert_eq!(performance_steps(Some(300_000), &[]), vec![300_000]);
+        assert_eq!(performance_steps(Some(0), &[tier(0)]), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn target_moves_up_by_step() {
+        let steps = [300_000, 600_000, 1_000_000];
+        assert_eq!(step_target(&steps, 0), Some(300_000));
+        assert_eq!(step_target(&steps, 299_999), Some(300_000));
+        assert_eq!(step_target(&steps, 300_000), Some(600_000));
+        assert_eq!(step_target(&steps, 999_999), Some(1_000_000));
+        assert_eq!(step_target(&steps, 1_200_000), Some(1_000_000));
+        assert_eq!(step_target(&[], 500_000), None);
     }
 }
