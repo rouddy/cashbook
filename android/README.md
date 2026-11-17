@@ -10,12 +10,18 @@
 
 ```bash
 cd android
-./gradlew assembleDebug                 # → app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleDebug                 # → app/build/outputs/apk/debug/cashbook_<versionName>_<versionCode>.apk
 ./gradlew installDebug                  # 연결된 기기/에뮬레이터에 설치
 ./gradlew testDebugUnitTest lintDebug   # 단위 테스트(형식 해석·규칙·응답 처리) + 린트
+./gradlew assembleRelease               # → app/build/outputs/apk/release/cashbook_<versionName>_<versionCode>.apk
 ```
 
 `ANDROID_HOME`(또는 `local.properties`의 `sdk.dir`)에 Android SDK가 있어야 합니다. Android Studio로 `android/` 폴더를 열어도 됩니다.
+
+릴리스 서명은 환경 변수(또는 `~/.gradle/gradle.properties`의 같은 이름 속성) `CASHBOOK_KEYSTORE_FILE`, `CASHBOOK_KEYSTORE_PASSWORD`,
+`CASHBOOK_KEY_ALIAS`, `CASHBOOK_KEY_PASSWORD`로 합니다. 없으면 릴리스 APK는 서명 없이 만들어져 설치할 수 없습니다.
+CircleCI(`.circleci/config.yml`의 `android-apk`)는 키스토어를 `CASHBOOK_KEYSTORE_BASE64`로 받아 서명한 릴리스 APK를 아티팩트로 남깁니다.
+이미 설치한 앱과 서명 키가 다르면 업데이트 설치가 거부되므로(지우고 다시 설치하면 규칙·설정이 사라짐), 키는 한 번 정해 계속 씁니다.
 
 ## 처음 설정
 

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { errorMessage } from '../api/client'
+import type { CardMonthReport } from '../api/types'
 import { won } from '../lib/format'
 
 export function Loading({ label = '불러오는 중…' }: { label?: string }) {
@@ -64,10 +65,25 @@ export function Delta({ value, upIsGood = false, suffix = '' }: { value: number;
 }
 
 /** goal=true면 목표형(넘으면 달성), 아니면 한도형(넘으면 초과 경고) */
-export function Meter({ value, max, tick, label, goal }: { value: number; max: number; tick?: number; label: string; goal?: boolean }) {
+export function Meter({
+  value,
+  max,
+  ticks,
+  label,
+  title,
+  goal,
+}: {
+  value: number
+  max: number
+  /** 막대 위 구분선 위치 (값 기준) */
+  ticks?: number[]
+  label: string
+  title?: string
+  goal?: boolean
+}) {
   const ratio = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0
   const over = !goal && max > 0 && value > max
-  const tickRatio = tick != null && max > 0 ? Math.min(1, tick / max) : null
+  const tickRatios = max > 0 ? (ticks ?? []).filter((t) => t >= 0).map((t) => Math.min(1, t / max)) : []
   return (
     <div
       className={`meter ${over ? 'over' : ''}`}
@@ -76,10 +92,30 @@ export function Meter({ value, max, tick, label, goal }: { value: number; max: n
       aria-valuemin={0}
       aria-valuemax={max}
       aria-valuenow={value}
+      title={title}
     >
       <span style={{ width: `${ratio * 100}%` }} />
-      {tickRatio != null && <i className="tick" style={{ left: `calc(${tickRatio * 100}% - 1px)` }} />}
+      {tickRatios.map((t) => (
+        <i key={t} className="tick" style={{ left: `calc(${t * 100}% - 1px)` }} />
+      ))}
     </div>
+  )
+}
+
+/** 전월실적 막대: 끝은 마지막 단계, 중간 단계마다 구분선. 단계가 없으면 그리지 않는다. */
+export function PerformanceMeter({ report: r, label }: { report: CardMonthReport; label: string }) {
+  const steps = r.performanceSteps
+  const max = steps[steps.length - 1]
+  if (max == null) return null
+  return (
+    <Meter
+      goal
+      value={r.performance}
+      max={max}
+      ticks={steps.slice(0, -1)}
+      label={label}
+      title={steps.length > 1 ? `실적 단계 ${steps.map((s) => won(s)).join(' · ')}` : undefined}
+    />
   )
 }
 

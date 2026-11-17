@@ -5,7 +5,7 @@ import { useGql, useMutate, useRefData } from '../api/hooks'
 import { CARD_LIST_QUERY, CARDS_MONTHLY_QUERY, DELETE_PM, RESTORE_PM } from '../api/queries'
 import type { CardMonthReport, PaymentMethod, StatementInfo } from '../api/types'
 import CardForm from '../components/CardForm'
-import { ErrorBox, Loading, Meter } from '../components/Common'
+import { ErrorBox, Loading, PerformanceMeter } from '../components/Common'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
 import { benefitTotalsText, hasBenefit } from '../lib/benefits'
@@ -115,7 +115,7 @@ export default function Cards() {
                       </span>
                     </div>
                     {r.target ? (
-                      <Meter goal value={r.performance} max={r.target} label={`${c.name} 전월실적 목표 대비`} />
+                      <PerformanceMeter report={r} label={`${c.name} 전월실적 목표 대비`} />
                     ) : null}
                     {(hasBenefit(r) || r.currentLimit != null) && (
                       <div className="row small" style={{ marginTop: 6 }}>

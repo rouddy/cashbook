@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { useGql, useRefData, type RefMaps } from '../api/hooks'
 import { CARDS_MONTHLY_QUERY, STATEMENT_LINES_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
 import type { CardMonthReport, PaymentMethod, StatementLine, TransactionPage } from '../api/types'
-import { ErrorBox, Loading, Meter, Panel } from '../components/Common'
+import { ErrorBox, Loading, Panel, PerformanceMeter } from '../components/Common'
 import MonthPicker from '../components/MonthPicker'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
 import { benefitTotalsText, hasBenefit, txBenefitTexts } from '../lib/benefits'
@@ -61,7 +61,7 @@ export default function CardTransactions() {
                     </div>
                     {r.target ? (
                       <div style={{ marginTop: 6 }}>
-                        <Meter goal value={r.performance} max={r.target} label={`${pm?.name} 실적`} />
+                        <PerformanceMeter report={r} label={`${pm?.name} 실적`} />
                         <div className="small text-2" style={{ marginTop: 2 }}>
                           실적 {won(r.performance)} / {won(r.target)}
                           {r.remainingToTarget ? ` · ${won(r.remainingToTarget)} 남음` : ' · 달성'}

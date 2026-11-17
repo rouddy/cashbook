@@ -5,7 +5,7 @@ import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { CARD_DETAIL_QUERY, DELETE_PM, RESTORE_PM, STATEMENT_LINES_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
 import type { CardMonthReport, PaymentMethod, StatementInfo, StatementLine, TransactionPage } from '../api/types'
 import CardForm from '../components/CardForm'
-import { ErrorBox, Loading, Meter, Panel } from '../components/Common'
+import { ErrorBox, Loading, Meter, Panel, PerformanceMeter } from '../components/Common'
 import Modal from '../components/Modal'
 import MonthPicker from '../components/MonthPicker'
 import { useToast } from '../components/Toast'
@@ -308,7 +308,7 @@ export function ReportPanel({ report: r, card }: { report: CardMonthReport; card
           {r.target ? (
             <>
               <div style={{ margin: '6px 0' }}>
-                <Meter goal value={r.performance} max={r.target} label="전월실적 목표 대비" />
+                <PerformanceMeter report={r} label="전월실적 목표 대비" />
               </div>
               <div className="small text-2">
                 목표 {won(r.target)}원 ·{' '}

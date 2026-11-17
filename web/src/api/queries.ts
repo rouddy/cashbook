@@ -55,7 +55,7 @@ export const FUNDS_QUERY = `query Funds {
 }`
 
 export const CARD_REPORT_FIELDS = `paymentMethodId month spending plannedSpending transactionCount performance projectedPerformance
-  previousPerformance target remainingToTarget currentLimit achievedTier { minSpending benefitLimit }
+  previousPerformance performanceSteps target remainingToTarget currentLimit achievedTier { minSpending benefitLimit }
   nextTier { minSpending benefitLimit } remainingToNextTier benefitTotal discountTotal pointTotal mileageTotal
   limitUsed benefitRemaining
   benefits { cardBenefitId name kind rate monthlyCap sharesCardLimit stackable spending count raw amount remaining spendToMax }
