@@ -466,6 +466,10 @@ label.field > .hint {
 .badge.good {
   color: var(--good);
 }
+.badge.split {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
 .notice {
   display: flex;
   gap: 10px;
@@ -606,6 +610,26 @@ table.table {
   margin: 0;
   vertical-align: middle;
   cursor: pointer;
+}
+/* 나눈 결제의 다른 장부 쪽 (읽기 전용 보조 행) */
+.sheet tr.split-sub td {
+  height: 26px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12px;
+  border-bottom-style: dashed;
+}
+.sub-cell {
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sub-cell.num {
+  text-align: right;
+}
+.sub-cell .badge {
+  height: 18px;
 }
 /* 칸 전체를 눌러도 체크되게 */
 .row-check {

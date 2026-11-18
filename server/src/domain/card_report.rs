@@ -106,20 +106,36 @@ pub struct CardReportInput<'a> {
     pub tx_benefits: &'a HashMap<i32, Vec<i32>>,
 }
 
+/// 이 카드의 그 달 거래. 여러 장부에 나눈 결제(`split_parent_id`)는 카드에서는 한 건이므로
+/// 자식 금액을 부모에 더해 건별 최소 금액·최대 혜택과 건수를 실제 결제 기준으로 계산한다.
 fn card_txs(input: &CardReportInput, month: YearMonth, status: TxStatus) -> Vec<CardTx> {
-    input
+    let selected: Vec<&transaction::Model> = input
         .transactions
         .iter()
         .filter(|t| t.payment_method_id == Some(input.payment_method.id))
         .filter(|t| t.status == status && month.contains(t.date))
-        .map(|t| CardTx {
+        .collect();
+    let mut out: Vec<CardTx> = Vec::with_capacity(selected.len());
+    let mut position: HashMap<i32, usize> = HashMap::new();
+    for t in &selected {
+        if t.split_parent_id.is_some_and(|p| selected.iter().any(|s| s.id == p)) {
+            continue;
+        }
+        position.insert(t.id, out.len());
+        out.push(CardTx {
             id: t.id,
             date: t.date,
             amount: outflow(t, input.categories),
             exclude_from_performance: t.exclude_from_performance,
             benefit_ids: input.tx_benefits.get(&t.id).cloned().unwrap_or_default(),
-        })
-        .collect()
+        });
+    }
+    for t in &selected {
+        if let Some(&i) = t.split_parent_id.and_then(|p| position.get(&p)) {
+            out[i].amount += outflow(t, input.categories);
+        }
+    }
+    out
 }
 
 /// 전월실적 단계: 실적 목표와 구간 기준 금액을 합쳐 0보다 큰 것만 오름차순으로.
