@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 
-import { useGql, useRefData, type RefMaps } from '../api/hooks'
-import { SUMMARY_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
+import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
+import { MOVE_TXS, SUMMARY_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
 import type { MonthlySummary, TransactionPage, TxStatus } from '../api/types'
 import { ErrorBox, Loading, Panel } from '../components/Common'
 import LedgerTabs from '../components/LedgerTabs'
 import MonthPicker from '../components/MonthPicker'
+import { useToast } from '../components/Toast'
 import TransactionGrid, { PageTotals, type GridColumn } from '../components/TransactionGrid'
 import { won } from '../lib/format'
 import { defaultDateFor, monthLabel, useMonthParam, useQueryParam } from '../lib/month'
@@ -27,6 +28,12 @@ export default function Transactions() {
   const [member, setMember] = useQueryParam('member', '')
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
+  // 선택 모드: 체크한 거래를 다른 장부로 옮긴다
+  const [selecting, setSelecting] = useState(false)
+  const [selected, setSelected] = useState<Set<number>>(() => new Set())
+  const [moveTarget, setMoveTarget] = useState('')
+  const { run, pending } = useMutate()
+  const toast = useToast()
 
   useEffect(() => {
     const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 300)
@@ -60,6 +67,33 @@ export default function Transactions() {
   if (ledgerId == null) columns.push('ledger')
   const page = tx.data?.transactions
   const filtered = !!(category || pm || member || debouncedSearch || status !== 'active')
+
+  // 지금 보고 있는 장부가 아닌 장부로만 옮긴다 (전체 보기면 모든 장부)
+  const targets = ref.ledgers.filter((l) => l.id !== ledgerId)
+  const target = targets.find((l) => String(l.id) === moveTarget) ?? targets[0]
+  // 달·필터를 바꿔 목록에서 사라진 거래는 옮기지 않는다
+  const chosen = page?.items.filter((t) => selected.has(t.id)) ?? []
+  const stopSelecting = () => {
+    setSelecting(false)
+    setSelected(new Set())
+  }
+  const moveSelected = async () => {
+    if (!target) return
+    const ids = chosen.filter((t) => t.ledgerId !== target.id).map((t) => t.id)
+    if (ids.length === 0) {
+      toast(chosen.length ? `선택한 거래는 이미 '${target.name}' 장부에 있습니다` : '옮길 거래를 체크하세요', 'error')
+      return
+    }
+    const ok = window.confirm(
+      `선택한 ${ids.length}건을 '${target.name}' 장부로 옮길까요?\n'${target.name}'에 같은 이름의 항목이 없는 거래는 미분류가 됩니다.`,
+    )
+    if (!ok) return
+    const res = await run<{ moveTransactions: { moved: number; uncategorized: number } }>(MOVE_TXS, { ids, ledgerId: target.id })
+    if (!res) return
+    const { moved, uncategorized } = res.moveTransactions
+    toast(`${moved}건을 '${target.name}' 장부로 옮겼습니다${uncategorized ? ` (${uncategorized}건은 미분류)` : ''}`)
+    stopSelecting()
+  }
 
   return (
     <div className="stack">
@@ -113,6 +147,26 @@ export default function Transactions() {
           ))}
         </div>
         <input className="input" placeholder="내용·메모 검색" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 180 }} />
+        {targets.length > 0 && (
+          <button className={`btn sm ${selecting ? 'ghost' : ''}`} aria-pressed={selecting} onClick={selecting ? stopSelecting : () => setSelecting(true)}>
+            {selecting ? '선택 취소' : '선택'}
+          </button>
+        )}
+        {selecting && target && (
+          <>
+            <span className="small text-2">{chosen.length}건 선택</span>
+            <select className="input" value={target.id} onChange={(e) => setMoveTarget(e.target.value)} aria-label="옮길 장부">
+              {targets.map((l) => (
+                <option key={l.id} value={l.id}>
+                  → {l.name}
+                </option>
+              ))}
+            </select>
+            <button className="btn sm primary" disabled={pending || chosen.length === 0} onClick={moveSelected}>
+              이동
+            </button>
+          </>
+        )}
         {filtered && (
           <button
             className="btn sm ghost"
@@ -143,6 +197,7 @@ export default function Transactions() {
               refMaps={ref}
               columns={columns}
               newRow={filtered ? undefined : { date: defaultDateFor(month), ledgerId }}
+              selection={selecting ? { selected, onChange: setSelected } : undefined}
               emptyText={filtered ? '조건에 맞는 거래가 없습니다' : `${monthLabel(month)} 거래가 없습니다. 아래 줄에 바로 입력하세요.`}
               footer={
                 <PageTotals page={page} />

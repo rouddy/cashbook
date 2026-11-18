@@ -599,6 +599,22 @@ table.table {
   font-size: 11px;
   background: var(--surface-2);
 }
+.sheet tr.selected td {
+  background: var(--accent-wash);
+}
+.sheet .rownum input[type='checkbox'] {
+  margin: 0;
+  vertical-align: middle;
+  cursor: pointer;
+}
+/* 칸 전체를 눌러도 체크되게 */
+.row-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 31px;
+  cursor: pointer;
+}
 .cell-btn {
   display: block;
   width: 100%;

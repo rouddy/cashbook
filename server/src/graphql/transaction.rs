@@ -369,6 +369,54 @@ async fn set_benefits<C: ConnectionTrait>(db: &C, tx_id: i32, payment_method_id:
     Ok(())
 }
 
+#[derive(SimpleObject, Debug, PartialEq, Eq)]
+pub struct MoveTransactionsResult {
+    /// 장부를 옮긴 거래 수 (이미 그 장부에 있던 거래는 세지 않는다)
+    pub moved: i32,
+    /// 옮길 장부에 같은 항목이 없어 미분류가 된 거래 수
+    pub uncategorized: i32,
+}
+
+/// 여러 거래를 다른 장부로 옮긴다. 카테고리는 장부별이라, 옮길 장부에 이름·종류가 같은
+/// 사용 중인 카테고리가 있으면 그것으로 바꾸고 없으면 비운다. 혜택·결제수단은 그대로 둔다.
+async fn move_to_ledger<C: ConnectionTrait>(db: &C, ids: &[i32], ledger_id: i32) -> Result<MoveTransactionsResult> {
+    if ids.len() > 5000 {
+        return Err(user_error("한 번에 5000건까지 옮길 수 있습니다"));
+    }
+    ledger::Entity::find_by_id(ledger_id).one(db).await?.ok_or_else(|| user_error("장부가 없습니다"))?;
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let found = transaction::Entity::find().filter(transaction::Column::Id.is_in(ids.clone())).all(db).await?;
+    if found.len() != ids.len() {
+        return Err(user_error("없는 거래가 있습니다. 목록을 새로 고친 뒤 다시 고르세요"));
+    }
+    let categories: std::collections::HashMap<i32, category::Model> =
+        category::Entity::find().all(db).await?.into_iter().map(|c| (c.id, c)).collect();
+    let same_in_target = |c: &category::Model| {
+        categories
+            .values()
+            .filter(|t| t.ledger_id == ledger_id && !t.archived && t.name == c.name && t.kind == c.kind)
+            .min_by_key(|t| (t.sort_order, t.id))
+            .map(|t| t.id)
+    };
+    let now = Utc::now();
+    let mut out = MoveTransactionsResult { moved: 0, uncategorized: 0 };
+    for tx in found.into_iter().filter(|t| t.ledger_id != ledger_id) {
+        let category_id = tx.category_id.and_then(|id| categories.get(&id)).and_then(same_in_target);
+        if tx.category_id.is_some() && category_id.is_none() {
+            out.uncategorized += 1;
+        }
+        let mut active: transaction::ActiveModel = tx.into();
+        active.ledger_id = Set(ledger_id);
+        active.category_id = Set(category_id);
+        active.updated_at = Set(now);
+        active.update(db).await?;
+        out.moved += 1;
+    }
+    Ok(out)
+}
+
 async fn create_one<C: ConnectionTrait>(db: &C, input: TransactionInput) -> Result<transaction::Model> {
     let description = input.description.trim().to_string();
     if description.is_empty() {
@@ -537,6 +585,17 @@ impl TransactionMutation {
         Ok(saved)
     }
 
+    /// 여러 거래를 다른 장부로 옮긴다 (하나라도 실패하면 모두 취소).
+    /// 옮길 장부에 이름·종류가 같은 카테고리가 있으면 그것으로, 없으면 미분류로 둔다.
+    async fn move_transactions(&self, ctx: &Context<'_>, ids: Vec<i32>, ledger_id: i32) -> Result<MoveTransactionsResult> {
+        let db = db(ctx);
+        let txn = db.begin().await?;
+        let out = move_to_ledger(&txn, &ids, ledger_id).await?;
+        txn.commit().await?;
+        lookup(ctx).invalidate();
+        Ok(out)
+    }
+
     /// 삭제. 반복 규칙이 이번 달 이후에 만든 항목은 다시 생기지 않도록 '건너뜀'으로 바꾼다.
     async fn delete_transaction(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
         let db = db(ctx);
@@ -612,4 +671,103 @@ async fn set_status(ctx: &Context<'_>, id: i32, status: TxStatus) -> Result<tran
     active.status = Set(status);
     active.updated_at = Set(Utc::now());
     Ok(active.update(db).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn ledger(db: &sea_orm::DatabaseConnection, name: &str, sort_order: i32) -> i32 {
+        ledger::ActiveModel {
+            name: Set(name.into()),
+            description: Set(None),
+            is_default: Set(sort_order == 0),
+            sort_order: Set(sort_order),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn category(db: &sea_orm::DatabaseConnection, ledger_id: i32, name: &str, kind: CategoryKind, archived: bool) -> i32 {
+        category::ActiveModel {
+            ledger_id: Set(ledger_id),
+            name: Set(name.into()),
+            kind: Set(kind),
+            monthly_budget: Set(None),
+            is_fixed: Set(false),
+            excluded_from_spending: Set(false),
+            color: Set(None),
+            sort_order: Set(0),
+            archived: Set(archived),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn tx(db: &sea_orm::DatabaseConnection, ledger_id: i32, category_id: Option<i32>) -> i32 {
+        let input = TransactionInput {
+            ledger_id: Some(ledger_id),
+            date: NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
+            amount: 12_000,
+            category_id,
+            payment_method_id: None,
+            description: "점심".into(),
+            memo: None,
+            member: None,
+            status: TxStatus::Confirmed,
+            installment_months: 1,
+            exclude_from_performance: false,
+            benefit_ids: None,
+        };
+        create_one(db, input).await.unwrap().id
+    }
+
+    #[tokio::test]
+    async fn moves_to_other_ledger_and_maps_same_categories() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let meal = category(&db, home, "외식", CategoryKind::Expense, false).await;
+        let pocket_meal = category(&db, pocket, "외식", CategoryKind::Expense, false).await;
+        let grocery = category(&db, home, "장보기", CategoryKind::Expense, false).await;
+        category(&db, pocket, "장보기", CategoryKind::Expense, true).await; // 보관된 카테고리로는 옮기지 않는다
+        let bonus = category(&db, home, "보너스", CategoryKind::Income, false).await;
+        category(&db, pocket, "보너스", CategoryKind::Expense, false).await; // 종류가 다르면 다른 항목
+        let a = tx(&db, home, Some(meal)).await;
+        let b = tx(&db, home, Some(grocery)).await;
+        let c = tx(&db, home, Some(bonus)).await;
+        let d = tx(&db, home, None).await;
+        let already = tx(&db, pocket, Some(pocket_meal)).await;
+
+        let out = move_to_ledger(&db, &[a, b, c, d, already, a], pocket).await.unwrap();
+        assert_eq!(out, MoveTransactionsResult { moved: 4, uncategorized: 2 });
+        let get = |id| {
+            let db = db.clone();
+            async move { transaction::Entity::find_by_id(id).one(&db).await.unwrap().unwrap() }
+        };
+        let moved_a = get(a).await;
+        assert_eq!((moved_a.ledger_id, moved_a.category_id), (pocket, Some(pocket_meal)));
+        assert_eq!(get(b).await.category_id, None);
+        assert_eq!(get(c).await.category_id, None);
+        assert_eq!(get(d).await.ledger_id, pocket);
+        assert_eq!(get(already).await.category_id, Some(pocket_meal));
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_ledger_or_transaction() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let a = tx(&db, home, None).await;
+        assert!(move_to_ledger(&db, &[a], pocket + 100).await.is_err());
+        assert!(move_to_ledger(&db, &[a, a + 100], pocket).await.is_err());
+        assert_eq!(transaction::Entity::find_by_id(a).one(&db).await.unwrap().unwrap().ledger_id, home);
+    }
 }

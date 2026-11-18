@@ -48,20 +48,47 @@ interface Props {
   benefitAmounts?: Map<number, string>
   emptyText?: string
   footer?: ReactNode
+  /** 선택 모드: 행 번호 대신 체크박스를 보이고 새 행 입력은 숨긴다 */
+  selection?: { selected: ReadonlySet<number>; onChange: (next: Set<number>) => void }
 }
 
 type Patch = Record<string, unknown>
 type Move = 'next' | 'prev' | 'down' | 'stay'
 
-export default function TransactionGrid({ rows, refMaps, columns, newRow, benefitAmounts, emptyText = '거래가 없습니다', footer }: Props) {
+export default function TransactionGrid({
+  rows,
+  refMaps,
+  columns,
+  newRow,
+  benefitAmounts,
+  emptyText = '거래가 없습니다',
+  footer,
+  selection,
+}: Props) {
   const gridId = useId()
   const toast = useToast()
   const { run, pending } = useMutate()
   const [editing, setEditing] = useState<{ id: number; col: GridColumn } | null>(null)
   const [overrides, setOverrides] = useState<Record<number, Partial<Transaction>>>({})
+  /** Shift+클릭 범위 선택의 시작 행 (거래 id) */
+  const lastChecked = useRef<number | null>(null)
   const today = localToday()
 
   const view = rows.map((r) => (overrides[r.id] ? { ...r, ...overrides[r.id] } : r))
+
+  /** 행 체크. Shift+클릭하면 직전에 누른 행부터 이 행까지 같은 상태로 바꾼다. */
+  const checkRow = (index: number, on: boolean, shift: boolean) => {
+    if (!selection) return
+    const last = shift ? view.findIndex((t) => t.id === lastChecked.current) : -1
+    const from = last >= 0 ? last : index
+    const next = new Set(selection.selected)
+    for (let i = Math.min(from, index); i <= Math.max(from, index); i++) {
+      if (on) next.add(view[i].id)
+      else next.delete(view[i].id)
+    }
+    lastChecked.current = view[index].id
+    selection.onChange(next)
+  }
 
   const focusCell = (r: number, c: number) => {
     const el = document.querySelector<HTMLElement>(`[data-cell="${CSS.escape(`${gridId}:${r}:${c}`)}"]`)
@@ -213,7 +240,7 @@ export default function TransactionGrid({ rows, refMaps, columns, newRow, benefi
       <table className="sheet" aria-label="거래 목록">
         <thead>
           <tr>
-            <th className="rownum">#</th>
+            <th className="rownum">{selection ? <SelectAll rows={view} selection={selection} /> : '#'}</th>
             {columns.map((c) => (
               <th key={c} style={{ width: HEADERS[c].width, textAlign: HEADERS[c].num ? 'right' : 'left' }}>
                 {HEADERS[c].label}
@@ -235,9 +262,23 @@ export default function TransactionGrid({ rows, refMaps, columns, newRow, benefi
             const rowClass = [tx.status === 'PLANNED' ? 'planned' : '', overdue ? 'overdue' : '', tx.status === 'SKIPPED' ? 'planned' : '']
               .filter(Boolean)
               .join(' ')
+            const checked = selection?.selected.has(tx.id) ?? false
             return (
-              <tr key={tx.id} className={rowClass}>
-                <td className="rownum">{r + 1}</td>
+              <tr key={tx.id} className={checked ? `${rowClass} selected` : rowClass}>
+                <td className="rownum">
+                  {selection ? (
+                    <label className="row-check">
+                      <input
+                        type="checkbox"
+                        aria-label={`${tx.description} ${won(tx.amount)}원 선택`}
+                        checked={checked}
+                        onChange={(e) => checkRow(r, e.target.checked, (e.nativeEvent as MouseEvent).shiftKey)}
+                      />
+                    </label>
+                  ) : (
+                    r + 1
+                  )}
+                </td>
                 {columns.map((col, c) => {
                   const isEditing = editing?.id === tx.id && editing.col === col
                   return (
@@ -306,7 +347,7 @@ export default function TransactionGrid({ rows, refMaps, columns, newRow, benefi
               </tr>
             )
           })}
-          {newRow && (
+          {newRow && !selection && (
             <NewRow
               // 달·장부·카드가 바뀌면 새 행 기본값(날짜 등)을 다시 잡는다
               key={`${newRow.date}:${newRow.ledgerId}:${newRow.paymentMethodId ?? ''}`}
@@ -327,6 +368,33 @@ export default function TransactionGrid({ rows, refMaps, columns, newRow, benefi
         )}
       </table>
     </div>
+  )
+}
+
+type Selection = NonNullable<Props['selection']>
+
+/** 머리글 체크박스: 보이는 행을 모두 고르거나 모두 풀기 */
+function SelectAll({ rows, selection }: { rows: Transaction[]; selection: Selection }) {
+  const count = rows.filter((t) => selection.selected.has(t.id)).length
+  const all = rows.length > 0 && count === rows.length
+  return (
+    <input
+      type="checkbox"
+      aria-label="모두 선택"
+      checked={all}
+      ref={(el) => {
+        if (el) el.indeterminate = count > 0 && !all
+      }}
+      disabled={rows.length === 0}
+      onChange={() => {
+        const next = new Set(selection.selected)
+        for (const t of rows) {
+          if (all) next.delete(t.id)
+          else next.add(t.id)
+        }
+        selection.onChange(next)
+      }}
+    />
   )
 }
 
