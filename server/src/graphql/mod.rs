@@ -13,10 +13,13 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use async_graphql::{Context, EmptySubscription, ErrorExtensions, MergedObject, Schema, SimpleObject};
-use sea_orm::{DatabaseConnection, DbErr, EntityTrait, QueryOrder};
+use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::config::AppConfig;
-use crate::entity::{account as account_entity, card_benefit, card_tier, category, ledger as ledger_entity, payment_method, transaction_benefit};
+use crate::entity::{
+    account as account_entity, card_benefit, card_tier, category, ledger as ledger_entity, payment_method,
+    transaction as transaction_entity, transaction_benefit,
+};
 
 
 #[derive(MergedObject, Default)]
@@ -61,6 +64,7 @@ pub struct Lookup {
     benefits: Slot<HashMap<i32, card_benefit::Model>>,
     tiers: Slot<HashMap<i32, Vec<card_tier::Model>>>,
     tx_benefits: Slot<HashMap<i32, Vec<i32>>>,
+    split_groups: Slot<HashMap<i32, Vec<transaction_entity::Model>>>,
 }
 
 type Slot<T> = Mutex<Option<Arc<T>>>;
@@ -89,6 +93,7 @@ impl Lookup {
             benefits: Mutex::default(),
             tiers: Mutex::default(),
             tx_benefits: Mutex::default(),
+            split_groups: Mutex::default(),
         }
     }
 
@@ -101,6 +106,7 @@ impl Lookup {
         *self.benefits.lock().unwrap() = None;
         *self.tiers.lock().unwrap() = None;
         *self.tx_benefits.lock().unwrap() = None;
+        *self.split_groups.lock().unwrap() = None;
     }
 
     pub async fn ledgers(&self) -> Result<Arc<HashMap<i32, ledger_entity::Model>>, DbErr> {
@@ -165,6 +171,33 @@ impl Lookup {
                 .await?;
             for tb in rows {
                 map.entry(tb.transaction_id).or_default().push(tb.card_benefit_id);
+            }
+            Ok(map)
+        })
+        .await
+    }
+
+    /// 분할 묶음: 부모 거래 id → 부모와 자식들 (부모 먼저, 자식은 id 순). 분할한 결제만 담겨 작다.
+    pub async fn split_groups(&self) -> Result<Arc<HashMap<i32, Vec<transaction_entity::Model>>>, DbErr> {
+        use transaction_entity::Column as C;
+        cached(&self.split_groups, || async {
+            let children = transaction_entity::Entity::find()
+                .filter(C::SplitParentId.is_not_null())
+                .order_by_asc(C::Id)
+                .all(&self.db)
+                .await?;
+            if children.is_empty() {
+                return Ok(HashMap::new());
+            }
+            let mut parent_ids: Vec<i32> = children.iter().filter_map(|c| c.split_parent_id).collect();
+            parent_ids.sort_unstable();
+            parent_ids.dedup();
+            let parents = transaction_entity::Entity::find().filter(C::Id.is_in(parent_ids)).all(&self.db).await?;
+            let mut map: HashMap<i32, Vec<transaction_entity::Model>> = parents.into_iter().map(|p| (p.id, vec![p])).collect();
+            for c in children {
+                if let Some(group) = c.split_parent_id.and_then(|pid| map.get_mut(&pid)) {
+                    group.push(c);
+                }
             }
             Ok(map)
         })

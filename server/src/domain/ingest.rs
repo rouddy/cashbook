@@ -196,6 +196,8 @@ pub async fn suggest<C: ConnectionTrait>(
     );
     let rows = transaction::Entity::find()
         .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
+        // 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게 뺀다
+        .filter(transaction::Column::SplitParentId.is_null())
         .filter(
             Condition::any()
                 .add(transaction::Column::Description.eq(d))
