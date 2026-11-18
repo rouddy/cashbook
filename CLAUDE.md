@@ -43,7 +43,7 @@ cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug   # 에뮬레�
 - 반복 규칙이 이번 달 이후에 만든 항목은 상태와 관계없이 삭제하면 SKIPPED로 남긴다(유니크 `(recurring_rule_id, recurring_month)` 자리를 비우면 `ensure_planned`가 다시 만든다). 규칙 수정 시 이번 달 이후 PLANNED만 다시 만든다.
 - 사용 중인 카테고리/결제수단 삭제는 보관(archived) 처리. 결제수단 보관 시 그 결제수단의 반복 규칙을 끄고 이번 달 이후 예정분을 지운다.
 - 여유자금은 결제 계좌가 여유자금 제외 계좌인 카드의 대금·예정 출금을 빼지 않는다(`CardDue.counted`). 혜택 환불은 그 달에 받은 혜택까지만 되돌린다.
-- 거래 분할: 부모 + 자식(`split_parent_id`) 금액의 합이 실제 결제. 확정 거래만 나눈다(예정은 반복 규칙이 지우고 다시 만들어 짝이 깨짐). 묶음의 날짜·결제수단·할부·실적 제외·상태는 `split::sync_payment_fields`로 맞추고, 금액을 고치면 짝이 차액을 맡는다(`split::rebalance`). 혜택 지정은 부모에 둔다(`benefit_owner`). 묶음 거래는 장부 이동·상태 변경을 막고, 삭제는 합친 뒤 결제 전체를 지운다 — 거래를 지우거나 상태를 바꾸는 경로를 새로 만들면 분할 묶음을 먼저 처리한다.
+- 거래 분할: 부모 + 자식(`split_parent_id`) 금액의 합이 실제 결제. 확정 거래만 나눈다(예정은 반복 규칙이 지우고 다시 만들어 짝이 깨짐). 묶음의 날짜·결제수단·할부·실적 제외·상태는 `split::sync_payment_fields`로 맞추고, 금액을 고치면 짝이 차액을 맡는다(`split::rebalance`). 혜택 지정은 부모에 두고(`benefit_owner`), 카드 실적·혜택은 묶음을 한 건으로 계산한다(`card_report::card_txs`). 묶음 거래는 장부 이동·상태 변경을 막고, 삭제는 합친 뒤 결제 전체를 지운다 — 거래를 지우거나 상태를 바꾸는 경로를 새로 만들면 분할 묶음을 먼저 처리한다.
 - 카드 혜택: 거래에 고른 혜택은 모두 더하고, `stackable`이 아닌 혜택은 거래당 하나만(`benefits::stacking_conflict`, UI는 `lib/benefits.ts`의 `toggleBenefit`). 혜택액은 `kind` 단위(할인 원·포인트 P·마일리지 마일)라 종류별로 합친다(`discountTotal`/`pointTotal`/`mileageTotal`, `benefitTotal` = 할인+포인트). 통합 한도 사용은 `limitUsed`(한도 없는·별도 한도 혜택 제외).
 - 프론트는 뮤테이션 성공 시 `queryClient.invalidateQueries()`로 전부 다시 읽는다(`api/hooks.ts`의 `useMutate`). `run()`은 실패해도 던지지 않고 토스트 후 `undefined`를 돌려주므로, 성공해야 하는 후속 동작은 결과를 확인한다.
 - URL 쿼리 상태(`lib/month.ts`의 `useMonthParam`/`useQueryParam`)는 한 핸들러에서 여러 개를 바꿀 수 있게 항상 `window.location.search`에서 시작해 갱신한다.

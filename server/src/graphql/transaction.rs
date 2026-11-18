@@ -916,6 +916,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn split_payment_is_one_card_transaction() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let schema = crate::graphql::build_schema(db.clone(), crate::config::AppConfig::for_tests());
+        // 1만원 이상 10%, 건당 최대 1,500원
+        let card = gql(
+            &schema,
+            r#"mutation { createPaymentMethod(input: {name: "카드", kind: CREDIT_CARD, benefits: [{name: "10%", rate: 0.1, minAmount: 10000, perTxMax: 1500}]}) { id benefits { id } } }"#,
+        )
+        .await;
+        let pm = card["createPaymentMethod"]["id"].as_i64().unwrap();
+        let benefit = card["createPaymentMethod"]["benefits"][0]["id"].as_i64().unwrap();
+        let created = gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createTransaction(input: {{ledgerId: {home}, date: "2026-11-03", amount: 20000, paymentMethodId: {pm}, description: "마트", benefitIds: [{benefit}]}}) {{ id }} }}"#
+            ),
+        )
+        .await;
+        let p = created["createTransaction"]["id"].as_i64().unwrap();
+        let report = format!(r#"{{ paymentMethod(id: {pm}) {{ monthReport(month: "2026-11") {{ spending transactionCount discountTotal transactionBenefits {{ transactionId amount }} }} }} }}"#);
+        let before = gql(&schema, &report).await;
+        // 가계부 9,000 + 용돈 11,000: 따로 계산하면 9,000원은 최소 금액 미달이지만 결제는 20,000원 한 건
+        gql(&schema, &format!("mutation {{ splitTransaction(id: {p}, ledgerId: {pocket}, amount: 11000) {{ id }} }}")).await;
+        let after = gql(&schema, &report).await;
+        assert_eq!(after, before);
+        let r = &after["paymentMethod"]["monthReport"];
+        assert_eq!((r["spending"].as_i64(), r["transactionCount"].as_i64(), r["discountTotal"].as_i64()), (Some(20000), Some(1), Some(1500)));
+        assert_eq!(r["transactionBenefits"], serde_json::json!([{"transactionId": p, "amount": 1500}]));
+    }
+
+    #[tokio::test]
     async fn rejects_unknown_ledger_or_transaction() {
         let db = crate::db::connect_in_memory().await;
         let home = ledger(&db, "가계부", 0).await;
