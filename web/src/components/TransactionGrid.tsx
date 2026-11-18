@@ -2,9 +2,10 @@ import { Fragment, useId, useRef, useState, type KeyboardEvent, type ReactNode }
 
 import { type RefMaps, useMutate } from '../api/hooks'
 import { CONFIRM_TX, CREATE_TX, DELETE_TX, RESTORE_TX, SKIP_TX, UPDATE_TX } from '../api/queries'
-import type { Suggestion, Transaction, TransactionPage, TxStatus } from '../api/types'
+import type { SplitPart, Suggestion, Transaction, TransactionPage, TxStatus } from '../api/types'
 import { parseAmount, shortDate, SOURCE_LABEL, weekendClass, won } from '../lib/format'
 import { localToday } from '../lib/month'
+import { isSplit, splitTotal } from '../lib/split'
 import BenefitChecks from './BenefitChecks'
 import DescriptionInput from './DescriptionInput'
 import { useToast } from './Toast'
@@ -75,6 +76,7 @@ export default function TransactionGrid({
   const today = localToday()
 
   const view = rows.map((r) => (overrides[r.id] ? { ...r, ...overrides[r.id] } : r))
+  const visibleIds = new Set(view.map((t) => t.id))
 
   /** 행 체크. Shift+클릭하면 직전에 누른 행부터 이 행까지 같은 상태로 바꾼다. */
   const checkRow = (index: number, on: boolean, shift: boolean) => {
@@ -263,88 +265,100 @@ export default function TransactionGrid({
               .filter(Boolean)
               .join(' ')
             const checked = selection?.selected.has(tx.id) ?? false
+            // 나눈 다른 쪽이 이 목록에 없으면(다른 장부) 아래에 보조 행으로 보여준다
+            const hiddenParts = tx.splitWith.filter((p) => !visibleIds.has(p.id))
             return (
-              <tr key={tx.id} className={checked ? `${rowClass} selected` : rowClass}>
-                <td className="rownum">
-                  {selection ? (
-                    <label className="row-check">
-                      <input
-                        type="checkbox"
-                        aria-label={`${tx.description} ${won(tx.amount)}원 선택`}
-                        checked={checked}
-                        onChange={(e) => checkRow(r, e.target.checked, (e.nativeEvent as MouseEvent).shiftKey)}
-                      />
-                    </label>
-                  ) : (
-                    r + 1
-                  )}
-                </td>
-                {columns.map((col, c) => {
-                  const isEditing = editing?.id === tx.id && editing.col === col
-                  return (
-                    <td key={col} style={{ position: 'relative' }}>
-                      {isEditing ? (
-                        <CellEditor
-                          tx={tx}
-                          col={col}
-                          refMaps={refMaps}
-                          onCommit={(v, move) => {
-                            commit(tx, col, v)
-                            stopEditing(tx, col, r, c, move)
-                          }}
-                          onCancel={() => stopEditing(tx, col, r, c, 'stay')}
+              <Fragment key={tx.id}>
+                <tr className={checked ? `${rowClass} selected` : rowClass}>
+                  <td className="rownum">
+                    {selection ? (
+                      <label className="row-check">
+                        <input
+                          type="checkbox"
+                          aria-label={`${tx.description} ${won(tx.amount)}원 선택`}
+                          checked={checked}
+                          onChange={(e) => checkRow(r, e.target.checked, (e.nativeEvent as MouseEvent).shiftKey)}
                         />
-                      ) : (
-                        <button
-                          type="button"
-                          className={`cell-btn ${HEADERS[col].num ? 'num' : ''}`}
-                          data-cell={`${gridId}:${r}:${c}`}
-                          onClick={() => EDITABLE.includes(col) && setEditing({ id: tx.id, col })}
-                          onKeyDown={(e) => onCellKey(e, r, c, tx, col)}
-                          title={col === 'description' || col === 'memo' ? String(display(tx, col) ?? '') : undefined}
-                          style={{ cursor: EDITABLE.includes(col) ? 'text' : 'default' }}
-                        >
-                          {display(tx, col, view[r - 1])}
+                      </label>
+                    ) : (
+                      r + 1
+                    )}
+                  </td>
+                  {columns.map((col, c) => {
+                    const isEditing = editing?.id === tx.id && editing.col === col
+                    return (
+                      <td key={col} style={{ position: 'relative' }}>
+                        {isEditing ? (
+                          <CellEditor
+                            tx={tx}
+                            col={col}
+                            refMaps={refMaps}
+                            onCommit={(v, move) => {
+                              commit(tx, col, v)
+                              stopEditing(tx, col, r, c, move)
+                            }}
+                            onCancel={() => stopEditing(tx, col, r, c, 'stay')}
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            className={`cell-btn ${HEADERS[col].num ? 'num' : ''}`}
+                            data-cell={`${gridId}:${r}:${c}`}
+                            onClick={() => EDITABLE.includes(col) && setEditing({ id: tx.id, col })}
+                            onKeyDown={(e) => onCellKey(e, r, c, tx, col)}
+                            title={col === 'description' || col === 'memo' ? String(display(tx, col) ?? '') : undefined}
+                            style={{ cursor: EDITABLE.includes(col) ? 'text' : 'default' }}
+                          >
+                            {display(tx, col, view[r - 1])}
+                          </button>
+                        )}
+                      </td>
+                    )
+                  })}
+                  <td>
+                    <div className="cell-actions">
+                      <StatusBadges tx={tx} overdue={overdue} refMaps={refMaps} />
+                      <span className="spacer" />
+                      {tx.status === 'PLANNED' && (
+                        <button className="btn sm" disabled={pending} onClick={() => run(CONFIRM_TX, { id: tx.id })} title="예정 금액·날짜로 확정">
+                          확정
                         </button>
                       )}
-                    </td>
-                  )
-                })}
-                <td>
-                  <div className="cell-actions">
-                    <StatusBadges tx={tx} overdue={overdue} />
-                    <span className="spacer" />
-                    {tx.status === 'PLANNED' && (
-                      <button className="btn sm" disabled={pending} onClick={() => run(CONFIRM_TX, { id: tx.id })} title="예정 금액·날짜로 확정">
-                        확정
-                      </button>
-                    )}
-                    {tx.status === 'PLANNED' && tx.recurringRuleId && (
-                      <button className="btn sm ghost" disabled={pending} onClick={() => run(SKIP_TX, { id: tx.id })} title="이번 달은 건너뛰기">
-                        건너뜀
-                      </button>
-                    )}
-                    {tx.status === 'SKIPPED' && (
-                      <button className="btn sm ghost" disabled={pending} onClick={() => run(RESTORE_TX, { id: tx.id })}>
-                        복원
-                      </button>
-                    )}
-                    {!(tx.status === 'SKIPPED' && tx.recurringRuleId) && (
-                      <button
-                        className="btn sm ghost icon danger"
-                        aria-label="삭제"
-                        title="삭제"
-                        disabled={pending}
-                        onClick={() => {
-                          if (window.confirm(`'${tx.description}' ${won(tx.amount)}원을 삭제할까요?`)) run(DELETE_TX, { id: tx.id })
-                        }}
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </div>
-                </td>
-              </tr>
+                      {tx.status === 'PLANNED' && tx.recurringRuleId && (
+                        <button className="btn sm ghost" disabled={pending} onClick={() => run(SKIP_TX, { id: tx.id })} title="이번 달은 건너뛰기">
+                          건너뜀
+                        </button>
+                      )}
+                      {tx.status === 'SKIPPED' && (
+                        <button className="btn sm ghost" disabled={pending} onClick={() => run(RESTORE_TX, { id: tx.id })}>
+                          복원
+                        </button>
+                      )}
+                      {!(tx.status === 'SKIPPED' && tx.recurringRuleId) && (
+                        <button
+                          className="btn sm ghost icon danger"
+                          aria-label="삭제"
+                          title="삭제"
+                          disabled={pending}
+                          onClick={() => {
+                            const message = isSplit(tx)
+                              ? `여러 장부에 나눈 결제 '${tx.description}' ${won(splitTotal(tx))}원 전체를 삭제할까요?\n(${tx.splitWith
+                                  .map((p) => refMaps.ledgerById.get(p.ledgerId)?.name)
+                                  .join(', ')}에 나눈 몫도 함께 삭제됩니다)`
+                              : `'${tx.description}' ${won(tx.amount)}원을 삭제할까요?`
+                            if (window.confirm(message)) run(DELETE_TX, { id: tx.id })
+                          }}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+                {hiddenParts.map((part) => (
+                  <SplitSubRow key={part.id} part={part} tx={tx} columns={columns} refMaps={refMaps} />
+                ))}
+              </Fragment>
             )
           })}
           {newRow && !selection && (
@@ -427,9 +441,51 @@ export function PageTotals({ page, extra }: { page: TransactionPage; extra?: Rea
   )
 }
 
-function StatusBadges({ tx, overdue }: { tx: Transaction; overdue: boolean }) {
+/** 나눈 결제의 다른 장부 쪽. 편집은 그 장부 화면에서 한다. */
+function SplitSubRow({ part, tx, columns, refMaps }: { part: SplitPart; tx: Transaction; columns: GridColumn[]; refMaps: RefMaps }) {
+  const ledger = refMaps.ledgerById.get(part.ledgerId)?.name ?? '다른 장부'
+  const cell = (col: GridColumn): ReactNode => {
+    switch (col) {
+      case 'amount':
+        return won(part.amount)
+      case 'category':
+        return part.categoryId ? refMaps.categoryById.get(part.categoryId)?.name : <span className="muted">미분류</span>
+      case 'ledger':
+        return ledger
+      case 'description':
+        return (
+          <>
+            <span className="badge">{ledger}</span> 몫 · 결제 {won(splitTotal(tx))}원
+          </>
+        )
+      default:
+        return null
+    }
+  }
+  return (
+    <tr className="split-sub" aria-label={`${ledger}에 나눈 몫 ${won(part.amount)}원`}>
+      <td className="rownum">↳</td>
+      {columns.map((col) => (
+        <td key={col}>
+          <div className={`sub-cell ${HEADERS[col].num ? 'num' : ''}`}>{cell(col)}</div>
+        </td>
+      ))}
+      <td />
+    </tr>
+  )
+}
+
+function StatusBadges({ tx, overdue, refMaps }: { tx: Transaction; overdue: boolean; refMaps: RefMaps }) {
   return (
     <>
+      {isSplit(tx) && (
+        <span
+          className="badge split"
+          title={`${[tx, ...tx.splitWith].map((p) => `${refMaps.ledgerById.get(p.ledgerId)?.name} ${won(p.amount)}`).join(' + ')} = 결제 ${won(splitTotal(tx))}원`}
+        >
+          분할
+        </span>
+      )}
       {tx.status === 'PLANNED' && <span className={`badge ${overdue ? 'warn' : 'planned'}`}>{overdue ? '! 미확정' : '예정'}</span>}
       {tx.status === 'SKIPPED' && <span className="badge">건너뜀</span>}
       {tx.source === 'API' && (
