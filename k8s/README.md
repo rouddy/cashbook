@@ -87,7 +87,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -f k8s/docker/server.Dock
 **master 브랜치에 푸시할 때만** `.circleci/config.yml`이 같은 규칙(`docker/image_tag.sh`)으로 태그(`<version>`)를 정해,
 Docker Hub에 그 태그가 **없을 때만** 빌드·푸시합니다(있으면 빌드하지 않고 성공 — 새 이미지는 `version`을 올려야 나옵니다). amd64·arm64를 각 아키텍처 머신에서 따로 빌드한 뒤 태그 하나로 묶으므로 QEMU보다 빠릅니다.
 `kustomization.yaml`은 바꾸지 않으니 배포할 때 `newTag`를 직접 맞춥니다. 같은 워크플로에서 안드로이드 APK와 웹 빌드 zip도
-아티팩트로 남깁니다. 필요한 프로젝트 환경 변수는 설정 파일 맨 위 주석에 있습니다(`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` 등).
+아티팩트로 남깁니다(웹 zip을 PVC에 올리는 법은 6장 방법 2). 필요한 프로젝트 환경 변수는 설정 파일 맨 위 주석에 있습니다(`DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` 등).
 
 Docker Hub 저장소를 **비공개**로 두면 클러스터가 받을 수 있게 Read-only 액세스 토큰으로 Secret을 만들고
 `app/deployment.yaml`(웹 이미지 Job을 쓰면 `tools/web-sync-job.yaml`도)의 `imagePullSecrets` 주석을 풉니다.
@@ -290,7 +290,35 @@ kubectl -n cashbook exec cashbook-pvc-shell -- \
 kubectl -n cashbook delete pod cashbook-pvc-shell
 ```
 
-### 방법 2: 웹 이미지 + Job (CI·레지스트리로 배포)
+### 방법 2: CircleCI 아티팩트 zip 올리기 (로컬 빌드 없이)
+
+master에 푸시하면 CircleCI `web-zip` Job이 빌드 결과를 `cashbook_web_<package.json version>.zip`으로 압축해 아티팩트(`web/`)로 남깁니다.
+zip에는 dist 안쪽이 들어 있어 풀면 `index.html`, `assets/`가 바로 나오므로, 받아서 푼 디렉터리를 방법 1 스크립트에 빌드 없이 넘깁니다.
+
+1. zip 받기 — CircleCI 웹에서 파이프라인 → `web-zip` Job → **Artifacts** 탭의 `web/cashbook_web_<version>.zip`.
+   터미널에서 받으려면 Job 번호(Job 페이지 주소 끝 `/jobs/<번호>`)와 개인 API 토큰(User Settings → Personal API Tokens)을 씁니다.
+
+   ```bash
+   JOB=123   # web-zip Job 번호
+   URL=$(curl -fsSL -H "Circle-Token: $CIRCLE_TOKEN" \
+     "https://circleci.com/api/v2/project/gh/rouddy/cashbook/$JOB/artifacts" |
+     jq -r '.items[] | select(.path | endswith(".zip")) | .url')
+   curl -fsSL -H "Circle-Token: $CIRCLE_TOKEN" -o "${URL##*/}" "$URL"
+   ```
+
+2. 풀어서 올리기
+
+   ```bash
+   D=$(mktemp -d)
+   unzip -q cashbook_web_0.0.2.zip -d "$D"
+   SKIP_BUILD=1 WEB_DIST="$D" k8s/scripts/deploy-web.sh    # KEEP_RELEASES 등 방법 1 옵션 그대로
+   rm -rf "$D"
+   ```
+
+릴리스 이름 뒤의 커밋은 스크립트가 **로컬 저장소의 HEAD**에서 붙이므로 zip을 만든 커밋과 다를 수 있습니다.
+어느 빌드인지 맞춰 두려면 그 커밋을 체크아웃한 상태에서 올립니다.
+
+### 방법 3: 웹 이미지 + Job (CI·레지스트리로 배포)
 
 웹 이미지는 같은 Docker Hub 저장소에 `web-` 태그로 올립니다.
 
@@ -426,6 +454,8 @@ kubectl apply -k k8s/app
 
 # 웹: 서버 재시작 없이
 k8s/scripts/deploy-web.sh
+# 또는 CircleCI 웹 zip을 받아 풀고 (6장 방법 2)
+SKIP_BUILD=1 WEB_DIST=<푼 디렉터리> k8s/scripts/deploy-web.sh
 ```
 
 서버 업데이트 전에 `backup-db.sh`로 백업을 받아 두면 마이그레이션 문제가 생겨도 되돌릴 수 있습니다(SQLite는 `restore-db.sh`, MySQL은 7장).
