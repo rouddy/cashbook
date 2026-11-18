@@ -1,8 +1,10 @@
 package com.rouddy.cashbook.relay
 
+import com.rouddy.cashbook.relay.data.CardMapping
 import com.rouddy.cashbook.relay.data.ParseMode
 import com.rouddy.cashbook.relay.data.Rule
 import com.rouddy.cashbook.relay.data.SourceType
+import com.rouddy.cashbook.relay.ingest.CardSource
 import com.rouddy.cashbook.relay.ingest.Decision
 import com.rouddy.cashbook.relay.ingest.IncomingMessage
 import com.rouddy.cashbook.relay.ingest.RuleMatcher
@@ -119,6 +121,45 @@ class RuleMatcherTest {
         assertEquals(sms.dedupeKey, sms.copy(body = text.replace(" ", "  ")).dedupeKey)
         assertEquals(sms.dedupeKey, sms.copy(origin = "1544-7200").dedupeKey)
         assertNotEquals(sms.dedupeKey, sms.copy(origin = "15881688").dedupeKey)
+    }
+
+    @Test
+    fun cardMappingPicksPaymentMethodByCardValue() {
+        val multi = Rule(
+            source = SourceType.NOTIFICATION,
+            packageName = "com.shcard.smartpay",
+            format = "{카드}({끝자리}) {금액}원 {가맹점}",
+            card = "신한 기본",
+            cardMappings = listOf(
+                CardMapping(match = "신한카드", card = "신한 아무거나"),
+                CardMapping(match = "Deep Dream", card = "딥드림"),
+                CardMapping(match = "5678", card = "체크"),
+                CardMapping(match = "", card = "빈 값은 무시"),
+            ),
+        )
+        fun cardOf(body: String): String? {
+            val msg = IncomingMessage(SourceType.NOTIFICATION, "com.shcard.smartpay", body = body)
+            return ((RuleMatcher.decide(listOf(multi), msg, today) as Decision.Upload).payload["card"] as? JsonPrimitive)?.content
+        }
+        // 여러 줄이 맞으면 더 긴 카드 값 (공백·대소문자 무시)
+        assertEquals("딥드림", cardOf("신한카드 deepdream(1234) 12,500원 스타벅스"))
+        assertEquals("신한 아무거나", cardOf("신한카드 Mr.Life(1234) 12,500원 스타벅스"))
+        // {끝자리} 값으로도 맞춘다
+        assertEquals("체크", cardOf("국민카드(5678) 12,500원 스타벅스"))
+        // 맞는 줄이 없으면 규칙의 결제수단 → 그것도 없으면 {끝자리}
+        assertEquals("신한 기본", cardOf("국민카드(9999) 12,500원 스타벅스"))
+        val noDefault = multi.copy(card = "")
+        val msg = IncomingMessage(SourceType.NOTIFICATION, "com.shcard.smartpay", body = "국민카드(9999) 12,500원 스타벅스")
+        assertEquals("9999", (RuleMatcher.decide(listOf(noDefault), msg, today) as Decision.Upload).payload["card"]!!.jsonPrimitive.content)
+
+        val preview = RuleMatcher.test(multi, "신한카드 Deep Dream(1234) 12,500원 스타벅스", today)
+        assertEquals(CardSource.MAPPING, preview.card!!.source)
+        assertEquals("Deep Dream", preview.card.mapping!!.match)
+        assertTrue(RuleMatcher.capturesCard(multi))
+        assertFalse(RuleMatcher.capturesCard(multi.copy(format = "{금액}원 {가맹점}")))
+        assertFalse(RuleMatcher.capturesCard(multi.copy(parseMode = ParseMode.SERVER)))
+        // 원문만 보낼 때는 뽑은 값이 없으니 규칙의 결제수단
+        assertEquals(CardSource.RULE, RuleMatcher.test(multi.copy(sendRawIfUnmatched = true), "다른 알림", today).card!!.source)
     }
 
     @Test

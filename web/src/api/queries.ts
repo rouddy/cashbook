@@ -11,7 +11,8 @@ export const CATEGORY_FIELDS = `id ledgerId name kind monthlyBudget isFixed excl
 export const ACCOUNT_FIELDS = `id name bank kind accountNumber balance balanceDate includeInAvailable interestRate maturityDate memo sortOrder archived updatedAt`
 
 export const TX_FIELDS = `id ledgerId date amount categoryId paymentMethodId description memo member status installmentMonths
-  excludeFromPerformance recurringRuleId recurringMonth source rawText benefitIds statementMonth paymentDate isIncome`
+  excludeFromPerformance recurringRuleId recurringMonth source rawText benefitIds statementMonth paymentDate isIncome
+  splitParentId splitWith { id ledgerId amount categoryId }`
 
 export const STATEMENT_FIELDS = `month periodStart periodEnd paymentDate confirmedAmount plannedAmount closed paid`
 
@@ -124,6 +125,11 @@ export const TOKENS_QUERY = `query Tokens { apiTokens { id name tokenPrefix scop
 export const CREATE_TX = `mutation CreateTx($input: TransactionInput!) { createTransaction(input: $input) { ${TX_FIELDS} } }`
 export const UPDATE_TX = `mutation UpdateTx($id: Int!, $input: TransactionPatch!) { updateTransaction(id: $id, input: $input) { ${TX_FIELDS} } }`
 export const DELETE_TX = `mutation DeleteTx($id: Int!) { deleteTransaction(id: $id) }`
+export const SPLIT_TX = `mutation SplitTx($id: Int!, $ledgerId: Int!, $amount: Int!, $categoryId: Int) {
+  splitTransaction(id: $id, ledgerId: $ledgerId, amount: $amount, categoryId: $categoryId) { id amount ledgerId }
+}`
+export const UNSPLIT_TX = `mutation UnsplitTx($id: Int!) { unsplitTransaction(id: $id) { id amount ledgerId } }`
+export const MOVE_TXS = `mutation MoveTxs($ids: [Int!]!, $ledgerId: Int!) { moveTransactions(ids: $ids, ledgerId: $ledgerId) { moved uncategorized } }`
 export const CONFIRM_TX = `mutation ConfirmTx($id: Int!, $date: NaiveDate, $amount: Int) { confirmTransaction(id: $id, date: $date, amount: $amount) { id status } }`
 export const SKIP_TX = `mutation SkipTx($id: Int!) { skipTransaction(id: $id) { id status } }`
 export const RESTORE_TX = `mutation RestoreTx($id: Int!) { restoreTransaction(id: $id) { id status } }`

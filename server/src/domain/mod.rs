@@ -9,4 +9,5 @@ pub mod import;
 pub mod ingest;
 pub mod recurring;
 pub mod sms;
+pub mod split;
 pub mod summary;

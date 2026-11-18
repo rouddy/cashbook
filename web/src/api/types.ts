@@ -136,6 +136,18 @@ export interface Transaction {
   statementMonth: string | null
   paymentDate: string
   isIncome: boolean
+  /** 분할해 옮긴 거래면 원래 거래 id */
+  splitParentId: number | null
+  /** 같은 결제를 나눈 다른 장부의 거래들 (분할하지 않았으면 빈 목록) */
+  splitWith: SplitPart[]
+}
+
+/** 분할한 결제의 다른 쪽. 이 거래와 금액을 합치면 결제 금액이다. */
+export interface SplitPart {
+  id: number
+  ledgerId: number
+  amount: number
+  categoryId: number | null
 }
 
 export interface TransactionPage {

@@ -92,6 +92,10 @@ class Store(context: Context) {
         }
     }
 
+    suspend fun saveServerOptions(options: ServerOptions) {
+        config.updateData { it.copy(serverOptions = options) }
+    }
+
     suspend fun setMmsLastId(id: Long) {
         config.updateData { it.copy(mmsLastId = id) }
     }

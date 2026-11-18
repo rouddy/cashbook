@@ -1,9 +1,11 @@
 package com.rouddy.cashbook.relay.ingest
 
+import com.rouddy.cashbook.relay.data.CardMapping
 import com.rouddy.cashbook.relay.data.ParseMode
 import com.rouddy.cashbook.relay.data.Rule
 import com.rouddy.cashbook.relay.data.SourceType
 import com.rouddy.cashbook.relay.parse.CompiledFormat
+import com.rouddy.cashbook.relay.parse.Field
 import com.rouddy.cashbook.relay.parse.FormatException
 import com.rouddy.cashbook.relay.parse.MessageFormat
 import com.rouddy.cashbook.relay.parse.ParsedFields
@@ -57,7 +59,26 @@ data class TestResult(
     val parsed: ParsedFields?,
     /** 보낼 JSON. 보내지 않으면 null */
     val payload: JsonObject?,
+    /** 보낼 결제수단과 그 출처 (보내지 않거나 결제수단이 없으면 null) */
+    val card: CardChoice? = null,
 )
+
+/** 서버로 보낼 결제수단(`card`)을 어디서 정했는지 */
+enum class CardSource {
+    /** 규칙의 카드별 결제수단 */
+    MAPPING,
+
+    /** 규칙의 (기본) 결제수단 */
+    RULE,
+
+    /** 형식의 `{끝자리}` */
+    LAST4,
+
+    /** 형식의 `{카드}` */
+    CARD,
+}
+
+data class CardChoice(val value: String, val source: CardSource, val mapping: CardMapping? = null)
 
 object RuleMatcher {
 
@@ -73,6 +94,36 @@ object RuleMatcher {
         null
     } catch (e: FormatException) {
         e.message
+    }
+
+    /** 형식에 `{카드}`나 `{끝자리}`가 있는지 (카드별 결제수단을 쓸 수 있는지) */
+    fun capturesCard(rule: Rule): Boolean = try {
+        compile(rule)?.groups?.any { it == Field.CARD.group || it == Field.LAST4.group } == true
+    } catch (_: FormatException) {
+        false
+    }
+
+    private fun squash(s: String): String = s.filterNot(Char::isWhitespace).lowercase()
+
+    /**
+     * 뽑은 `{카드}`·`{끝자리}` 값에 맞는 카드별 결제수단. 여러 줄이 맞으면 더 긴 값이 맞는 줄
+     * (예: "신한"과 "신한 Deep Dream"이 모두 맞으면 뒤의 것).
+     */
+    fun cardMapping(rule: Rule, parsed: ParsedFields?): CardMapping? {
+        val values = listOfNotNull(parsed?.card, parsed?.last4).map(::squash)
+        if (values.isEmpty()) return null
+        return rule.cardMappings
+            .filter { m -> m.card.isNotBlank() && squash(m.match).let { k -> k.isNotEmpty() && values.any { it.contains(k) } } }
+            .maxByOrNull { squash(it.match).length }
+    }
+
+    /** 보낼 결제수단: 카드별 결제수단 → 규칙의 결제수단 → `{끝자리}` → `{카드}` */
+    fun cardChoice(rule: Rule?, parsed: ParsedFields?): CardChoice? {
+        rule?.let { cardMapping(it, parsed) }?.let { return CardChoice(it.card.trim(), CardSource.MAPPING, it) }
+        rule?.card?.trim()?.takeIf(String::isNotEmpty)?.let { return CardChoice(it, CardSource.RULE) }
+        parsed?.last4?.let { return CardChoice(it, CardSource.LAST4) }
+        parsed?.card?.let { return CardChoice(it, CardSource.CARD) }
+        return null
     }
 
     fun keywordList(rule: Rule): List<String> = rule.keywords.split(',').map(String::trim).filter(String::isNotEmpty)
@@ -137,7 +188,8 @@ object RuleMatcher {
             rule.sendRawIfUnmatched -> payload(rule, sample, null)
             else -> null
         }
-        return TestResult(null, keywordMissing, titleMissing, parsed, payload)
+        val card = if (payload != null) cardChoice(rule, parsed) else null
+        return TestResult(null, keywordMissing, titleMissing, parsed, payload, card)
     }
 
     /**
@@ -150,8 +202,7 @@ object RuleMatcher {
         parsed?.merchant?.let { put("merchant", it) }
         parsed?.date?.let { put("date", it.toString()) }
         parsed?.installmentMonths?.let { put("installmentMonths", it) }
-        val card = rule?.card?.trim().orEmpty().ifEmpty { parsed?.last4 ?: parsed?.card.orEmpty() }
-        if (card.isNotEmpty()) put("card", card)
+        cardChoice(rule, parsed)?.let { put("card", it.value) }
         if (rule?.cancel == true) put("cancel", true)
         rule?.ledger?.trim()?.takeIf(String::isNotEmpty)?.let { put("ledger", it) }
         rule?.category?.trim()?.takeIf(String::isNotEmpty)?.let { put("category", it) }

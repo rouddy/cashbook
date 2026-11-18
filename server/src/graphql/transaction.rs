@@ -15,6 +15,7 @@ use crate::domain::billing::BillingCycle;
 use crate::domain::dates::YearMonth;
 use crate::domain::ingest::{self, IngestInput, IngestOutcome, Suggestion};
 use crate::domain::sms::{self, ParsedMessage};
+use crate::domain::split::{self, CategoryChoice, SplitError};
 use crate::entity::{
     card_benefit, category,
     enums::{CategoryKind, TxSource, TxStatus},
@@ -37,16 +38,23 @@ impl transaction::Model {
         Ok(lookup(ctx).payment_methods().await?.get(&id).cloned())
     }
 
-    /// 적용한 카드 혜택 항목 id
+    /// 적용한 카드 혜택 항목 id (분할해 옮긴 거래는 원래 거래의 혜택)
     async fn benefit_ids(&self, ctx: &Context<'_>) -> Result<Vec<i32>> {
-        Ok(lookup(ctx).tx_benefits().await?.get(&self.id).cloned().unwrap_or_default())
+        Ok(lookup(ctx).tx_benefits().await?.get(&benefit_owner(self)).cloned().unwrap_or_default())
     }
 
     async fn benefits(&self, ctx: &Context<'_>) -> Result<Vec<card_benefit::Model>> {
         let lookup = lookup(ctx);
-        let ids = lookup.tx_benefits().await?.get(&self.id).cloned().unwrap_or_default();
+        let ids = lookup.tx_benefits().await?.get(&benefit_owner(self)).cloned().unwrap_or_default();
         let all = lookup.benefits().await?;
         Ok(ids.iter().filter_map(|id| all.get(id).cloned()).collect())
+    }
+
+    /// 같은 결제를 나눈 다른 장부의 거래들 (분할하지 않았으면 빈 목록). 이 거래와 금액을 합치면 결제 금액이다.
+    async fn split_with(&self, ctx: &Context<'_>) -> Result<Vec<transaction::Model>> {
+        let groups = lookup(ctx).split_groups().await?;
+        let group = groups.get(&self.split_parent_id.unwrap_or(self.id));
+        Ok(group.map(|g| g.iter().filter(|t| t.id != self.id).cloned().collect()).unwrap_or_default())
     }
 
     /// 수입 카테고리 거래인지
@@ -72,6 +80,20 @@ impl transaction::Model {
         })
     }
 }
+
+/// 카드 혜택 지정을 두는 거래: 분할해 옮긴 거래(자식)는 원래 거래(부모)
+fn benefit_owner(tx: &transaction::Model) -> i32 {
+    tx.split_parent_id.unwrap_or(tx.id)
+}
+
+fn split_error(e: SplitError) -> async_graphql::Error {
+    match e {
+        SplitError::Invalid(msg) => user_error(msg),
+        SplitError::Db(e) => e.into(),
+    }
+}
+
+const SPLIT_LOCKED: &str = "분할된 거래입니다. 분할을 되돌린 뒤 바꾸세요";
 
 #[derive(InputObject, Default)]
 pub struct TransactionFilter {
@@ -369,6 +391,50 @@ async fn set_benefits<C: ConnectionTrait>(db: &C, tx_id: i32, payment_method_id:
     Ok(())
 }
 
+#[derive(SimpleObject, Debug, PartialEq, Eq)]
+pub struct MoveTransactionsResult {
+    /// 장부를 옮긴 거래 수 (이미 그 장부에 있던 거래는 세지 않는다)
+    pub moved: i32,
+    /// 옮길 장부에 같은 항목이 없어 미분류가 된 거래 수
+    pub uncategorized: i32,
+}
+
+/// 여러 거래를 다른 장부로 옮긴다. 카테고리는 장부별이라, 옮길 장부에 이름·종류가 같은
+/// 사용 중인 카테고리가 있으면 그것으로 바꾸고 없으면 비운다. 혜택·결제수단은 그대로 둔다.
+async fn move_to_ledger<C: ConnectionTrait>(db: &C, ids: &[i32], ledger_id: i32) -> Result<MoveTransactionsResult> {
+    if ids.len() > 5000 {
+        return Err(user_error("한 번에 5000건까지 옮길 수 있습니다"));
+    }
+    ledger::Entity::find_by_id(ledger_id).one(db).await?.ok_or_else(|| user_error("장부가 없습니다"))?;
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let found = transaction::Entity::find().filter(transaction::Column::Id.is_in(ids.clone())).all(db).await?;
+    if found.len() != ids.len() {
+        return Err(user_error("없는 거래가 있습니다. 목록을 새로 고친 뒤 다시 고르세요"));
+    }
+    if split::any_split(db, &found).await? {
+        return Err(user_error("분할된 거래는 옮길 수 없습니다. 분할을 되돌린 뒤 옮기세요"));
+    }
+    let categories: std::collections::HashMap<i32, category::Model> =
+        category::Entity::find().all(db).await?.into_iter().map(|c| (c.id, c)).collect();
+    let now = Utc::now();
+    let mut out = MoveTransactionsResult { moved: 0, uncategorized: 0 };
+    for tx in found.into_iter().filter(|t| t.ledger_id != ledger_id) {
+        let category_id = tx.category_id.and_then(|id| categories.get(&id)).and_then(|c| split::same_category_in(&categories, ledger_id, c));
+        if tx.category_id.is_some() && category_id.is_none() {
+            out.uncategorized += 1;
+        }
+        let mut active: transaction::ActiveModel = tx.into();
+        active.ledger_id = Set(ledger_id);
+        active.category_id = Set(category_id);
+        active.updated_at = Set(now);
+        active.update(db).await?;
+        out.moved += 1;
+    }
+    Ok(out)
+}
+
 async fn create_one<C: ConnectionTrait>(db: &C, input: TransactionInput) -> Result<transaction::Model> {
     let description = input.description.trim().to_string();
     if description.is_empty() {
@@ -445,6 +511,7 @@ impl TransactionMutation {
         let db = db(ctx);
         let found = transaction::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("거래가 없습니다"))?;
         let txn = db.begin().await?;
+        let group = split::group_of(&txn, &found).await?;
         let mut category_id = found.category_id;
         let mut ledger_id = found.ledger_id;
         // 장부/카테고리를 바꾸는 요청일 때만 둘의 짝을 맞춘다 (메모만 고칠 때 장부가 바뀌지 않게)
@@ -474,6 +541,9 @@ impl TransactionMutation {
                 ledger::Entity::find_by_id(ledger_id).one(&txn).await?.ok_or_else(|| user_error("장부가 없습니다"))?;
             }
         }
+        if group.is_some() && ledger_id != found.ledger_id {
+            return Err(user_error("분할된 거래는 다른 장부로 옮길 수 없습니다. 분할을 되돌린 뒤 옮기세요"));
+        }
         let mut payment_method_id = found.payment_method_id;
         match input.payment_method_id {
             MaybeUndefined::Value(v) => payment_method_id = Some(v),
@@ -491,6 +561,16 @@ impl TransactionMutation {
             active.date = Set(d);
         }
         if let Some(a) = input.amount {
+            // 분할한 결제는 합계가 그대로이도록 짝 거래가 차액을 맡는다
+            if let Some(g) = &group
+                && let Some((partner_id, partner_amount)) = split::rebalance(g, found.id, a).map_err(user_error)?
+                && let Some(partner) = g.members().find(|t| t.id == partner_id)
+            {
+                let mut p: transaction::ActiveModel = partner.clone().into();
+                p.amount = Set(partner_amount);
+                p.updated_at = Set(Utc::now());
+                p.update(&txn).await?;
+            }
             active.amount = Set(a);
         }
         if let Some(d) = input.description.map(|d| d.trim().to_string()) {
@@ -510,6 +590,9 @@ impl TransactionMutation {
             MaybeUndefined::Undefined => {}
         }
         if let Some(s) = input.status {
+            if group.is_some() && s != TxStatus::Confirmed {
+                return Err(user_error(SPLIT_LOCKED));
+            }
             active.status = Set(s);
         }
         if let Some(n) = input.installment_months {
@@ -520,27 +603,81 @@ impl TransactionMutation {
         }
         active.updated_at = Set(Utc::now());
         let saved = active.update(&txn).await?;
+        if group.is_some() {
+            split::sync_payment_fields(&txn, &saved).await?;
+        }
+        let owner = benefit_owner(&saved);
         if let Some(ids) = &input.benefit_ids {
-            set_benefits(&txn, saved.id, saved.payment_method_id, ids).await?;
+            set_benefits(&txn, owner, saved.payment_method_id, ids).await?;
         } else if pm_changed {
             let keep: Vec<i32> = transaction_benefit::Entity::find()
-                .filter(transaction_benefit::Column::TransactionId.eq(saved.id))
+                .filter(transaction_benefit::Column::TransactionId.eq(owner))
                 .all(&txn)
                 .await?
                 .into_iter()
                 .map(|b| b.card_benefit_id)
                 .collect();
-            set_benefits(&txn, saved.id, saved.payment_method_id, &keep).await?;
+            set_benefits(&txn, owner, saved.payment_method_id, &keep).await?;
         }
         txn.commit().await?;
         lookup(ctx).invalidate();
         Ok(saved)
     }
 
+    /// 여러 거래를 다른 장부로 옮긴다 (하나라도 실패하면 모두 취소).
+    /// 옮길 장부에 이름·종류가 같은 카테고리가 있으면 그것으로, 없으면 미분류로 둔다.
+    async fn move_transactions(&self, ctx: &Context<'_>, ids: Vec<i32>, ledger_id: i32) -> Result<MoveTransactionsResult> {
+        let db = db(ctx);
+        let txn = db.begin().await?;
+        let out = move_to_ledger(&txn, &ids, ledger_id).await?;
+        txn.commit().await?;
+        lookup(ctx).invalidate();
+        Ok(out)
+    }
+
+    /// 확정 거래에서 `amount`만큼 떼어 다른 장부의 거래로 나눈다 (한 결제를 두 장부에). 나눈 거래를 돌려준다.
+    /// `categoryId`를 빼면 옮길 장부에서 이름·종류가 같은 항목, null이면 미분류.
+    async fn split_transaction(
+        &self,
+        ctx: &Context<'_>,
+        id: i32,
+        ledger_id: i32,
+        amount: i64,
+        category_id: MaybeUndefined<i32>,
+    ) -> Result<transaction::Model> {
+        let category = match category_id {
+            MaybeUndefined::Undefined => CategoryChoice::SameName,
+            MaybeUndefined::Null => CategoryChoice::Set(None),
+            MaybeUndefined::Value(v) => CategoryChoice::Set(Some(v)),
+        };
+        let db = db(ctx);
+        let txn = db.begin().await?;
+        let child = split::split(&txn, id, ledger_id, amount, category).await.map_err(split_error)?;
+        txn.commit().await?;
+        lookup(ctx).invalidate();
+        Ok(child)
+    }
+
+    /// 분할을 되돌려 원래 거래 한 건으로 합친다 (묶음의 어느 거래 id든 된다). 합친 거래를 돌려준다.
+    async fn unsplit_transaction(&self, ctx: &Context<'_>, id: i32) -> Result<transaction::Model> {
+        let db = db(ctx);
+        let txn = db.begin().await?;
+        let merged = split::unsplit(&txn, id).await.map_err(split_error)?;
+        txn.commit().await?;
+        lookup(ctx).invalidate();
+        Ok(merged)
+    }
+
     /// 삭제. 반복 규칙이 이번 달 이후에 만든 항목은 다시 생기지 않도록 '건너뜀'으로 바꾼다.
+    /// 분할한 결제는 한 건으로 합친 뒤 결제 전체를 지운다.
     async fn delete_transaction(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
         let db = db(ctx);
         let found = transaction::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("거래가 없습니다"))?;
+        let txn = db.begin().await?;
+        let found = match split::group_of(&txn, &found).await? {
+            Some(group) => split::merge(&txn, group).await?,
+            None => found,
+        };
         // 반복 규칙이 이번 달 이후에 만든 항목은 지우면 다시 생기므로 '건너뜀'으로 자리를 남긴다.
         let this_month = YearMonth::of(config(ctx).today()).to_string();
         let keeps_slot = found.recurring_rule_id.is_some()
@@ -550,11 +687,12 @@ impl TransactionMutation {
                 let mut active: transaction::ActiveModel = found.into();
                 active.status = Set(TxStatus::Skipped);
                 active.updated_at = Set(Utc::now());
-                active.update(db).await?;
+                active.update(&txn).await?;
             }
         } else {
-            transaction::Entity::delete_by_id(id).exec(db).await?;
+            transaction::Entity::delete_by_id(found.id).exec(&txn).await?;
         }
+        txn.commit().await?;
         lookup(ctx).invalidate();
         Ok(true)
     }
@@ -569,6 +707,9 @@ impl TransactionMutation {
     ) -> Result<transaction::Model> {
         let db = db(ctx);
         let found = transaction::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("거래가 없습니다"))?;
+        if split::group_of(db, &found).await?.is_some() {
+            return Err(user_error(SPLIT_LOCKED));
+        }
         let mut active: transaction::ActiveModel = found.into();
         active.status = Set(TxStatus::Confirmed);
         if let Some(d) = date {
@@ -608,8 +749,213 @@ impl TransactionMutation {
 async fn set_status(ctx: &Context<'_>, id: i32, status: TxStatus) -> Result<transaction::Model> {
     let db = db(ctx);
     let found = transaction::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("거래가 없습니다"))?;
+    if split::group_of(db, &found).await?.is_some() {
+        return Err(user_error(SPLIT_LOCKED));
+    }
     let mut active: transaction::ActiveModel = found.into();
     active.status = Set(status);
     active.updated_at = Set(Utc::now());
     Ok(active.update(db).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn ledger(db: &sea_orm::DatabaseConnection, name: &str, sort_order: i32) -> i32 {
+        ledger::ActiveModel {
+            name: Set(name.into()),
+            description: Set(None),
+            is_default: Set(sort_order == 0),
+            sort_order: Set(sort_order),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn category(db: &sea_orm::DatabaseConnection, ledger_id: i32, name: &str, kind: CategoryKind, archived: bool) -> i32 {
+        category::ActiveModel {
+            ledger_id: Set(ledger_id),
+            name: Set(name.into()),
+            kind: Set(kind),
+            monthly_budget: Set(None),
+            is_fixed: Set(false),
+            excluded_from_spending: Set(false),
+            color: Set(None),
+            sort_order: Set(0),
+            archived: Set(archived),
+            ..Default::default()
+        }
+        .insert(db)
+        .await
+        .unwrap()
+        .id
+    }
+
+    async fn tx(db: &sea_orm::DatabaseConnection, ledger_id: i32, category_id: Option<i32>) -> i32 {
+        let input = TransactionInput {
+            ledger_id: Some(ledger_id),
+            date: NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
+            amount: 12_000,
+            category_id,
+            payment_method_id: None,
+            description: "점심".into(),
+            memo: None,
+            member: None,
+            status: TxStatus::Confirmed,
+            installment_months: 1,
+            exclude_from_performance: false,
+            benefit_ids: None,
+        };
+        create_one(db, input).await.unwrap().id
+    }
+
+    #[tokio::test]
+    async fn moves_to_other_ledger_and_maps_same_categories() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let meal = category(&db, home, "외식", CategoryKind::Expense, false).await;
+        let pocket_meal = category(&db, pocket, "외식", CategoryKind::Expense, false).await;
+        let grocery = category(&db, home, "장보기", CategoryKind::Expense, false).await;
+        category(&db, pocket, "장보기", CategoryKind::Expense, true).await; // 보관된 카테고리로는 옮기지 않는다
+        let bonus = category(&db, home, "보너스", CategoryKind::Income, false).await;
+        category(&db, pocket, "보너스", CategoryKind::Expense, false).await; // 종류가 다르면 다른 항목
+        let a = tx(&db, home, Some(meal)).await;
+        let b = tx(&db, home, Some(grocery)).await;
+        let c = tx(&db, home, Some(bonus)).await;
+        let d = tx(&db, home, None).await;
+        let already = tx(&db, pocket, Some(pocket_meal)).await;
+
+        let out = move_to_ledger(&db, &[a, b, c, d, already, a], pocket).await.unwrap();
+        assert_eq!(out, MoveTransactionsResult { moved: 4, uncategorized: 2 });
+        let get = |id| {
+            let db = db.clone();
+            async move { transaction::Entity::find_by_id(id).one(&db).await.unwrap().unwrap() }
+        };
+        let moved_a = get(a).await;
+        assert_eq!((moved_a.ledger_id, moved_a.category_id), (pocket, Some(pocket_meal)));
+        assert_eq!(get(b).await.category_id, None);
+        assert_eq!(get(c).await.category_id, None);
+        assert_eq!(get(d).await.ledger_id, pocket);
+        assert_eq!(get(already).await.category_id, Some(pocket_meal));
+    }
+
+    async fn gql(schema: &crate::graphql::CashbookSchema, query: &str) -> serde_json::Value {
+        let res = schema.execute(query).await;
+        assert!(res.errors.is_empty(), "{query}: {:?}", res.errors);
+        res.data.into_json().unwrap()
+    }
+
+    async fn gql_error(schema: &crate::graphql::CashbookSchema, query: &str) -> String {
+        let res = schema.execute(query).await;
+        res.errors.first().unwrap_or_else(|| panic!("{query}: 오류가 나야 합니다")).message.clone()
+    }
+
+    #[tokio::test]
+    async fn split_parts_stay_one_payment_through_edits() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let schema = crate::graphql::build_schema(db.clone(), crate::config::AppConfig::for_tests());
+        let card = gql(
+            &schema,
+            r#"mutation { createPaymentMethod(input: {name: "카드", kind: CREDIT_CARD, benefits: [{name: "10%", rate: 0.1}]}) { id benefits { id } } }"#,
+        )
+        .await;
+        let pm = card["createPaymentMethod"]["id"].as_i64().unwrap();
+        let benefit = card["createPaymentMethod"]["benefits"][0]["id"].as_i64().unwrap();
+        let created = gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createTransaction(input: {{ledgerId: {home}, date: "2026-11-03", amount: 20000, paymentMethodId: {pm}, description: "마트", benefitIds: [{benefit}]}}) {{ id }} }}"#
+            ),
+        )
+        .await;
+        let p = created["createTransaction"]["id"].as_i64().unwrap();
+        let split = gql(&schema, &format!("mutation {{ splitTransaction(id: {p}, ledgerId: {pocket}, amount: 8000) {{ id amount ledgerId splitParentId benefitIds }} }}")).await;
+        let c = split["splitTransaction"]["id"].as_i64().unwrap();
+        assert_eq!(split["splitTransaction"]["splitParentId"], p);
+        assert_eq!(split["splitTransaction"]["benefitIds"], serde_json::json!([benefit]), "혜택은 원래 거래 것");
+        let read = |id: i64| format!("{{ transaction(id: {id}) {{ amount date ledgerId benefitIds splitWith {{ id amount ledgerId }} }} }}");
+        let parent = gql(&schema, &read(p)).await;
+        assert_eq!(parent["transaction"]["amount"], 12000);
+        assert_eq!(parent["transaction"]["splitWith"], serde_json::json!([{"id": c, "amount": 8000, "ledgerId": pocket}]));
+
+        // 한쪽 금액을 고치면 다른 쪽이 차액을 맡고, 결제 속성은 같이 바뀐다
+        gql(&schema, &format!("mutation {{ updateTransaction(id: {c}, input: {{amount: 5000}}) {{ id }} }}")).await;
+        gql(&schema, &format!(r#"mutation {{ updateTransaction(id: {p}, input: {{date: "2026-11-05"}}) {{ id }} }}"#)).await;
+        let child = gql(&schema, &read(c)).await;
+        assert_eq!(child["transaction"]["date"], "2026-11-05");
+        assert_eq!(gql(&schema, &read(p)).await["transaction"]["amount"], 15000);
+        assert!(gql_error(&schema, &format!("mutation {{ updateTransaction(id: {c}, input: {{amount: 20000}}) {{ id }} }}")).await.contains("분할"));
+
+        // 자식에서 혜택을 고치면 원래 거래에 저장된다
+        gql(&schema, &format!("mutation {{ updateTransaction(id: {c}, input: {{benefitIds: []}}) {{ id }} }}")).await;
+        assert_eq!(gql(&schema, &read(p)).await["transaction"]["benefitIds"], serde_json::json!([]));
+
+        // 장부 옮기기·상태 바꾸기는 분할을 되돌린 뒤에만
+        for q in [
+            format!("mutation {{ updateTransaction(id: {c}, input: {{ledgerId: {home}}}) {{ id }} }}"),
+            format!("mutation {{ moveTransactions(ids: [{p}], ledgerId: {pocket}) {{ moved }} }}"),
+            format!("mutation {{ updateTransaction(id: {p}, input: {{status: PLANNED}}) {{ id }} }}"),
+            format!("mutation {{ skipTransaction(id: {p}) {{ id }} }}"),
+        ] {
+            assert!(gql_error(&schema, &q).await.contains("분할"), "{q}");
+        }
+
+        // 한쪽을 지우면 결제 전체가 지워진다
+        gql(&schema, &format!("mutation {{ deleteTransaction(id: {c}) }}")).await;
+        for id in [p, c] {
+            assert!(gql(&schema, &read(id)).await["transaction"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn split_payment_is_one_card_transaction() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let schema = crate::graphql::build_schema(db.clone(), crate::config::AppConfig::for_tests());
+        // 1만원 이상 10%, 건당 최대 1,500원
+        let card = gql(
+            &schema,
+            r#"mutation { createPaymentMethod(input: {name: "카드", kind: CREDIT_CARD, benefits: [{name: "10%", rate: 0.1, minAmount: 10000, perTxMax: 1500}]}) { id benefits { id } } }"#,
+        )
+        .await;
+        let pm = card["createPaymentMethod"]["id"].as_i64().unwrap();
+        let benefit = card["createPaymentMethod"]["benefits"][0]["id"].as_i64().unwrap();
+        let created = gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createTransaction(input: {{ledgerId: {home}, date: "2026-11-03", amount: 20000, paymentMethodId: {pm}, description: "마트", benefitIds: [{benefit}]}}) {{ id }} }}"#
+            ),
+        )
+        .await;
+        let p = created["createTransaction"]["id"].as_i64().unwrap();
+        let report = format!(r#"{{ paymentMethod(id: {pm}) {{ monthReport(month: "2026-11") {{ spending transactionCount discountTotal transactionBenefits {{ transactionId amount }} }} }} }}"#);
+        let before = gql(&schema, &report).await;
+        // 가계부 9,000 + 용돈 11,000: 따로 계산하면 9,000원은 최소 금액 미달이지만 결제는 20,000원 한 건
+        gql(&schema, &format!("mutation {{ splitTransaction(id: {p}, ledgerId: {pocket}, amount: 11000) {{ id }} }}")).await;
+        let after = gql(&schema, &report).await;
+        assert_eq!(after, before);
+        let r = &after["paymentMethod"]["monthReport"];
+        assert_eq!((r["spending"].as_i64(), r["transactionCount"].as_i64(), r["discountTotal"].as_i64()), (Some(20000), Some(1), Some(1500)));
+        assert_eq!(r["transactionBenefits"], serde_json::json!([{"transactionId": p, "amount": 1500}]));
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_ledger_or_transaction() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let a = tx(&db, home, None).await;
+        assert!(move_to_ledger(&db, &[a], pocket + 100).await.is_err());
+        assert!(move_to_ledger(&db, &[a, a + 100], pocket).await.is_err());
+        assert_eq!(transaction::Entity::find_by_id(a).one(&db).await.unwrap().unwrap().ledger_id, home);
+    }
 }
