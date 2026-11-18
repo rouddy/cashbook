@@ -32,6 +32,24 @@ class CashbookApiTest {
     }
 
     @Test
+    fun parseOptions() {
+        // domain/ingest.rs의 IngestOptions 형태 (+ routes.rs가 붙이는 ok)
+        val body = """
+            {"ok":true,"ledgers":[{"name":"가계부","isDefault":true},{"name":"용돈","isDefault":false}],
+             "categories":[{"name":"외식","ledger":"가계부","kind":"EXPENSE"},{"name":"월급","ledger":"가계부","kind":"INCOME"}],
+             "paymentMethods":[{"name":"신한 딥드림","kind":"CREDIT_CARD","issuer":"신한카드","last4":"1234","aliases":["딥드림"]},
+                               {"name":"현금","kind":"CASH","issuer":null,"last4":null,"aliases":[]}]}
+        """.trimIndent()
+        val o = CashbookApi.parseOptions((CashbookApi.classify(200, body) as Outcome.Ok).body)!!
+        assertEquals(listOf("가계부", "용돈"), o.ledgers.map { it.name })
+        assertTrue(o.ledgers[0].isDefault)
+        assertEquals("INCOME", o.categories[1].kind)
+        assertEquals("1234", o.paymentMethods[0].last4)
+        assertEquals(listOf("딥드림"), o.paymentMethods[0].aliases)
+        assertEquals(null, o.paymentMethods[1].issuer)
+    }
+
+    @Test
     fun parseResult() {
         val body = (CashbookApi.classify(200, okBody) as Outcome.Ok).body
         val (duplicate, r) = CashbookApi.parseResult(body)

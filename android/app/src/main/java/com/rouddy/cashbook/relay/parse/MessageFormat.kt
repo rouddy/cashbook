@@ -43,7 +43,7 @@ data class ParsedFields(
 class FormatException(message: String) : IllegalArgumentException(message)
 
 /** 컴파일한 형식. [groups]는 정규식에 실제로 있는 항목 그룹 이름. */
-class CompiledFormat internal constructor(val pattern: Pattern, private val groups: Set<String>) {
+class CompiledFormat internal constructor(val pattern: Pattern, val groups: Set<String>) {
 
     /** 형식과 맞으면 뽑은 값, 아니면 null */
     fun extract(text: String, today: LocalDate): ParsedFields? {
