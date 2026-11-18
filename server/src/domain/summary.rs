@@ -490,6 +490,7 @@ mod tests {
             source: TxSource::Manual,
             external_id: None,
             raw_text: None,
+            split_parent_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

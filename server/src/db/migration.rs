@@ -13,6 +13,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261023_000002_api_token_scope::Migration),
             Box::new(m20261102_000003_card_benefit_kind_stackable::Migration),
             Box::new(m20261109_000004_mysql_text_columns::Migration),
+            Box::new(m20261119_000005_transaction_split::Migration),
         ]
     }
 }
@@ -753,6 +754,49 @@ mod m20261109_000004_mysql_text_columns {
                     .await?;
             }
             Ok(())
+        }
+    }
+}
+
+/// 거래 분할: 한 결제를 여러 장부에 나눠 담을 때, 나눠 옮긴 거래(자식)가 원래 거래(부모)를 가리킨다.
+/// SQLite는 ALTER TABLE로 외래 키를 붙일 수 없어 인덱스만 둔다 (부모를 지우는 경로는 분할을 먼저 합친다).
+mod m20261119_000005_transaction_split {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261119_000005_transaction_split"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum Transactions {
+        Table,
+        SplitParentId,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(Transactions::Table)
+                        .add_column(integer_null(Transactions::SplitParentId))
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("ix_transactions_split_parent")
+                        .table(Transactions::Table)
+                        .col(Transactions::SplitParentId)
+                        .to_owned(),
+                )
+                .await
         }
     }
 }

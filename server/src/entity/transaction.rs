@@ -34,6 +34,9 @@ pub struct Model {
     pub external_id: Option<String>,
     /// 자동 입력 원문 (카드 승인 문자 등)
     pub raw_text: Option<String>,
+    /// 분할한 결제에서 다른 장부로 나눠 옮긴 거래면 원래 거래(부모) id.
+    /// 부모와 자식들 금액의 합이 실제 결제 금액이다.
+    pub split_parent_id: Option<i32>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
