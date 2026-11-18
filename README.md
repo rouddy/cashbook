@@ -131,7 +131,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 - 보호된 API(`/api/graphql`, `/api/ingest`)는 브라우저가 다른 사이트에서 보낸 요청(Origin이 Host와 다름)을 403으로 거부합니다. 자동화 앱처럼 Origin을 보내지 않는 요청은 영향이 없습니다. 프록시가 Host를 바꾸면 `X-Forwarded-Host`를 넘기거나 `CASHBOOK_ALLOWED_ORIGINS`를 설정하세요.
 - 비밀번호 없이(로컬) 실행할 때는 `localhost`/`127.0.0.1` 주소로 온 요청만 받습니다(DNS 리바인딩 방지).
 - 로그인 실패는 IP당 10분에 10번, 전체 10분에 100번까지.
-- API 토큰은 SHA-256 해시만 저장하고, 기본 권한은 **자동 입력 전용**입니다(`/api/ingest`만). GraphQL 전체를 스크립트로 쓰려면 설정에서 "전체 API" 토큰을 따로 발급하세요.
+- API 토큰은 SHA-256 해시만 저장하고, 기본 권한은 **자동 입력 전용**입니다(`/api/ingest`와 규칙용 이름 목록 `/api/ingest/options`만 — 거래 내역·금액은 읽을 수 없음). GraphQL 전체를 스크립트로 쓰려면 설정에서 "전체 API" 토큰을 따로 발급하세요.
 
 ## 핵심 계산 규칙
 
@@ -210,6 +210,9 @@ curl -X POST https://<서버>/api/ingest -H 'Authorization: Bearer cb_...' \
 자동 입력된 거래에는 받은 원문을 `raw_text`로 남깁니다: `text`(또는 text/plain 본문)는 받은 그대로, `text` 없이 필드만 보내면 받은 필드를 JSON으로(`merchant`·`card`는 `description`·`paymentMethod`로). 가계부 그리드의 "자동" 표시에 마우스를 올리면 보입니다.
 
 응답 예: `{"ok": true, "created": true, "duplicate": false, "matchedPlanned": false, "warnings": [], "transaction": {"id": 8612, "amount": 12500, "category": "외식", "paymentMethod": "MG+S", ...}}`
+
+`GET /api/ingest/options`(같은 토큰)는 `ledger`·`category`·`card`에 넣을 수 있는 이름 목록을 돌려줍니다(보관한 항목 제외, 기본 장부가 먼저):
+`{"ok": true, "ledgers": [{"name": "가계부", "isDefault": true}], "categories": [{"name": "외식", "ledger": "가계부", "kind": "EXPENSE"}], "paymentMethods": [{"name": "MG+S", "kind": "CREDIT_CARD", "issuer": "하나", "last4": "1234", "aliases": []}]}`
 
 플랫폼별 연결: 아이폰은 단축어 자동화(메시지 수신 → "URL의 콘텐츠 가져오기"로 POST), 안드로이드는 이 저장소의 **자동 입력 앱**([android/](android/README.md) — 보내는 번호·앱별 규칙과 문자 형식 템플릿, 장문 LMS, 재시도)이나 문자 전달 앱·MacroDroid·Tasker의 HTTP 요청으로 같은 엔드포인트를 호출합니다 (설정 화면에 단계별 안내).
 

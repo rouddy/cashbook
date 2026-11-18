@@ -3,6 +3,7 @@
 //! - `/api/graphiql` — GraphQL 탐색기
 //! - `/api/session`, `/api/login`, `/api/logout`
 //! - `/api/ingest` (POST, JSON 또는 text/plain) — 자동 입력, 인증 필요(API 토큰 또는 로그인 세션)
+//! - `/api/ingest/options` (GET) — 자동 입력 규칙에서 고를 장부·카테고리·결제수단 이름 (같은 인증)
 //! - `/api/health`
 //! - 그 외 경로는 React 빌드(`CASHBOOK_WEB_DIR`)를 서빙하고, 없는 경로는 index.html (SPA 라우팅)
 
@@ -192,8 +193,17 @@ async fn ingest_text(state: &State<AppState>, _auth: Auth, text: String) -> Resu
     }
 }
 
+/// 자동 입력 규칙에서 고를 장부·카테고리·결제수단 이름 (안드로이드 앱의 선택 목록). 자동 입력 전용 토큰으로도 읽는다.
+#[get("/ingest/options")]
+async fn ingest_options(state: &State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
+    let options = ingest::options(&state.db).await.map_err(|e| api_error(Status::InternalServerError, e.to_string()))?;
+    let mut body = serde_json::to_value(options).map_err(|e| api_error(Status::InternalServerError, e.to_string()))?;
+    body["ok"] = json!(true);
+    Ok(Json(body))
+}
+
 pub fn api() -> Vec<Route> {
-    routes![graphql, graphiql, health, session, login, logout, ingest_json, ingest_text]
+    routes![graphql, graphiql, health, session, login, logout, ingest_json, ingest_text, ingest_options]
 }
 
 const NOT_BUILT: &str = r#"<!doctype html><meta charset="utf-8"><title>가계부</title>

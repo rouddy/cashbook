@@ -46,8 +46,19 @@ data class Rule(
     val card: String = "",
     val ledger: String = "",
     val category: String = "",
+    /** 형식에서 뽑은 `{카드}`·`{끝자리}` 값에 따라 고르는 결제수단. 맞는 줄이 있으면 [card]보다 먼저 쓴다 */
+    val cardMappings: List<CardMapping> = emptyList(),
     /** 규칙 화면의 시험용 샘플 (기기에만 저장) */
     val sample: String = "",
+)
+
+/** 카드 값 → 결제수단 한 줄. 예: `Deep Dream` → `신한 딥드림` */
+@Serializable
+data class CardMapping(
+    /** `{카드}`·`{끝자리}` 값에 이 글자가 있으면 (공백·대소문자 무시) */
+    val match: String = "",
+    /** 보낼 결제수단 (가계부의 결제수단 이름) */
+    val card: String = "",
 )
 
 @Serializable
@@ -66,6 +77,43 @@ data class AppConfig(
     val rules: List<Rule> = emptyList(),
     /** 처리한 마지막 장문(MMS) 메시지 _id. -1이면 아직 기준을 잡지 않음 */
     val mmsLastId: Long = -1,
+    /** 마지막으로 받은 규칙 선택 목록 (서버에 연결되지 않을 때 씀) */
+    val serverOptions: ServerOptions? = null,
+)
+
+/**
+ * 규칙 화면에서 고를 장부·카테고리·결제수단 (`GET /api/ingest/options`).
+ * [serverUrl]·[fetchedAt]은 앱이 채운다 (다른 서버의 목록은 쓰지 않는다).
+ */
+@Serializable
+data class ServerOptions(
+    val serverUrl: String = "",
+    val fetchedAt: Long = 0,
+    val ledgers: List<LedgerOption> = emptyList(),
+    val categories: List<CategoryOption> = emptyList(),
+    val paymentMethods: List<PaymentMethodOption> = emptyList(),
+)
+
+@Serializable
+data class LedgerOption(val name: String, val isDefault: Boolean = false)
+
+@Serializable
+data class CategoryOption(
+    val name: String,
+    /** 장부 이름 */
+    val ledger: String,
+    /** EXPENSE, INCOME */
+    val kind: String = "EXPENSE",
+)
+
+@Serializable
+data class PaymentMethodOption(
+    val name: String,
+    /** CREDIT_CARD, CHECK_CARD, CASH, BANK_TRANSFER, OTHER */
+    val kind: String = "OTHER",
+    val issuer: String? = null,
+    val last4: String? = null,
+    val aliases: List<String> = emptyList(),
 )
 
 @Serializable

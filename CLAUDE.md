@@ -34,7 +34,7 @@ cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug   # 에뮬레�
   - `ingest.rs` 자동 입력(중복 방지 → 결제수단 해석 → 분류 추천 → 예정 매칭), `sms.rs` 승인 문자 파서
   - `import.rs` 정규화 JSON 가져오기
 - `graphql/` — 도메인별 Query/Mutation을 `MergedObject`로 합침. 요청마다 `Lookup`(작은 테이블 캐시)을 `request.data`로 넣는다. 뮤테이션 후엔 `lookup(ctx).invalidate()`.
-- `routes.rs` — `/api/graphql`(POST JSON, `FullAccess` 가드), `/api/ingest`(JSON·text/plain, `Auth` 가드), 세션/로그인, SPA 서빙. `auth.rs` — 비밀번호 세션(암호화 쿠키, SameSite=Strict) + API 토큰(SHA-256 해시, 권한 `INGEST`(기본, ingest만)/`FULL`). `Auth` 가드는 Origin≠Host 요청을 403으로 막고, 인증이 꺼진 로컬 모드에서는 localhost Host만 받는다. `CASHBOOK_PASSWORD`가 없으면 인증이 꺼지고, 그때 비루프백 주소로는 시작을 거부한다. 403 사유는 `ForbiddenReason`으로 요청 캐시에 남겨 catcher가 JSON으로 돌려준다.
+- `routes.rs` — `/api/graphql`(POST JSON, `FullAccess` 가드), `/api/ingest`(JSON·text/plain, `Auth` 가드), `/api/ingest/options`(GET, `Auth` — 안드로이드 규칙의 장부·카테고리·결제수단 선택 목록, 이름만), 세션/로그인, SPA 서빙. `auth.rs` — 비밀번호 세션(암호화 쿠키, SameSite=Strict) + API 토큰(SHA-256 해시, 권한 `INGEST`(기본, ingest와 규칙용 이름 목록 `/api/ingest/options`만)/`FULL`). `Auth` 가드는 Origin≠Host 요청을 403으로 막고, 인증이 꺼진 로컬 모드에서는 localhost Host만 받는다. `CASHBOOK_PASSWORD`가 없으면 인증이 꺼지고, 그때 비루프백 주소로는 시작을 거부한다. 403 사유는 `ForbiddenReason`으로 요청 캐시에 남겨 catcher가 JSON으로 돌려준다.
 
 ## 놓치기 쉬운 것
 
@@ -46,6 +46,6 @@ cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug   # 에뮬레�
 - 프론트는 뮤테이션 성공 시 `queryClient.invalidateQueries()`로 전부 다시 읽는다(`api/hooks.ts`의 `useMutate`). `run()`은 실패해도 던지지 않고 토스트 후 `undefined`를 돌려주므로, 성공해야 하는 후속 동작은 결과를 확인한다.
 - URL 쿼리 상태(`lib/month.ts`의 `useMonthParam`/`useQueryParam`)는 한 핸들러에서 여러 개를 바꿀 수 있게 항상 `window.location.search`에서 시작해 갱신한다.
 - 가계부 그리드 편집은 blur로 끝나면 포커스를 옮기지 않는다(다른 칸을 누른 사용자 입력을 뺏지 않기). Enter/Tab/Esc일 때만 다음 칸으로 이동.
-- 안드로이드 앱은 서버 `ingest`에 `text`(원문)를 항상 보내고 형식에서 뽑은 값만 명시 필드로 넣는다(서버 중복 방지는 원문 해시). 템플릿 문법을 바꾸면 `MessageFormatTest`와 `android/README.md` 표를 같이 고친다.
+- 안드로이드 앱은 서버 `ingest`에 `text`(원문)를 항상 보내고 형식에서 뽑은 값만 명시 필드로 넣는다(서버 중복 방지는 원문 해시). 템플릿 문법을 바꾸면 `MessageFormatTest`와 `android/README.md` 표를 같이 고친다. 보낼 `card`는 `RuleMatcher.cardChoice`(카드별 결제수단 → 규칙 결제수단 → `{끝자리}` → `{카드}`) 한 곳에서 정한다. `/api/ingest/options` 응답 모양을 바꾸면 앱의 `ServerOptions`와 `CashbookApiTest.parseOptions`도 맞춘다.
 - DB 이식성: `Expr::cust` SQL은 두 DB 공통 함수만, 나머지는 `db::sql`(`char_length`, `sum_i64` — MySQL SUM은 DECIMAL). ORDER BY 없는 순서는 DB마다 다르므로 결과 순서가 보이면 정렬을 명시(LIMIT 앞은 동점까지). 테스트는 인메모리 SQLite라 MySQL 차이는 잡지 못한다 — 쿼리를 바꾸면 MySQL에서도 확인.
 - 차트 색은 dataviz 기준(이번 달=accent 파랑, 비교 맥락=회색, 2px 선, 툴팁·표 보기). 새 차트도 같은 규칙을 따른다.

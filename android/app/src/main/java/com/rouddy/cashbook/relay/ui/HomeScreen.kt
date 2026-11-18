@@ -228,6 +228,7 @@ private fun Rule.summary(): String {
     val extras = listOfNotNull(
         if (cancel) "취소 문자" else null,
         card.trim().takeIf(String::isNotEmpty)?.let { "카드 $it" },
+        cardMappings.size.takeIf { it > 0 && parseMode != ParseMode.SERVER }?.let { "카드별 결제수단 ${it}개" },
     )
     // 제목(이름)과 같은 대상은 다시 쓰지 않는다
     val showTarget = name.isNotBlank() && name.trim() != target

@@ -1,6 +1,7 @@
 package com.rouddy.cashbook.relay.ingest
 
 import com.rouddy.cashbook.relay.data.AppJson
+import com.rouddy.cashbook.relay.data.ServerOptions
 import com.rouddy.cashbook.relay.data.Settings
 import com.rouddy.cashbook.relay.data.UploadResult
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +37,16 @@ class CashbookApi(serverUrl: String, private val token: String) {
     }
 
     suspend fun ingest(payload: String): Outcome = request("POST", "/api/ingest", payload)
+
+    /** 규칙에서 고를 장부·카테고리·결제수단. 실패하면 보여 줄 메시지 */
+    suspend fun options(): Result<ServerOptions> = when (val out = request("GET", "/api/ingest/options", null)) {
+        is Outcome.Ok -> parseOptions(out.body)?.let { Result.success(it.copy(serverUrl = base, fetchedAt = System.currentTimeMillis())) }
+            ?: Result.failure(IOException("목록 응답을 해석하지 못했습니다"))
+        is Outcome.Rejected -> Result.failure(
+            IOException(if (out.status == 404) "서버가 목록 API를 지원하지 않습니다. 가계부 서버를 업데이트하세요" else out.message),
+        )
+        is Outcome.Retry -> Result.failure(IOException(out.message))
+    }
 
     /**
      * 연결과 토큰 확인. 빈 JSON을 자동 입력으로 보내면 인증을 통과한 뒤 "금액 없음"(422)으로 거절되므로
@@ -111,6 +122,9 @@ class CashbookApi(serverUrl: String, private val token: String) {
                 else -> Outcome.Rejected(code, serverError ?: "요청이 거부되었습니다 ($code)")
             }
         }
+
+        internal fun parseOptions(body: JsonObject): ServerOptions? =
+            runCatching { AppJson.decodeFromJsonElement(ServerOptions.serializer(), body) }.getOrNull()
 
         /** 자동 입력 응답 → (중복 여부, 보여 줄 값) */
         internal fun parseResult(body: JsonObject): Pair<Boolean, UploadResult> {

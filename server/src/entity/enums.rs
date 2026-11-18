@@ -160,7 +160,7 @@ pub enum BenefitKind {
 #[sea_orm(rs_type = "String", db_type = "String(StringLen::N(16))")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TokenScope {
-    /// 자동 입력(`/api/ingest`)만
+    /// 자동 입력(`/api/ingest`)과 규칙용 이름 목록(`/api/ingest/options`)만
     #[sea_orm(string_value = "INGEST")]
     Ingest,
     /// GraphQL 전체 (읽기/쓰기)

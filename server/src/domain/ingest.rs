@@ -26,7 +26,7 @@ use super::sms::{self, ParsedMessage};
 use crate::db::sql;
 use crate::entity::{
     category,
-    enums::{TxSource, TxStatus},
+    enums::{CategoryKind, PaymentKind, TxSource, TxStatus},
     ledger, payment_method, recurring_rule, transaction, transaction_benefit,
 };
 
@@ -341,6 +341,76 @@ fn hash_text(text: &str) -> String {
     format!("text:{}", &hex::encode(digest)[..32])
 }
 
+/// 자동 입력 규칙을 만들 때 고를 수 있는 값 (`GET /api/ingest/options`).
+/// 자동 입력 전용 토큰으로도 읽을 수 있으므로 이름처럼 규칙에 필요한 것만 담고 거래·금액은 넣지 않는다.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestOptions {
+    pub ledgers: Vec<LedgerOption>,
+    pub categories: Vec<CategoryOption>,
+    pub payment_methods: Vec<PaymentMethodOption>,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerOption {
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryOption {
+    pub name: String,
+    /// 장부 이름
+    pub ledger: String,
+    pub kind: CategoryKind,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentMethodOption {
+    pub name: String,
+    pub kind: PaymentKind,
+    pub issuer: Option<String>,
+    pub last4: Option<String>,
+    pub aliases: Vec<String>,
+}
+
+/// 보관하지 않은 장부·카테고리·결제수단. 화면과 같은 순서(sort_order, id)로, 기본 장부를 먼저 둔다.
+pub async fn options<C: ConnectionTrait>(db: &C) -> Result<IngestOptions, DbErr> {
+    let mut ledgers = ledger::Entity::find().all(db).await?;
+    ledgers.sort_by_key(|l| (!l.is_default, l.sort_order, l.id));
+    let ledger_order: HashMap<i32, usize> = ledgers.iter().enumerate().map(|(i, l)| (l.id, i)).collect();
+
+    let mut categories: Vec<category::Model> =
+        category::Entity::find().all(db).await?.into_iter().filter(|c| !c.archived && ledger_order.contains_key(&c.ledger_id)).collect();
+    categories.sort_by_key(|c| (ledger_order[&c.ledger_id], c.kind == CategoryKind::Income, c.sort_order, c.id));
+
+    let mut pms: Vec<payment_method::Model> =
+        payment_method::Entity::find().all(db).await?.into_iter().filter(|p| !p.archived).collect();
+    pms.sort_by_key(|p| (p.sort_order, p.id));
+
+    let ledger_name: HashMap<i32, &str> = ledgers.iter().map(|l| (l.id, l.name.as_str())).collect();
+    Ok(IngestOptions {
+        categories: categories
+            .iter()
+            .map(|c| CategoryOption { name: c.name.clone(), ledger: ledger_name[&c.ledger_id].to_string(), kind: c.kind })
+            .collect(),
+        payment_methods: pms
+            .iter()
+            .map(|p| PaymentMethodOption {
+                name: p.name.clone(),
+                kind: p.kind,
+                issuer: p.issuer.clone().filter(|s| !s.trim().is_empty()),
+                last4: p.last4.clone().filter(|s| !s.trim().is_empty()),
+                aliases: p.alias_list(),
+            })
+            .collect(),
+        ledgers: ledgers.iter().map(|l| LedgerOption { name: l.name.clone(), is_default: l.is_default }).collect(),
+    })
+}
+
 pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: NaiveDate) -> Result<IngestOutcome, IngestError> {
     let mut warnings = Vec::new();
     let raw_text = raw_input(&input);
@@ -534,7 +604,6 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entity::enums::{CategoryKind, PaymentKind};
 
     async fn setup() -> sea_orm::DatabaseConnection {
         let db = crate::db::connect_in_memory().await;
@@ -750,5 +819,58 @@ mod tests {
         .unwrap();
         assert_eq!(out.transaction.amount, -12_000);
         assert!(ingest(&db, IngestInput::default(), today()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn options_list_active_names_default_ledger_first() {
+        let db = setup().await;
+        let allowance = ledger::ActiveModel {
+            name: Set("용돈".into()),
+            description: Set(None),
+            is_default: Set(false),
+            sort_order: Set(-1),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        for (name, kind, archived) in
+            [("월급", CategoryKind::Income, false), ("간식", CategoryKind::Expense, false), ("옛날", CategoryKind::Expense, true)]
+        {
+            category::ActiveModel {
+                ledger_id: Set(if name == "월급" { 1 } else { allowance.id }),
+                name: Set(name.into()),
+                kind: Set(kind),
+                monthly_budget: Set(None),
+                is_fixed: Set(false),
+                excluded_from_spending: Set(false),
+                color: Set(None),
+                sort_order: Set(-5),
+                archived: Set(archived),
+                ..Default::default()
+            }
+            .insert(&db)
+            .await
+            .unwrap();
+        }
+        let mut sky: payment_method::ActiveModel =
+            payment_method::Entity::find().filter(payment_method::Column::Name.eq("스카이패스")).one(&db).await.unwrap().unwrap().into();
+        sky.archived = Set(true);
+        sky.update(&db).await.unwrap();
+
+        let o = options(&db).await.unwrap();
+        // 기본 장부가 sort_order보다 먼저
+        assert_eq!(o.ledgers.iter().map(|l| (l.name.as_str(), l.is_default)).collect::<Vec<_>>(), [("가계부", true), ("용돈", false)]);
+        // 장부 순서 → 지출 먼저 → sort_order, 보관한 것은 빠짐
+        let cats: Vec<_> = o.categories.iter().map(|c| (c.ledger.as_str(), c.name.as_str())).collect();
+        assert_eq!(cats, [("가계부", "외식"), ("가계부", "비용"), ("가계부", "월급"), ("용돈", "간식")]);
+        let pms: Vec<_> = o.payment_methods.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(pms, ["알뜰교통신한", "탄탄대로biz"]);
+        assert_eq!(o.payment_methods[0].aliases, ["알뜰교통 신한카드"]);
+        assert_eq!(o.payment_methods[0].last4.as_deref(), Some("1234"));
+        let json = serde_json::to_value(&o).unwrap();
+        assert_eq!(json["paymentMethods"][0]["kind"], "CREDIT_CARD");
+        assert_eq!(json["categories"][2]["kind"], "INCOME");
     }
 }
