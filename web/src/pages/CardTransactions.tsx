@@ -123,7 +123,7 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
         <TransactionGrid
           rows={page.items}
           refMaps={refMaps}
-          columns={['date', 'amount', 'category', 'description', 'benefits', 'benefitAmount', 'ledger', 'memo']}
+          columns={['date', 'amount', 'description', 'ledger', 'category', 'benefits', 'benefitAmount', 'memo']}
           benefitAmounts={txBenefitTexts(report)}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
           footer={<PageTotals page={page} extra={<span>혜택 {benefitTotalsText(report)}</span>} />}

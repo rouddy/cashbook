@@ -244,7 +244,8 @@ await step('카드별 내역: 혜택 태그 편집과 결제월 기준 보기', 
   await page.goto(`${BASE}/card-transactions?month=2026-08&card=3`)
   await page.getByRole('heading', { name: /2026년 8월 이용 내역/ }).waitFor()
   const row = page.locator('table.sheet tbody tr', { hasText: 'GS25' }).first()
-  await row.locator('button.cell-btn').nth(4).click()
+  // 날짜·금액·내용·장부·항목·혜택 순서라 혜택 칸은 6번째
+  await row.locator('button.cell-btn').nth(5).click()
   await row.getByRole('checkbox', { name: /간편결제/ }).check()
   await row.getByRole('button', { name: '적용' }).click()
   await row.locator('button.cell-btn', { hasText: '간편결제' }).waitFor()
