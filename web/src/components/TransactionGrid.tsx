@@ -1,7 +1,7 @@
 import { Fragment, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 
 import { type RefMaps, useMutate } from '../api/hooks'
-import { CONFIRM_TX, CREATE_TX, DELETE_TX, RESTORE_TX, SKIP_TX, UPDATE_TX } from '../api/queries'
+import { CONFIRM_TX, CREATE_TX, RESTORE_TX, SKIP_TX, UPDATE_TX } from '../api/queries'
 import type { SplitPart, Suggestion, Transaction, TransactionPage, TxStatus } from '../api/types'
 import { parseAmount, shortDate, SOURCE_LABEL, weekendClass, won } from '../lib/format'
 import { localToday } from '../lib/month'
@@ -49,7 +49,7 @@ interface Props {
   benefitAmounts?: Map<number, string>
   emptyText?: string
   footer?: ReactNode
-  /** 선택 모드: 행 번호 대신 체크박스를 보이고 새 행 입력은 숨긴다 */
+  /** 선택 모드: 행 번호 대신 체크박스를 보이고 새 행 입력은 숨긴다 (삭제·장부 이동은 선택 모드에서만) */
   selection?: { selected: ReadonlySet<number>; onChange: (next: Set<number>) => void }
 }
 
@@ -332,24 +332,6 @@ export default function TransactionGrid({
                       {tx.status === 'SKIPPED' && (
                         <button className="btn sm ghost" disabled={pending} onClick={() => run(RESTORE_TX, { id: tx.id })}>
                           복원
-                        </button>
-                      )}
-                      {!(tx.status === 'SKIPPED' && tx.recurringRuleId) && (
-                        <button
-                          className="btn sm ghost icon danger"
-                          aria-label="삭제"
-                          title="삭제"
-                          disabled={pending}
-                          onClick={() => {
-                            const message = isSplit(tx)
-                              ? `여러 장부에 나눈 결제 '${tx.description}' ${won(splitTotal(tx))}원 전체를 삭제할까요?\n(${tx.splitWith
-                                  .map((p) => refMaps.ledgerById.get(p.ledgerId)?.name)
-                                  .join(', ')}에 나눈 몫도 함께 삭제됩니다)`
-                              : `'${tx.description}' ${won(tx.amount)}원을 삭제할까요?`
-                            if (window.confirm(message)) run(DELETE_TX, { id: tx.id })
-                          }}
-                        >
-                          ✕
                         </button>
                       )}
                     </div>

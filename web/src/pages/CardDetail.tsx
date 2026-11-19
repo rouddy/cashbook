@@ -9,10 +9,12 @@ import { ErrorBox, Loading, Meter, Panel, PerformanceMeter } from '../components
 import Modal from '../components/Modal'
 import MonthPicker from '../components/MonthPicker'
 import { useToast } from '../components/Toast'
+import { SelectionActions } from '../components/DeleteTransactions'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
 import { benefitRateText, benefitTotalsText, benefitValueText, separateLimitLabel, txBenefitTexts } from '../lib/benefits'
 import { longDate, PAYMENT_KIND_LABEL, shortDate, won } from '../lib/format'
 import { defaultDateFor, localToday, monthLabel, useMonthParam } from '../lib/month'
+import { useTxSelection } from '../lib/selection'
 
 type Detail = PaymentMethod & {
   transactionCount: number
@@ -413,8 +415,14 @@ function CardMonthTransactions({ card, month, refMaps, report }: { card: Payment
   const q = useGql<{ transactions: TransactionPage }>(['transactions', filter], TRANSACTIONS_QUERY, { filter, sort: 'DATE_ASC', limit: 2000 })
   const benefitAmounts = txBenefitTexts(report)
   const page = q.data?.transactions
+  const sel = useTxSelection(page?.items)
   return (
-    <Panel title={`${monthLabel(month)} ${card.name} 거래`} sub="혜택 칸을 눌러 거래별 혜택 항목을 지정하세요" flush>
+    <Panel
+      title={`${monthLabel(month)} ${card.name} 거래`}
+      sub="혜택 칸을 눌러 거래별 혜택 항목을 지정하세요"
+      actions={<SelectionActions sel={sel} refMaps={refMaps} />}
+      flush
+    >
       {q.error ? (
         <ErrorBox error={q.error} />
       ) : !page ? (
@@ -426,6 +434,7 @@ function CardMonthTransactions({ card, month, refMaps, report }: { card: Payment
           columns={['date', 'amount', 'category', 'description', 'benefits', 'benefitAmount', 'member', 'memo']}
           benefitAmounts={benefitAmounts}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
+          selection={sel.grid}
           footer={<PageTotals page={page} />}
         />
       )}

@@ -124,7 +124,7 @@ export const TOKENS_QUERY = `query Tokens { apiTokens { id name tokenPrefix scop
 
 export const CREATE_TX = `mutation CreateTx($input: TransactionInput!) { createTransaction(input: $input) { ${TX_FIELDS} } }`
 export const UPDATE_TX = `mutation UpdateTx($id: Int!, $input: TransactionPatch!) { updateTransaction(id: $id, input: $input) { ${TX_FIELDS} } }`
-export const DELETE_TX = `mutation DeleteTx($id: Int!) { deleteTransaction(id: $id) }`
+export const DELETE_TXS = `mutation DeleteTxs($ids: [Int!]!) { deleteTransactions(ids: $ids) { deleted skipped } }`
 export const SPLIT_TX = `mutation SplitTx($id: Int!, $ledgerId: Int!, $amount: Int!, $categoryId: Int) {
   splitTransaction(id: $id, ledgerId: $ledgerId, amount: $amount, categoryId: $categoryId) { id amount ledgerId }
 }`

@@ -32,10 +32,12 @@ web/
     ├── lib/
     │   ├── month.ts          "YYYY-MM" 계산, URL 상태 훅 useMonthParam / useQueryParam
     │   ├── benefits.ts       카드 혜택 종류·단위 표시, 혜택률(% / N원당 1마일), 중복 적용 선택 규칙
+    │   ├── selection.ts      거래 그리드 선택 모드 상태 useTxSelection
     │   └── format.ts         금액·날짜·비율 포맷, enum 표시 이름
     ├── components/
     │   ├── Layout.tsx        사이드바 메뉴 + 본문(Outlet)
     │   ├── TransactionGrid.tsx  스프레드시트식 거래 표 (셀 편집, 새 행 입력, 확정·건너뛰기·복원)
+    │   ├── DeleteTransactions.tsx 선택한 거래 삭제 버튼 + 확인 창, 카드 화면용 선택·삭제 버튼
     │   ├── DescriptionInput.tsx 내용(가맹점) 자동완성, 고르면 과거 분류를 넘겨줌
     │   ├── CardForm.tsx      결제수단 추가/편집 (정산 일정 자동 추정, 혜택 항목·종류·중복 적용, 실적 구간)
     │   ├── BenefitChecks.tsx 거래 혜택 선택 (중복 적용이 아닌 혜택은 하나만)
@@ -81,7 +83,8 @@ GraphQL 요청이 401을 받으면 `client.ts`가 `cashbook:unauthorized` 이벤
 - **blur로 편집이 끝나면 포커스를 옮기지 않습니다.** 다른 칸이나 입력칸을 누른 사용자의 입력을 뺏지 않기 위해서입니다.
 - `newRow`를 주면 맨 아래에 입력 행이 생깁니다. Enter를 연달아 눌러도 한 건만 저장합니다. 내용 칸은 `DescriptionInput` 자동완성으로 빈 분류를 채웁니다.
 - 예정 행에는 `예정` 배지(날짜가 지났으면 `! 미확정`)와 확정(예정 금액·날짜로)·건너뛰기 버튼, 건너뛴 행에는 복원 버튼이 붙습니다.
-- `selection`을 주면 행 번호 자리에 체크박스가 생기고(머리글은 보이는 행 모두 선택, Shift+클릭은 범위 선택) 새 행 입력은 숨깁니다.
+- `selection`을 주면 행 번호 자리에 체크박스가 생기고(머리글은 보이는 행 모두 선택, Shift+클릭은 범위 선택) 새 행 입력은 숨깁니다. 상태는 `lib/selection.ts`의 `useTxSelection`.
+- 그리드에는 행 삭제 버튼이 없습니다. 실수로 지우지 않도록 삭제는 선택 모드의 붉은 `삭제` → 확인 창(`components/DeleteTransactions.tsx`)으로만 합니다. 카드 상세·카드별 내역은 패널 머리글의 `SelectionActions`(선택·삭제)를 씁니다.
 - 분할한 결제(`splitWith`가 있는 거래)는 `분할` 배지를 달고, 나눈 다른 쪽이 목록에 없으면(다른 장부) 바로 아래 읽기 전용 보조 행(`tr.split-sub`)으로 보여줍니다. 판단·합계는 `lib/split.ts`.
 
 ### 화면 스타일·차트
@@ -135,12 +138,14 @@ GraphQL 요청이 401을 받으면 `client.ts`가 `cashbook:unauthorized` 이벤
 |---|---|
 | 필터 | 장부 탭, 월, 항목(`미분류` = `none`), 결제수단, 구성원, 상태(`active` 확정+예정 / `CONFIRMED` / `PLANNED` / `SKIPPED`), 내용 검색(300ms 지연, URL에 남기지 않음) |
 | 거래 그리드 | 열: 날짜·금액·항목·결제수단·내용·구성원·메모 (+ 전체 장부일 때 장부). 필터가 없을 때만 맨 아래 새 행 입력 |
+| 삭제 | 행마다 삭제 버튼은 두지 않는다. 검색 옆 `선택` → 체크 → 붉은 `삭제`(`DeleteSelectedButton`) → 지울 거래 목록을 보여주는 확인 창(기본 포커스 `취소`)에서 `N건 삭제`. 분할 결제는 묶음을 한 건으로 보여주고 전체를 지운다 |
 | 장부 이동 | 검색 옆 `선택` → 체크박스와 옮길 장부·`이동` 버튼. 지금 목록에 보이는 체크한 거래만 옮긴다. 옮길 장부에 이름·종류가 같은 항목이 있으면 그 항목으로, 없으면 미분류. 분할한 거래가 섞이면 `이동` 비활성 |
 | 분할 | 한 건만 체크하면 `분할이동`(확정 거래만) → 장부·금액·항목을 고르는 창(`SplitModal`, 금액 규칙은 `splitAmountError`로 서버와 같게). 분할한 거래를 한 건 체크하면 대신 `분할되돌리기` |
 | 오른쪽 요약 | 이번 달 요약(총 사용 금액, 합계 제외, 계획 수입, 배분 항목, 월잔액, 구성원 지출 / 용돈), 소비 총액(항목별), 결제수단별 합계 |
 
 - 데이터: `TRANSACTIONS_QUERY`, `SUMMARY_QUERY`
-- 변경(그리드): `CREATE_TX`, `UPDATE_TX`, `DELETE_TX`, `CONFIRM_TX`, `SKIP_TX`, `RESTORE_TX`
+- 변경(그리드): `CREATE_TX`, `UPDATE_TX`, `CONFIRM_TX`, `SKIP_TX`, `RESTORE_TX`
+- 변경(삭제): `DELETE_TXS` (`deleteTransactions(ids)`, 한 트랜잭션 — 지운 수 `deleted`, 건너뜀으로 남긴 반복 항목 수 `skipped`)
 - 변경(장부 이동): `MOVE_TXS` (`moveTransactions(ids, ledgerId)`, 한 트랜잭션)
 - 변경(분할): `SPLIT_TX` (`splitTransaction(id, ledgerId, amount, categoryId)`), `UNSPLIT_TX` (`unsplitTransaction(id)`)
 

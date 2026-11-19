@@ -350,6 +350,15 @@ select:focus-visible,
 .btn.danger {
   color: var(--bad);
 }
+.btn.danger-solid {
+  background: var(--bad-mark);
+  border-color: var(--bad-mark);
+  color: #fff;
+}
+.btn.danger-solid:hover {
+  background: var(--bad-mark);
+  filter: brightness(0.9);
+}
 .btn.ghost {
   border-color: transparent;
   background: transparent;

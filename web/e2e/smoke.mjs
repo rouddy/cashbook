@@ -107,7 +107,7 @@ await step('가계부: 항목 셀 select 변경', async () => {
   await row.locator('button.cell-btn', { hasText: '기타' }).waitFor()
 })
 
-await step('가계부: 새 행으로 입력 (가맹점 자동완성) 후 삭제', async () => {
+await step('가계부: 새 행으로 입력 (가맹점 자동완성) 후 선택 → 삭제 확인 창', async () => {
   await page.goto(`${BASE}/transactions?month=2026-10`)
   const newRow = page.locator('tr.new-row')
   await newRow.getByLabel('금액').fill('4500')
@@ -120,8 +120,18 @@ await step('가계부: 새 행으로 입력 (가맹점 자동완성) 후 삭제'
   await newRow.getByRole('button', { name: '추가' }).click()
   const created = page.locator('table.sheet tbody tr', { hasText: `E2E 커피 ${STAMP}` })
   await created.waitFor()
-  acceptNextDialog()
-  await created.getByRole('button', { name: '삭제' }).click()
+  // 행마다 삭제 버튼은 없고, 선택 모드에서 체크한 뒤 확인 창을 거쳐야 지운다
+  assert.equal(await created.getByRole('button', { name: '삭제' }).count(), 0)
+  await page.getByRole('button', { name: '선택', exact: true }).click()
+  await created.getByRole('checkbox').check()
+  await page.getByRole('button', { name: '삭제', exact: true }).click()
+  const confirm = page.getByRole('dialog')
+  await confirm.getByText(`E2E 커피 ${STAMP}`).waitFor()
+  await confirm.getByRole('button', { name: '취소' }).click()
+  await confirm.waitFor({ state: 'detached' })
+  assert.equal(await created.count(), 1)
+  await page.getByRole('button', { name: '삭제', exact: true }).click()
+  await confirm.getByRole('button', { name: '1건 삭제' }).click()
   await created.waitFor({ state: 'detached' })
 })
 

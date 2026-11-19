@@ -435,6 +435,65 @@ async fn move_to_ledger<C: ConnectionTrait>(db: &C, ids: &[i32], ledger_id: i32)
     Ok(out)
 }
 
+#[derive(SimpleObject, Debug, PartialEq, Eq)]
+pub struct DeleteTransactionsResult {
+    /// 지운 결제 수 (분할한 결제는 나눈 쪽까지 한 건)
+    pub deleted: i32,
+    /// 다시 생기지 않도록 지우는 대신 '건너뜀'으로 남긴 반복 항목 수
+    pub skipped: i32,
+}
+
+/// 거래들을 지운다. 분할한 결제는 합친 뒤 결제 전체를 지우고, 반복 규칙이 `this_month` 이후에 만든 항목은
+/// 지우면 `ensure_planned`가 다시 만들므로 '건너뜀'으로 자리를 남긴다.
+async fn delete_payments<C: ConnectionTrait>(db: &C, ids: &[i32], this_month: YearMonth) -> Result<DeleteTransactionsResult> {
+    if ids.len() > 5000 {
+        return Err(user_error("한 번에 5000건까지 삭제할 수 있습니다"));
+    }
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let found = transaction::Entity::find()
+        .filter(transaction::Column::Id.is_in(ids.clone()))
+        .order_by_asc(transaction::Column::Id)
+        .all(db)
+        .await?;
+    if found.len() != ids.len() {
+        return Err(user_error(if ids.len() == 1 { "거래가 없습니다" } else { "없는 거래가 있습니다. 목록을 새로 고친 뒤 다시 고르세요" }));
+    }
+    let this_month = this_month.to_string();
+    let now = Utc::now();
+    // 앞에서 묶음째 지운 분할 거래
+    let mut done = std::collections::HashSet::new();
+    let mut out = DeleteTransactionsResult { deleted: 0, skipped: 0 };
+    for tx in found {
+        if done.contains(&tx.id) {
+            continue;
+        }
+        let tx = match split::group_of(db, &tx).await? {
+            Some(group) => {
+                done.extend(group.members().map(|t| t.id));
+                split::merge(db, group).await?
+            }
+            None => tx,
+        };
+        let keeps_slot =
+            tx.recurring_rule_id.is_some() && tx.recurring_month.as_deref().is_some_and(|m| m >= this_month.as_str());
+        if keeps_slot {
+            if tx.status != TxStatus::Skipped {
+                let mut active: transaction::ActiveModel = tx.into();
+                active.status = Set(TxStatus::Skipped);
+                active.updated_at = Set(now);
+                active.update(db).await?;
+            }
+            out.skipped += 1;
+        } else {
+            transaction::Entity::delete_by_id(tx.id).exec(db).await?;
+            out.deleted += 1;
+        }
+    }
+    Ok(out)
+}
+
 async fn create_one<C: ConnectionTrait>(db: &C, input: TransactionInput) -> Result<transaction::Model> {
     let description = input.description.trim().to_string();
     if description.is_empty() {
@@ -672,29 +731,22 @@ impl TransactionMutation {
     /// 분할한 결제는 한 건으로 합친 뒤 결제 전체를 지운다.
     async fn delete_transaction(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
         let db = db(ctx);
-        let found = transaction::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("거래가 없습니다"))?;
         let txn = db.begin().await?;
-        let found = match split::group_of(&txn, &found).await? {
-            Some(group) => split::merge(&txn, group).await?,
-            None => found,
-        };
-        // 반복 규칙이 이번 달 이후에 만든 항목은 지우면 다시 생기므로 '건너뜀'으로 자리를 남긴다.
-        let this_month = YearMonth::of(config(ctx).today()).to_string();
-        let keeps_slot = found.recurring_rule_id.is_some()
-            && found.recurring_month.as_deref().is_some_and(|m| m >= this_month.as_str());
-        if keeps_slot {
-            if found.status != TxStatus::Skipped {
-                let mut active: transaction::ActiveModel = found.into();
-                active.status = Set(TxStatus::Skipped);
-                active.updated_at = Set(Utc::now());
-                active.update(&txn).await?;
-            }
-        } else {
-            transaction::Entity::delete_by_id(found.id).exec(&txn).await?;
-        }
+        delete_payments(&txn, &[id], YearMonth::of(config(ctx).today())).await?;
         txn.commit().await?;
         lookup(ctx).invalidate();
         Ok(true)
+    }
+
+    /// 여러 거래 삭제 (하나라도 실패하면 모두 취소). 규칙은 `deleteTransaction`과 같고,
+    /// 분할한 결제는 묶음의 거래를 여럿 골라도 한 번만 지운다.
+    async fn delete_transactions(&self, ctx: &Context<'_>, ids: Vec<i32>) -> Result<DeleteTransactionsResult> {
+        let db = db(ctx);
+        let txn = db.begin().await?;
+        let out = delete_payments(&txn, &ids, YearMonth::of(config(ctx).today())).await?;
+        txn.commit().await?;
+        lookup(ctx).invalidate();
+        Ok(out)
     }
 
     /// 예정 거래를 확정 (날짜/금액을 실제 값으로 바꿀 수 있다)
@@ -946,6 +998,45 @@ mod tests {
         let r = &after["paymentMethod"]["monthReport"];
         assert_eq!((r["spending"].as_i64(), r["transactionCount"].as_i64(), r["discountTotal"].as_i64()), (Some(20000), Some(1), Some(1500)));
         assert_eq!(r["transactionBenefits"], serde_json::json!([{"transactionId": p, "amount": 1500}]));
+    }
+
+    #[tokio::test]
+    async fn deletes_many_payments_at_once() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let cfg = crate::config::AppConfig::for_tests();
+        let this_month = YearMonth::of(cfg.today());
+        let schema = crate::graphql::build_schema(db.clone(), cfg);
+        let plain = tx(&db, home, None).await;
+        let keep = tx(&db, home, None).await;
+        let p = tx(&db, home, None).await;
+        let split = gql(&schema, &format!("mutation {{ splitTransaction(id: {p}, ledgerId: {pocket}, amount: 2000) {{ id }} }}")).await;
+        let c = split["splitTransaction"]["id"].as_i64().unwrap();
+        gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createRecurringRule(input: {{ledgerId: {home}, description: "구독", amount: 9900, dayOfMonth: 1, startMonth: "{this_month}"}}) {{ id }} }}"#
+            ),
+        )
+        .await;
+        let planned = gql(&schema, r#"{ transactions(filter: {search: "구독", statuses: [PLANNED]}) { items { id } } }"#).await;
+        let recurring = planned["transactions"]["items"][0]["id"].as_i64().unwrap();
+        let read = |id: i64| format!("{{ transaction(id: {id}) {{ status }} }}");
+
+        // 없는 거래가 섞이면 아무것도 지우지 않는다
+        let stale = format!("mutation {{ deleteTransactions(ids: [{plain}, {}]) {{ deleted }} }}", keep + 1000);
+        assert!(gql_error(&schema, &stale).await.contains("없는 거래"));
+        assert_eq!(gql(&schema, &read(plain.into())).await["transaction"]["status"], "CONFIRMED");
+
+        // 분할 묶음은 양쪽을 다 골라도 결제 한 건, 반복 항목은 건너뜀으로 남는다
+        let out = gql(&schema, &format!("mutation {{ deleteTransactions(ids: [{c}, {plain}, {p}, {recurring}, {plain}]) {{ deleted skipped }} }}")).await;
+        assert_eq!(out["deleteTransactions"], serde_json::json!({"deleted": 2, "skipped": 1}));
+        for id in [plain.into(), p.into(), c] {
+            assert!(gql(&schema, &read(id)).await["transaction"].is_null(), "{id}");
+        }
+        assert_eq!(gql(&schema, &read(recurring)).await["transaction"]["status"], "SKIPPED");
+        assert_eq!(gql(&schema, &read(keep.into())).await["transaction"]["status"], "CONFIRMED");
     }
 
     #[tokio::test]

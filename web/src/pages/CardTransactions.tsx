@@ -5,10 +5,12 @@ import { CARDS_MONTHLY_QUERY, STATEMENT_LINES_QUERY, TRANSACTIONS_QUERY } from '
 import type { CardMonthReport, PaymentMethod, StatementLine, TransactionPage } from '../api/types'
 import { ErrorBox, Loading, Panel, PerformanceMeter } from '../components/Common'
 import MonthPicker from '../components/MonthPicker'
+import { SelectionActions } from '../components/DeleteTransactions'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
 import { benefitTotalsText, hasBenefit, txBenefitTexts } from '../lib/benefits'
 import { shortDate, won } from '../lib/format'
 import { defaultDateFor, monthLabel, useMonthParam, useQueryParam } from '../lib/month'
+import { useTxSelection } from '../lib/selection'
 import { ReportPanel } from './CardDetail'
 
 export default function CardTransactions() {
@@ -113,8 +115,9 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
   const filter = { month, paymentMethodId: card.id, statuses: ['CONFIRMED', 'PLANNED'] }
   const q = useGql<{ transactions: TransactionPage }>(['transactions', filter], TRANSACTIONS_QUERY, { filter, sort: 'DATE_ASC', limit: 2000 })
   const page = q.data?.transactions
+  const sel = useTxSelection(page?.items)
   return (
-    <Panel title={`${monthLabel(month)} 이용 내역`} flush>
+    <Panel title={`${monthLabel(month)} 이용 내역`} actions={<SelectionActions sel={sel} refMaps={refMaps} />} flush>
       {q.error ? (
         <ErrorBox error={q.error} />
       ) : !page ? (
@@ -126,6 +129,7 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
           columns={['date', 'amount', 'description', 'ledger', 'category', 'benefits', 'benefitAmount', 'memo']}
           benefitAmounts={txBenefitTexts(report)}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
+          selection={sel.grid}
           footer={<PageTotals page={page} extra={<span>혜택 {benefitTotalsText(report)}</span>} />}
         />
       )}
