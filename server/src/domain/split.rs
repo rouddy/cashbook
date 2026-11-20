@@ -155,6 +155,9 @@ pub async fn split<C: ConnectionTrait>(
     if tx.status != TxStatus::Confirmed {
         return Err(invalid("확정된 거래만 나눌 수 있습니다"));
     }
+    if tx.transfer_ledger_id.is_some() {
+        return Err(invalid("장부 이체는 나눌 수 없습니다. 금액을 고치거나 이체를 하나 더 만드세요"));
+    }
     if tx.split_parent_id.is_some() || group_of(db, &tx).await?.is_some() {
         return Err(invalid("이미 분할된 거래입니다. 분할을 되돌린 뒤 다시 나누세요"));
     }
@@ -292,7 +295,6 @@ mod tests {
             kind: Set(CategoryKind::Expense),
             monthly_budget: Set(None),
             is_fixed: Set(false),
-            excluded_from_spending: Set(false),
             color: Set(None),
             sort_order: Set(0),
             archived: Set(false),

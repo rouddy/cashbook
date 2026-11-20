@@ -101,10 +101,13 @@ pub struct TransactionFilter {
     pub month: Option<YearMonth>,
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
+    /// 이 장부의 거래와 다른 장부에서 이 장부로 받은 이체
     pub ledger_id: Option<i32>,
     pub category_id: Option<i32>,
-    /// true면 카테고리 없는 거래만
+    /// true면 카테고리 없는 거래만 (장부 이체 제외)
     pub uncategorized: Option<bool>,
+    /// true면 장부 이체만, false면 장부 이체 빼고
+    pub transfers: Option<bool>,
     pub payment_method_id: Option<i32>,
     /// 기본: 확정 + 예정
     pub statuses: Option<Vec<TxStatus>>,
@@ -134,6 +137,12 @@ pub struct TransactionPage {
     pub income_total: i64,
     /// 필터 결과 전체의 예정 수입 합계
     pub planned_income_total: i64,
+    /// 장부를 정한 필터에서 그 장부가 받은 이체 합계 (확정). 지출·수입 합계에는 이체를 넣지 않는다
+    pub transfer_in_total: i64,
+    pub planned_transfer_in_total: i64,
+    /// 장부를 정한 필터에서 그 장부가 보낸 이체 합계 (확정)
+    pub transfer_out_total: i64,
+    pub planned_transfer_out_total: i64,
 }
 
 fn apply_filter(mut q: Select<transaction::Entity>, f: &TransactionFilter) -> Select<transaction::Entity> {
@@ -149,12 +158,17 @@ fn apply_filter(mut q: Select<transaction::Entity>, f: &TransactionFilter) -> Se
         }
     }
     if let Some(id) = f.ledger_id {
-        q = q.filter(C::LedgerId.eq(id));
+        q = q.filter(Condition::any().add(C::LedgerId.eq(id)).add(C::TransferLedgerId.eq(id)));
     }
     if f.uncategorized == Some(true) {
-        q = q.filter(C::CategoryId.is_null());
+        q = q.filter(C::CategoryId.is_null()).filter(C::TransferLedgerId.is_null());
     } else if let Some(id) = f.category_id {
         q = q.filter(C::CategoryId.eq(id));
+    }
+    match f.transfers {
+        Some(true) => q = q.filter(C::TransferLedgerId.is_not_null()),
+        Some(false) => q = q.filter(C::TransferLedgerId.is_null()),
+        None => {}
     }
     if let Some(id) = f.payment_method_id {
         q = q.filter(C::PaymentMethodId.eq(id));
@@ -194,18 +208,48 @@ impl TransactionQuery {
         let db = db(ctx);
         let base = apply_filter(transaction::Entity::find(), &filter);
         let total_count = base.clone().count(db).await? as i64;
-        // 수입 카테고리는 지출 합계와 섞지 않는다
+        // 수입 카테고리는 지출 합계와 섞지 않고, 장부 이체는 지출·수입 어느 쪽에도 넣지 않는다
+        let backend = db.get_database_backend();
         let sums: Vec<(String, Option<i32>, Option<i64>)> = base
             .clone()
+            .filter(transaction::Column::TransferLedgerId.is_null())
             .select_only()
             .column(transaction::Column::Status)
             .column(transaction::Column::CategoryId)
-            .column_as(sql::sum_i64(db.get_database_backend(), Expr::col(transaction::Column::Amount)), "total")
+            .column_as(sql::sum_i64(backend, Expr::col(transaction::Column::Amount)), "total")
             .group_by(transaction::Column::Status)
             .group_by(transaction::Column::CategoryId)
             .into_tuple()
             .all(db)
             .await?;
+        // (상태, 보낸 장부, 받은 장부, 합계)
+        let transfer_sums: Vec<(String, i32, Option<i32>, Option<i64>)> = match filter.ledger_id {
+            Some(_) => {
+                base.clone()
+                    .filter(transaction::Column::TransferLedgerId.is_not_null())
+                    .select_only()
+                    .column(transaction::Column::Status)
+                    .column(transaction::Column::LedgerId)
+                    .column(transaction::Column::TransferLedgerId)
+                    .column_as(sql::sum_i64(backend, Expr::col(transaction::Column::Amount)), "total")
+                    .group_by(transaction::Column::Status)
+                    .group_by(transaction::Column::LedgerId)
+                    .group_by(transaction::Column::TransferLedgerId)
+                    .into_tuple()
+                    .all(db)
+                    .await?
+            }
+            None => vec![],
+        };
+        let transfer_of = |status: &str, incoming: bool| {
+            transfer_sums
+                .iter()
+                .filter(|(st, from, to, _)| {
+                    st == status && if incoming { *to == filter.ledger_id } else { Some(*from) == filter.ledger_id }
+                })
+                .filter_map(|(_, _, _, v)| *v)
+                .sum::<i64>()
+        };
         let categories = lookup(ctx).categories().await?;
         let is_income = |cid: &Option<i32>| cid.and_then(|id| categories.get(&id)).is_some_and(|c| c.kind == CategoryKind::Income);
         let total_of = |status: &str, income: bool| {
@@ -227,6 +271,10 @@ impl TransactionQuery {
             planned_total: total_of("PLANNED", false),
             income_total: total_of("CONFIRMED", true),
             planned_income_total: total_of("PLANNED", true),
+            transfer_in_total: transfer_of("CONFIRMED", true),
+            planned_transfer_in_total: transfer_of("PLANNED", true),
+            transfer_out_total: transfer_of("CONFIRMED", false),
+            planned_transfer_out_total: transfer_of("PLANNED", false),
         })
     }
 
@@ -320,6 +368,8 @@ pub struct TransactionInput {
     #[graphql(default = false)]
     pub exclude_from_performance: bool,
     pub benefit_ids: Option<Vec<i32>>,
+    /// 장부 이체면 받는 장부 (항목·결제수단은 비운다)
+    pub transfer_ledger_id: Option<i32>,
 }
 
 #[derive(InputObject, Default)]
@@ -337,6 +387,9 @@ pub struct TransactionPatch {
     pub exclude_from_performance: Option<bool>,
     /// 주면 혜택 항목을 이 목록으로 바꾼다
     pub benefit_ids: Option<Vec<i32>>,
+    /// 장부 이체로 바꾸면(받는 장부) 항목·결제수단·혜택을 비운다. null이면 이체를 푼다.
+    /// 이체에 `categoryId`만 주면 이체를 풀고 그 항목의 거래가 된다.
+    pub transfer_ledger_id: MaybeUndefined<i32>,
 }
 
 async fn default_ledger_id<C: ConnectionTrait>(db: &C) -> Result<i32> {
@@ -365,6 +418,17 @@ async fn resolve_ledger<C: ConnectionTrait>(db: &C, ledger_id: Option<i32>, cate
         (None, None) => default_ledger_id(db).await,
     }
 }
+
+/// 장부 이체의 받는 장부 확인
+async fn check_transfer_target<C: ConnectionTrait>(db: &C, from: i32, to: i32) -> Result<()> {
+    if from == to {
+        return Err(user_error("받는 장부는 보내는 장부와 달라야 합니다"));
+    }
+    ledger::Entity::find_by_id(to).one(db).await?.ok_or_else(|| user_error("받는 장부가 없습니다"))?;
+    Ok(())
+}
+
+const TRANSFER_FIELDS: &str = "장부 이체에는 항목·결제수단을 지정하지 않습니다";
 
 async fn check_payment_method<C: ConnectionTrait>(db: &C, id: Option<i32>) -> Result<()> {
     if let Some(id) = id {
@@ -426,6 +490,10 @@ async fn move_to_ledger<C: ConnectionTrait>(db: &C, ids: &[i32], ledger_id: i32)
     }
     if split::any_split(db, &found).await? {
         return Err(user_error("분할된 거래는 옮길 수 없습니다. 분할을 되돌린 뒤 옮기세요"));
+    }
+    // 옮길 장부로 보내는 이체를 옮기면 보내는 장부와 받는 장부가 같아진다
+    if let Some(t) = found.iter().find(|t| t.transfer_ledger_id == Some(ledger_id)) {
+        return Err(user_error(format!("'{}'은(는) 그 장부로 보내는 이체라 옮길 수 없습니다", t.description)));
     }
     let categories: std::collections::HashMap<i32, category::Model> =
         category::Entity::find().all(db).await?.into_iter().map(|c| (c.id, c)).collect();
@@ -513,7 +581,14 @@ async fn create_one<C: ConnectionTrait>(db: &C, input: TransactionInput) -> Resu
     if input.status == TxStatus::Skipped {
         return Err(user_error("새 거래는 확정 또는 예정 상태여야 합니다"));
     }
+    let transfer = input.transfer_ledger_id;
+    if transfer.is_some() && (input.category_id.is_some() || input.payment_method_id.is_some()) {
+        return Err(user_error(TRANSFER_FIELDS));
+    }
     let ledger_id = resolve_ledger(db, input.ledger_id, input.category_id).await?;
+    if let Some(to) = transfer {
+        check_transfer_target(db, ledger_id, to).await?;
+    }
     check_payment_method(db, input.payment_method_id).await?;
     let now = Utc::now();
     let saved = transaction::ActiveModel {
@@ -526,10 +601,11 @@ async fn create_one<C: ConnectionTrait>(db: &C, input: TransactionInput) -> Resu
         memo: Set(trim_opt(input.memo)),
         member: Set(trim_opt(input.member)),
         status: Set(input.status),
-        installment_months: Set(input.installment_months.clamp(1, 60)),
-        exclude_from_performance: Set(input.exclude_from_performance),
+        installment_months: Set(if transfer.is_some() { 1 } else { input.installment_months.clamp(1, 60) }),
+        exclude_from_performance: Set(input.exclude_from_performance && transfer.is_none()),
         recurring_rule_id: Set(None),
         recurring_month: Set(None),
+        transfer_ledger_id: Set(transfer),
         source: Set(TxSource::Manual),
         external_id: Set(None),
         raw_text: Set(None),
@@ -620,6 +696,25 @@ impl TransactionMutation {
             MaybeUndefined::Null => payment_method_id = None,
             MaybeUndefined::Undefined => {}
         }
+        // 장부 이체: 받는 장부를 주면 이체로, 이체에 항목만 주면 이체를 풀고 그 항목의 거래로
+        let category_given = matches!(input.category_id, MaybeUndefined::Value(_));
+        let transfer_ledger_id = match input.transfer_ledger_id {
+            MaybeUndefined::Value(to) => Some(to),
+            MaybeUndefined::Null => None,
+            MaybeUndefined::Undefined if category_given => None,
+            MaybeUndefined::Undefined => found.transfer_ledger_id,
+        };
+        if let Some(to) = transfer_ledger_id {
+            if category_given || matches!(input.payment_method_id, MaybeUndefined::Value(_)) {
+                return Err(user_error(TRANSFER_FIELDS));
+            }
+            if group.is_some() {
+                return Err(user_error(SPLIT_LOCKED));
+            }
+            check_transfer_target(&txn, ledger_id, to).await?;
+            category_id = None;
+            payment_method_id = None;
+        }
         check_payment_method(&txn, payment_method_id).await?;
         let pm_changed = payment_method_id != found.payment_method_id;
 
@@ -627,6 +722,7 @@ impl TransactionMutation {
         active.ledger_id = Set(ledger_id);
         active.category_id = Set(category_id);
         active.payment_method_id = Set(payment_method_id);
+        active.transfer_ledger_id = Set(transfer_ledger_id);
         if let Some(d) = input.date {
             active.date = Set(d);
         }
@@ -670,6 +766,10 @@ impl TransactionMutation {
         }
         if let Some(v) = input.exclude_from_performance {
             active.exclude_from_performance = Set(v);
+        }
+        if transfer_ledger_id.is_some() {
+            active.installment_months = Set(1);
+            active.exclude_from_performance = Set(false);
         }
         active.updated_at = Set(Utc::now());
         let saved = active.update(&txn).await?;
@@ -847,7 +947,6 @@ mod tests {
             kind: Set(kind),
             monthly_budget: Set(None),
             is_fixed: Set(false),
-            excluded_from_spending: Set(false),
             color: Set(None),
             sort_order: Set(0),
             archived: Set(archived),
@@ -873,6 +972,7 @@ mod tests {
             installment_months: 1,
             exclude_from_performance: false,
             benefit_ids: None,
+            transfer_ledger_id: None,
         };
         create_one(db, input).await.unwrap().id
     }
@@ -1105,6 +1205,101 @@ mod tests {
                 {"description": "스타벅스", "categoryId": null, "count": 1},
                 {"description": "스타벅스 역삼", "categoryId": cafe, "count": 1},
             ])
+        );
+    }
+
+    #[tokio::test]
+    async fn ledger_transfers_move_money_between_ledgers() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let pocket = ledger(&db, "용돈", 1).await;
+        let meal = category(&db, home, "외식", CategoryKind::Expense, false).await;
+        let cfg = crate::config::AppConfig::for_tests();
+        let this_month = YearMonth::of(cfg.today());
+        let schema = crate::graphql::build_schema(db.clone(), cfg);
+        tx(&db, home, Some(meal)).await; // 가계부 지출 12,000
+
+        // 항목·결제수단을 같이 주거나 같은 장부로 보내면 거절
+        for bad in [
+            format!(r#"ledgerId: {home}, categoryId: {meal}, transferLedgerId: {pocket}"#),
+            format!(r#"ledgerId: {home}, transferLedgerId: {home}"#),
+        ] {
+            let q = format!(r#"mutation {{ createTransaction(input: {{{bad}, date: "2026-11-01", amount: 1, description: "x"}}) {{ id }} }}"#);
+            assert!(gql_error(&schema, &q).await.contains("장부"), "{q}");
+        }
+        let created = gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createTransaction(input: {{ledgerId: {home}, date: "2026-11-01", amount: 200000, description: "재홍 용돈", transferLedgerId: {pocket}}}) {{ id }} }}"#
+            ),
+        )
+        .await;
+        let t = created["createTransaction"]["id"].as_i64().unwrap();
+
+        // 보낸 장부·받은 장부 양쪽 목록에 보이고, 지출·수입 합계와 따로 센다
+        let page = |ledger: i32, extra: &str| {
+            format!(
+                r#"{{ transactions(filter: {{month: "2026-11", ledgerId: {ledger}{extra}}}) {{ totalCount confirmedTotal incomeTotal transferInTotal transferOutTotal items {{ id }} }} }}"#
+            )
+        };
+        let out = gql(&schema, &page(home, "")).await;
+        assert_eq!(
+            out["transactions"],
+            serde_json::json!({"totalCount": 2, "confirmedTotal": 12000, "incomeTotal": 0, "transferInTotal": 0, "transferOutTotal": 200000,
+                "items": out["transactions"]["items"]})
+        );
+        let into = gql(&schema, &page(pocket, "")).await;
+        assert_eq!(into["transactions"]["items"], serde_json::json!([{"id": t}]));
+        assert_eq!((into["transactions"]["confirmedTotal"].as_i64(), into["transactions"]["transferInTotal"].as_i64()), (Some(0), Some(200000)));
+        // 미분류에는 이체가 섞이지 않는다
+        assert_eq!(gql(&schema, &page(home, ", uncategorized: true")).await["transactions"]["totalCount"], 0);
+        assert_eq!(gql(&schema, &page(home, ", transfers: true")).await["transactions"]["totalCount"], 1);
+
+        // 받는 장부로 옮기기·분할은 안 된다
+        assert!(gql_error(&schema, &format!("mutation {{ moveTransactions(ids: [{t}], ledgerId: {pocket}) {{ moved }} }}")).await.contains("이체"));
+        assert!(
+            gql_error(&schema, &format!("mutation {{ splitTransaction(id: {t}, ledgerId: {pocket}, amount: 1000) {{ id }} }}"))
+                .await
+                .contains("이체")
+        );
+        // 받은 장부가 있으면 장부를 지울 수 없다
+        assert!(gql_error(&schema, &format!("mutation {{ deleteLedger(id: {pocket}) }}")).await.contains("받은 이체"));
+
+        // 항목을 고르면 이체가 풀리고, 받는 장부를 고르면 항목이 비워진다
+        let read = format!("{{ transaction(id: {t}) {{ ledgerId categoryId transferLedgerId }} }}");
+        gql(&schema, &format!("mutation {{ updateTransaction(id: {t}, input: {{categoryId: {meal}}}) {{ id }} }}")).await;
+        assert_eq!(gql(&schema, &read).await["transaction"], serde_json::json!({"ledgerId": home, "categoryId": meal, "transferLedgerId": null}));
+        gql(&schema, &format!("mutation {{ updateTransaction(id: {t}, input: {{transferLedgerId: {pocket}}}) {{ id }} }}")).await;
+        assert_eq!(gql(&schema, &read).await["transaction"], serde_json::json!({"ledgerId": home, "categoryId": null, "transferLedgerId": pocket}));
+        // 보내는 장부를 받는 장부와 같게 바꿀 수 없다
+        assert!(gql_error(&schema, &format!("mutation {{ updateTransaction(id: {t}, input: {{ledgerId: {pocket}}}) {{ id }} }}")).await.contains("받는 장부"));
+
+        // 반복 이체 규칙은 예정 이체를 만들고, 받는 장부의 규칙 목록에도 보인다
+        let rule = gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createRecurringRule(input: {{ledgerId: {home}, description: "용돈", amount: 200000, dayOfMonth: 1, startMonth: "{this_month}", transferLedgerId: {pocket}}}) {{ id }} }}"#
+            ),
+        )
+        .await;
+        let rule_id = rule["createRecurringRule"]["id"].as_i64().unwrap();
+        let rules = gql(&schema, &format!("{{ recurringRules(ledgerId: {pocket}) {{ id transferLedgerId }} }}")).await;
+        assert_eq!(rules["recurringRules"], serde_json::json!([{"id": rule_id, "transferLedgerId": pocket}]));
+        let planned = gql(
+            &schema,
+            &format!(r#"{{ transactions(filter: {{month: "{this_month}", ledgerId: {pocket}, statuses: [PLANNED]}}) {{ items {{ ledgerId transferLedgerId amount }} }} }}"#),
+        )
+        .await;
+        assert_eq!(planned["transactions"]["items"], serde_json::json!([{"ledgerId": home, "transferLedgerId": pocket, "amount": 200000}]));
+        assert!(
+            gql_error(
+                &schema,
+                &format!(
+                    r#"mutation {{ createRecurringRule(input: {{ledgerId: {home}, description: "x", amount: 1, dayOfMonth: 1, startMonth: "{this_month}", categoryId: {meal}, transferLedgerId: {pocket}}}) {{ id }} }}"#
+                )
+            )
+            .await
+            .contains("이체")
         );
     }
 

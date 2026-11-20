@@ -1,6 +1,6 @@
 use sea_orm::entity::prelude::*;
 
-/// 반복 지출(수입) 규칙. 매달 `day_of_month`에 예정(PLANNED) 거래를 만든다.
+/// 반복 지출·수입·장부 이체 규칙. 매달 `day_of_month`에 예정(PLANNED) 거래를 만든다.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, async_graphql::SimpleObject)]
 #[sea_orm(table_name = "recurring_rules")]
 #[graphql(name = "RecurringRule", complex)]
@@ -25,6 +25,8 @@ pub struct Model {
     /// 자동 입력 시 이 키워드가 내용에 있으면 예정 항목과 매칭
     pub match_keyword: Option<String>,
     pub exclude_from_performance: bool,
+    /// 장부 이체 규칙이면 받는 장부 (항목·결제수단 없음)
+    pub transfer_ledger_id: Option<i32>,
     pub active: bool,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,

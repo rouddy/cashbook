@@ -2,7 +2,7 @@
 
 use async_graphql::{Context, Object, Result, SimpleObject};
 use chrono::NaiveDate;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
 
 use super::{config, db, lookup, user_error};
 use crate::domain::dates::YearMonth;
@@ -35,7 +35,7 @@ impl SummaryQuery {
         }
     }
 
-    /// 월 요약. `ledgerId`를 비우면 전체 장부 합계 (지출계획/월잔액은 장부를 지정해야 계산).
+    /// 월 요약. `ledgerId`를 비우면 전체 장부 합계 (지출계획/월잔액/장부 이체는 장부를 지정해야 계산).
     async fn monthly_summary(
         &self,
         ctx: &Context<'_>,
@@ -55,7 +55,8 @@ impl SummaryQuery {
             .filter(transaction::Column::Date.lte(month.last_day()))
             .filter(transaction::Column::Status.ne(TxStatus::Skipped));
         if let Some(id) = ledger_id {
-            q = q.filter(transaction::Column::LedgerId.eq(id));
+            // 그 장부의 거래와 다른 장부에서 받은 이체
+            q = q.filter(Condition::any().add(transaction::Column::LedgerId.eq(id)).add(transaction::Column::TransferLedgerId.eq(id)));
         }
         let txs = q.all(db).await?;
         let plan_items = match ledger_id {

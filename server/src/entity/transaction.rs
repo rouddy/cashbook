@@ -4,6 +4,7 @@ use super::enums::{TxSource, TxStatus};
 
 /// 결제/지출/수입 내역. 지출 예정(PLANNED)도 같은 테이블에 둔다.
 /// 금액은 원 단위 정수: 지출 카테고리면 양수=지출·음수=환불, 수입 카테고리면 양수=수입.
+/// `transfer_ledger_id`가 있으면 장부 이체: `ledger_id` 장부에서 그 장부로 금액을 옮긴다(항목·결제수단 없음).
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, async_graphql::SimpleObject)]
 #[sea_orm(table_name = "transactions")]
 #[graphql(name = "Transaction", complex)]
@@ -37,6 +38,9 @@ pub struct Model {
     /// 분할한 결제에서 다른 장부로 나눠 옮긴 거래면 원래 거래(부모) id.
     /// 부모와 자식들 금액의 합이 실제 결제 금액이다.
     pub split_parent_id: Option<i32>,
+    /// 장부 이체면 받는 장부. 보내는 장부(`ledger_id`)에서는 나가는 돈, 받는 장부에서는 들어오는 돈이고
+    /// 소비·수입 합계와 카드·여유자금 계산에는 넣지 않는다.
+    pub transfer_ledger_id: Option<i32>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

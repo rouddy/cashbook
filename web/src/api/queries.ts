@@ -6,13 +6,13 @@ export const PAYMENT_METHOD_FIELDS = `id name kind issuer productName last4 alia
   monthlyTarget annualFee expiresOn color memo sortOrder archived isCard billingConfigured usagePeriodLabel
   benefits { ${BENEFIT_FIELDS} } tiers { id paymentMethodId minSpending benefitLimit }`
 
-export const CATEGORY_FIELDS = `id ledgerId name kind monthlyBudget isFixed excludedFromSpending color sortOrder archived`
+export const CATEGORY_FIELDS = `id ledgerId name kind monthlyBudget isFixed color sortOrder archived`
 
 export const ACCOUNT_FIELDS = `id name bank kind accountNumber balance balanceDate includeInAvailable interestRate maturityDate memo sortOrder archived updatedAt`
 
 export const TX_FIELDS = `id ledgerId date amount categoryId paymentMethodId description memo member status installmentMonths
   excludeFromPerformance recurringRuleId recurringMonth source rawText benefitIds statementMonth paymentDate isIncome
-  splitParentId splitWith { id ledgerId amount categoryId }`
+  splitParentId splitWith { id ledgerId amount categoryId } transferLedgerId`
 
 export const STATEMENT_FIELDS = `month periodStart periodEnd paymentDate confirmedAmount plannedAmount closed paid`
 
@@ -28,6 +28,7 @@ export const REF_QUERY = `query Ref {
 export const TRANSACTIONS_QUERY = `query Transactions($filter: TransactionFilter!, $sort: TransactionSort = DATE_ASC, $limit: Int = 1000) {
   transactions(filter: $filter, sort: $sort, limit: $limit) {
     totalCount confirmedTotal plannedTotal incomeTotal plannedIncomeTotal
+    transferInTotal plannedTransferInTotal transferOutTotal plannedTransferOutTotal
     items { ${TX_FIELDS} }
   }
 }`
@@ -35,14 +36,15 @@ export const TRANSACTIONS_QUERY = `query Transactions($filter: TransactionFilter
 export const SUMMARY_QUERY = `query Summary($month: YearMonth!, $ledgerId: Int, $averageMonths: Int = 6, $historyMonths: Int = 12) {
   monthlySummary(month: $month, ledgerId: $ledgerId, averageMonths: $averageMonths, historyMonths: $historyMonths) {
     month ledgerId averageMonths averageMonthsUsed spending plannedSpending fixedSpending variableSpending
-    excludedSpending plannedExcludedSpending income plannedIncome averageSpending averageFixedSpending
+    income plannedIncome transferIn plannedTransferIn transferOut plannedTransferOut averageSpending averageFixedSpending
     averageVariableSpending budgetTotal balance projectedBalance
-    plan { income allocations memberAllowances items { id ledgerId kind name amount member sortOrder } }
-    categories { categoryId ledgerId name kind isFixed excludedFromSpending confirmed planned count average budget }
+    plan { allocations memberAllowances items { id ledgerId kind name amount member sortOrder } }
+    categories { categoryId ledgerId name kind isFixed confirmed planned count average budget }
     paymentMethods { paymentMethodId name confirmed planned count }
+    transfers { ledgerId incoming confirmed planned count }
     members { member spending planned allowance remaining }
     daily { day date spending cumulative projectedCumulative averageCumulative }
-    history { month spending plannedSpending excludedSpending income fixedSpending }
+    history { month spending plannedSpending income fixedSpending }
   }
 }`
 
@@ -96,7 +98,7 @@ export const CARD_LIST_QUERY = `query CardList($includeArchived: Boolean!) {
 export const RECURRING_QUERY = `query Recurring($ledgerId: Int) {
   recurringRules(ledgerId: $ledgerId) {
     id ledgerId description amount categoryId paymentMethodId dayOfMonth intervalMonths startMonth endMonth
-    member memo matchKeyword excludeFromPerformance active nextDate
+    member memo matchKeyword excludeFromPerformance transferLedgerId active nextDate
   }
 }`
 

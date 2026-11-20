@@ -68,13 +68,13 @@ await step('로그인 (틀린 비밀번호 → 오류, 맞는 비밀번호 → �
   await page.getByRole('heading', { name: '대시보드' }).waitFor()
 })
 
-await step('대시보드: 지표·여유자금·차트·예정 지출', async () => {
+await step('대시보드: 지표·여유자금·차트·예정 거래', async () => {
   await page.goto(`${BASE}/?month=2026-08`)
   await page.getByText('2026년 8월 소비').waitFor()
   await page.getByText('5,349,932원').first().waitFor()
   await page.getByRole('heading', { name: '여유자금' }).waitFor()
   await page.getByRole('img', { name: /일별 누적 소비/ }).waitFor()
-  await page.getByRole('heading', { name: '예정 지출' }).waitFor()
+  await page.getByRole('heading', { name: '예정 거래' }).waitFor()
   // 차트 툴팁: 키보드로 크로스헤어 이동
   const chart = page.getByRole('img', { name: /일별 누적 소비/ })
   await chart.focus()
@@ -410,7 +410,7 @@ await step('은행 잔고: 기준일 없는 계좌는 편집해도 잔고 기록
 
 await step('지출 계획: 반복 지출 추가 → 예정 거래 생성 → 삭제', async () => {
   await page.goto(`${BASE}/plan`)
-  await page.getByRole('button', { name: '+ 반복 지출 추가' }).click()
+  await page.getByRole('button', { name: '+ 반복 항목 추가' }).click()
   const modal = page.getByRole('dialog')
   await modal.getByLabel('내용 *').fill(`E2E구독${STAMP}`)
   await modal.getByLabel('금액 *').fill('9900')
@@ -423,6 +423,35 @@ await step('지출 계획: 반복 지출 추가 → 예정 거래 생성 → 삭
   await page.locator('tbody tr', { hasText: `E2E구독${STAMP}` }).getByRole('button', { name: '삭제' }).click()
   await page.locator('tbody tr', { hasText: `E2E구독${STAMP}` }).waitFor({ state: 'detached' })
   const left = await gql(`{ transactions(filter: {search: "E2E구독${STAMP}", statuses: [PLANNED]}) { totalCount } }`)
+  assert.equal(left.data.transactions.totalCount, 0)
+})
+
+await step('지출 계획: 반복 장부 이체 추가 → 받는 장부에 예정 이체 → 삭제', async () => {
+  const { data } = await gql(`{ ledgers { id name isDefault } }`)
+  const from = data.ledgers.find((l) => l.isDefault) ?? data.ledgers[0]
+  const to = data.ledgers.find((l) => l.id !== from.id)
+  assert.ok(to, '장부가 둘 이상 있어야 합니다')
+  await page.goto(`${BASE}/plan?ledger=${from.id}`)
+  await page.getByRole('button', { name: '+ 반복 항목 추가' }).click()
+  const modal = page.getByRole('dialog')
+  await modal.getByRole('button', { name: '장부 이체' }).click()
+  await modal.getByLabel('내용 *').fill(`E2E이체${STAMP}`)
+  await modal.getByLabel('금액 *').fill('123000')
+  await modal.getByLabel('받는 장부').selectOption(String(to.id))
+  await modal.getByRole('button', { name: '저장' }).click()
+  const ruleRow = page.locator('tbody tr', { hasText: `E2E이체${STAMP}` })
+  await ruleRow.getByText(`→ ${to.name}`).waitFor()
+  const r = await gql(`{ transactions(filter: {search: "E2E이체${STAMP}", statuses: [PLANNED], ledgerId: ${to.id}}) { totalCount items { ledgerId transferLedgerId categoryId } } }`)
+  assert.ok(r.data.transactions.totalCount >= 3, `planned=${r.data.transactions.totalCount}`)
+  assert.deepEqual(r.data.transactions.items[0], { ledgerId: from.id, transferLedgerId: to.id, categoryId: null })
+  // 받는 장부의 가계부에서는 '← 보낸 장부'로 보이고 항목은 바꿀 수 없다
+  await page.goto(`${BASE}/transactions?ledger=${to.id}&status=PLANNED`)
+  await page.locator('table.sheet tbody tr', { hasText: `E2E이체${STAMP}` }).first().getByText(`← ${from.name}`).waitFor()
+  await page.goto(`${BASE}/plan?ledger=${from.id}`)
+  acceptNextDialog()
+  await page.locator('tbody tr', { hasText: `E2E이체${STAMP}` }).getByRole('button', { name: '삭제' }).click()
+  await page.locator('tbody tr', { hasText: `E2E이체${STAMP}` }).waitFor({ state: 'detached' })
+  const left = await gql(`{ transactions(filter: {search: "E2E이체${STAMP}", statuses: [PLANNED]}) { totalCount } }`)
   assert.equal(left.data.transactions.totalCount, 0)
 })
 

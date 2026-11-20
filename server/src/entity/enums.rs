@@ -104,17 +104,14 @@ pub enum TxSource {
     Recurring,
 }
 
-/// 지출계획의 고정 항목 종류.
+/// 지출계획의 고정 항목 종류. (예전의 월 수입 `INCOME`은 정기수익 반복 규칙으로 바뀌었다)
 #[derive(
     Copy, Clone, Debug, PartialEq, Eq, Hash, EnumIter, DeriveActiveEnum, async_graphql::Enum, Serialize, Deserialize,
 )]
 #[sea_orm(rs_type = "String", db_type = "String(StringLen::N(16))")]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PlanItemKind {
-    /// 월 수입 (예: 월급)
-    #[sea_orm(string_value = "INCOME")]
-    Income,
-    /// 월 배분 (예: 용돈, 적금, 경조사비 적립). 월잔액에서 뺀다.
+    /// 월 배분 (예: 저축). 월잔액에서 뺀다. 다른 장부로 옮기는 돈은 장부 이체 반복 규칙을 쓴다.
     #[sea_orm(string_value = "ALLOCATION")]
     Allocation,
     /// 구성원 용돈. 그 사람이 쓴 돈은 이 장부에 구성원 표시로 기록되므로 월잔액에서 따로 빼지 않고

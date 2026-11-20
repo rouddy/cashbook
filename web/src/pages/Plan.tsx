@@ -23,6 +23,7 @@ import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
 import { parseAmount, PLAN_KIND_LABEL, shortDate, won } from '../lib/format'
 import { currentMonth, monthLabel, useQueryParam } from '../lib/month'
+import { transferLabel } from '../lib/transfer'
 
 export default function Plan() {
   const { ref, error } = useRefData()
@@ -53,34 +54,42 @@ function PlanBody({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefMaps })
   })
   const s = summary.data?.monthlySummary
   const planItems = items.data?.planItems ?? []
-  const income = planItems.filter((p) => p.kind === 'INCOME').reduce((a, p) => a + p.amount, 0)
   const allocations = planItems.filter((p) => p.kind === 'ALLOCATION').reduce((a, p) => a + p.amount, 0)
   const categories = refMaps.categoriesOf(ledgerId)
-  const budgetTotal = categories.filter((c) => c.kind === 'EXPENSE' && !c.excludedFromSpending).reduce((a, c) => a + (c.monthlyBudget ?? 0), 0)
-  const leftover = income - allocations - budgetTotal
+  const budgetTotal = categories.filter((c) => c.kind === 'EXPENSE').reduce((a, c) => a + (c.monthlyBudget ?? 0), 0)
+  // 이번 달 확정 + 예정 (정기수익·이체는 반복 규칙이 예정으로 넣는다)
+  const income = s ? s.income + s.plannedIncome : 0
+  const transferIn = s ? s.transferIn + s.plannedTransferIn : 0
+  const transferOut = s ? s.transferOut + s.plannedTransferOut : 0
+  const leftover = income + transferIn - transferOut - allocations - budgetTotal
 
   return (
     <>
       <div className="kpis">
         <div className="panel stat">
-          <div className="stat-label">계획 수입</div>
-          <div className="stat-value">{won(income)}원</div>
+          <div className="stat-label">{monthLabel(month)} 들어오는 돈</div>
+          <div className="stat-value">{won(income + transferIn)}원</div>
+          <div className="stat-delta text-2">
+            수입 {won(income)}원{transferIn !== 0 && ` · 받은 이체 ${won(transferIn)}원`} · 예정 포함
+          </div>
         </div>
         <div className="panel stat">
-          <div className="stat-label">배분 (용돈·저축·적금 등)</div>
-          <div className="stat-value">{won(allocations)}원</div>
+          <div className="stat-label">다른 장부로 이체 · 배분</div>
+          <div className="stat-value">{won(transferOut + allocations)}원</div>
+          <div className="stat-delta text-2">
+            이체 {won(transferOut)}원 · 배분 {won(allocations)}원
+          </div>
         </div>
         <div className="panel stat">
           <div className="stat-label">카테고리 예산 합계</div>
           <div className="stat-value">{won(budgetTotal)}원</div>
-          <div className="stat-delta text-2">합계 제외 카테고리 빼고</div>
         </div>
         <div className="panel stat">
           <div className="stat-label">계획상 남는 돈</div>
           <div className={`stat-value ${leftover < 0 ? 'bad' : ''}`}>{won(leftover)}원</div>
           {s?.balance != null && (
             <div className="stat-delta text-2">
-              {monthLabel(month)} 실제 월잔액 {won(s.balance)}원
+              {monthLabel(month)} 실제 월잔액 {won(s.balance)}원 (확정 기준)
             </div>
           )}
         </div>
@@ -150,7 +159,6 @@ function CategoryBudgets({ ledgerId, refMaps, summary }: { ledgerId: number; ref
               <th className="num">이번 달</th>
               <th className="num">평균</th>
               <th title="고정비 (대출·보험·관리비 등)">고정비</th>
-              <th title="월 소비 합계에서 제외 (별도 적립금에서 쓰는 항목)">합계 제외</th>
               <th />
             </tr>
           </thead>
@@ -172,15 +180,6 @@ function CategoryBudgets({ ledgerId, refMaps, summary }: { ledgerId: number; ref
                   <td className="num text-2">{st ? won(st.average) : '-'}</td>
                   <td>
                     <input type="checkbox" checked={c.isFixed} disabled={pending} onChange={(e) => patch(c, { isFixed: e.target.checked })} aria-label={`${c.name} 고정비`} />
-                  </td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={c.excludedFromSpending}
-                      disabled={pending}
-                      onChange={(e) => patch(c, { excludedFromSpending: e.target.checked })}
-                      aria-label={`${c.name} 합계 제외`}
-                    />
                   </td>
                   <td className="nowrap">
                     {c.archived ? (
@@ -279,7 +278,11 @@ function PlanItems({ ledgerId, items, loading, refMaps }: { ledgerId: number; it
     })
 
   return (
-    <Panel title="월 수입 · 배분" sub="월잔액 = 수입 + 수입 카테고리 − 소비 − 배분. 구성원 용돈은 그 사람 표시 지출과 비교만 합니다" flush>
+    <Panel
+      title="배분 · 구성원 용돈"
+      sub="월잔액 = 수입 + 받은 이체 − 소비 − 보낸 이체 − 배분. 월급은 정기수익 반복 수입으로, 다른 장부로 보내는 돈은 반복 이체로 아래에 등록하세요. 구성원 용돈은 그 사람 표시 지출과 비교만 합니다"
+      flush
+    >
       {loading ? (
         <Loading />
       ) : (
@@ -296,7 +299,7 @@ function PlanItems({ ledgerId, items, loading, refMaps }: { ledgerId: number; it
             {items.map((p) => (
               <tr key={p.id}>
                 <td>
-                  <span className={`badge ${p.kind === 'INCOME' ? 'good' : ''}`}>{PLAN_KIND_LABEL[p.kind]}</span>
+                  <span className="badge">{PLAN_KIND_LABEL[p.kind]}</span>
                 </td>
                 <td>
                   <InlineText value={p.name} onSave={(v) => save(p, { name: v })} />
@@ -315,7 +318,7 @@ function PlanItems({ ledgerId, items, loading, refMaps }: { ledgerId: number; it
             {items.length === 0 && (
               <tr>
                 <td colSpan={4} className="empty">
-                  월급·용돈·적금 같은 매달 정해진 금액을 추가하세요
+                  저축처럼 매달 떼어 두는 금액이나 구성원 용돈을 추가하세요
                 </td>
               </tr>
             )}
@@ -324,11 +327,10 @@ function PlanItems({ ledgerId, items, loading, refMaps }: { ledgerId: number; it
       )}
       <form className="row wrap" style={{ padding: 12 }} onSubmit={add}>
         <select className="input" value={kind} onChange={(e) => setKind(e.target.value as PlanItemKind)}>
-          <option value="INCOME">수입</option>
           <option value="ALLOCATION">배분</option>
           <option value="MEMBER_ALLOWANCE">구성원 용돈</option>
         </select>
-        <input className="input" placeholder="이름 (예: 월급)" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 130 }} />
+        <input className="input" placeholder="이름 (예: 저축)" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 130 }} />
         {kind === 'MEMBER_ALLOWANCE' && (
           <input className="input" list="plan-members" placeholder="구성원" value={member} onChange={(e) => setMember(e.target.value)} style={{ width: 90 }} />
         )}
@@ -351,14 +353,26 @@ function RecurringRules({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefM
   const { run, pending } = useMutate()
   const [editing, setEditing] = useState<RecurringRule | 'new' | null>(null)
   const rules = q.data?.recurringRules ?? []
-  const monthlyTotal = rules.filter((r) => r.active && r.intervalMonths === 1).reduce((a, r) => a + r.amount, 0)
+  const monthly = rules.filter((r) => r.active && r.intervalMonths === 1)
+  const sumOf = (pred: (r: RecurringRule) => boolean) => monthly.filter(pred).reduce((a, r) => a + r.amount, 0)
+  const isIncome = (r: RecurringRule) => refMaps.categoryById.get(r.categoryId ?? -1)?.kind === 'INCOME'
+  const totals = [
+    ['지출', sumOf((r) => r.transferLedgerId == null && !isIncome(r))],
+    ['수입', sumOf((r) => r.transferLedgerId == null && isIncome(r))],
+    ['보내는 이체', sumOf((r) => r.transferLedgerId != null && r.ledgerId === ledgerId)],
+    ['받는 이체', sumOf((r) => r.transferLedgerId === ledgerId)],
+  ] as const
+  const totalText = totals
+    .filter(([, v]) => v !== 0)
+    .map(([k, v]) => `${k} ${won(v)}원`)
+    .join(' · ')
   return (
     <Panel
-      title="반복 지출 (예정 자동 생성)"
-      sub={`매달 정해진 날 예정 거래를 만듭니다 (이번 달 + ${refMaps.appInfo.planMonthsAhead}개월). 매월 합계 ${won(monthlyTotal)}원`}
+      title="반복 지출 · 수입 · 장부 이체 (예정 자동 생성)"
+      sub={`매달 정해진 날 예정 거래를 만듭니다 (이번 달 + ${refMaps.appInfo.planMonthsAhead}개월).${totalText ? ` 매월 ${totalText}` : ''}`}
       actions={
         <button className="btn sm primary" onClick={() => setEditing('new')}>
-          + 반복 지출 추가
+          + 반복 항목 추가
         </button>
       }
       flush
@@ -393,8 +407,8 @@ function RecurringRules({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefM
                     {r.description}
                     {r.matchKeyword && <div className="small muted">매칭: {r.matchKeyword}</div>}
                   </td>
-                  <td className="num">{won(r.amount)}</td>
-                  <td>{refMaps.categoryById.get(r.categoryId ?? -1)?.name ?? '-'}</td>
+                  <td className={`num ${isIncome(r) || r.transferLedgerId === ledgerId ? 'good' : ''}`}>{won(r.amount)}</td>
+                  <td>{transferLabel(r, refMaps, ledgerId) ?? refMaps.categoryById.get(r.categoryId ?? -1)?.name ?? '-'}</td>
                   <td>{refMaps.paymentMethodById.get(r.paymentMethodId ?? -1)?.name ?? '-'}</td>
                   <td className="small nowrap">
                     {r.startMonth} ~ {r.endMonth ?? ''}
@@ -416,7 +430,7 @@ function RecurringRules({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefM
                     <button
                       className="btn sm ghost icon danger"
                       aria-label="삭제"
-                      onClick={() => window.confirm(`'${r.description}' 반복 지출을 삭제할까요? 이번 달 이후 예정 항목도 지워집니다.`) && run(DELETE_RULE, { id: r.id })}
+                      onClick={() => window.confirm(`'${r.description}' 반복 항목을 삭제할까요? 이번 달 이후 예정 항목도 지워집니다.`) && run(DELETE_RULE, { id: r.id })}
                     >
                       ✕
                     </button>
@@ -426,7 +440,7 @@ function RecurringRules({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefM
               {rules.length === 0 && (
                 <tr>
                   <td colSpan={9} className="empty">
-                    보험료·통신비·관리비처럼 매달 나가는 돈을 등록하면 예정 지출로 보여줍니다
+                    보험료·관리비처럼 매달 나가는 돈, 월급(정기수익), 다른 장부로 보내는 돈을 등록하면 예정으로 보여줍니다
                   </td>
                 </tr>
               )}
@@ -455,6 +469,7 @@ function ruleInput(r: RecurringRule, patch: Partial<RecurringRule> = {}) {
     memo: x.memo,
     matchKeyword: x.matchKeyword,
     excludeFromPerformance: x.excludeFromPerformance,
+    transferLedgerId: x.transferLedgerId,
     active: x.active,
   }
 }
@@ -474,6 +489,11 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
   const [memo, setMemo] = useState(rule?.memo ?? '')
   const [matchKeyword, setMatchKeyword] = useState(rule?.matchKeyword ?? '')
   const [excludePerf, setExcludePerf] = useState(rule?.excludeFromPerformance ?? false)
+  const fromLedger = rule?.ledgerId ?? ledgerId
+  const otherLedgers = refMaps.ledgers.filter((l) => l.id !== fromLedger)
+  // 지출·수입은 항목으로, 장부 이체는 받는 장부로 정한다
+  const [isTransfer, setIsTransfer] = useState(rule?.transferLedgerId != null)
+  const [transferTo, setTransferTo] = useState(String(rule?.transferLedgerId ?? otherLedgers[0]?.id ?? ''))
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
@@ -482,20 +502,25 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
       toast('내용과 금액을 입력하세요', 'error')
       return
     }
+    if (isTransfer && !transferTo) {
+      toast('받는 장부를 고르세요', 'error')
+      return
+    }
     const input = {
-      ledgerId: rule?.ledgerId ?? ledgerId,
+      ledgerId: fromLedger,
       description: description.trim(),
       amount: a,
-      categoryId: categoryId ? Number(categoryId) : null,
-      paymentMethodId: paymentMethodId ? Number(paymentMethodId) : null,
+      categoryId: categoryId && !isTransfer ? Number(categoryId) : null,
+      paymentMethodId: paymentMethodId && !isTransfer ? Number(paymentMethodId) : null,
+      transferLedgerId: isTransfer ? Number(transferTo) : null,
       dayOfMonth: Number(dayOfMonth),
       intervalMonths: Number(intervalMonths),
       startMonth,
       endMonth: endMonth || null,
-      member: member || null,
+      member: (!isTransfer && member) || null,
       memo: memo || null,
-      matchKeyword: matchKeyword || null,
-      excludeFromPerformance: excludePerf,
+      matchKeyword: (!isTransfer && matchKeyword) || null,
+      excludeFromPerformance: excludePerf && !isTransfer,
       active: rule?.active ?? true,
     }
     const saved = rule ? await run(UPDATE_RULE, { id: rule.id, input }) : await run(CREATE_RULE, { input })
@@ -506,7 +531,7 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
 
   return (
     <Modal
-      title={rule ? '반복 지출 편집' : '반복 지출 추가'}
+      title={rule ? '반복 항목 편집' : '반복 항목 추가'}
       onClose={onClose}
       footer={
         <>
@@ -520,36 +545,80 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
       }
     >
       <form id="rule-form" className="form-grid" onSubmit={submit}>
+        <div className="field" style={{ gridColumn: '1 / -1' }}>
+          종류
+          <div className="segmented" role="group" aria-label="반복 종류">
+            <button type="button" className={isTransfer ? '' : 'on'} onClick={() => setIsTransfer(false)}>
+              지출 · 수입
+            </button>
+            <button
+              type="button"
+              className={isTransfer ? 'on' : ''}
+              disabled={otherLedgers.length === 0}
+              title={otherLedgers.length === 0 ? '설정에서 장부를 더 만드세요' : '매달 정해진 금액을 다른 장부로 옮깁니다'}
+              onClick={() => setIsTransfer(true)}
+            >
+              장부 이체
+            </button>
+          </div>
+          <span className="hint">
+            {isTransfer
+              ? `${refMaps.ledgerById.get(fromLedger)?.name}에서 나가고 받는 장부로 들어갑니다. 소비·수입 합계에는 넣지 않습니다`
+              : '월급은 수입 항목(정기수익)을 고르면 예정 수입이 됩니다'}
+          </span>
+        </div>
         <label className="field">
           내용 *
-          <input className="input" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="예: 아파트관리비" autoFocus />
+          <input
+            className="input"
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder={isTransfer ? '예: 여행적금' : '예: 아파트관리비'}
+            autoFocus
+          />
         </label>
         <label className="field">
           금액 *
           <input className="input num" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} />
         </label>
-        <label className="field">
-          항목
-          <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
-            <option value="">미분류</option>
-            {refMaps.categoriesOf(rule?.ledgerId ?? ledgerId).map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          결제수단
-          <select className="input" value={paymentMethodId} onChange={(e) => setPaymentMethodId(e.target.value)}>
-            <option value="">선택 안 함</option>
-            {refMaps.activePaymentMethods.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        {isTransfer ? (
+          <label className="field">
+            받는 장부
+            <select className="input" value={transferTo} onChange={(e) => setTransferTo(e.target.value)}>
+              {otherLedgers.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <>
+            <label className="field">
+              항목
+              <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
+                <option value="">미분류</option>
+                {refMaps.categoriesOf(fromLedger).map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                    {c.kind === 'INCOME' ? ' (수입)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              결제수단
+              <select className="input" value={paymentMethodId} onChange={(e) => setPaymentMethodId(e.target.value)}>
+                <option value="">선택 안 함</option>
+                {refMaps.activePaymentMethods.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
         <label className="field">
           날짜
           <select className="input" value={dayOfMonth} onChange={(e) => setDayOfMonth(e.target.value)}>
@@ -579,23 +648,29 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
           종료 월 (선택)
           <input className="input" type="month" value={endMonth} onChange={(e) => setEndMonth(e.target.value)} />
         </label>
-        <label className="field">
-          구성원
-          <input className="input" value={member} onChange={(e) => setMember(e.target.value)} />
-        </label>
-        <label className="field">
-          자동입력 매칭 키워드
-          <input className="input" value={matchKeyword} onChange={(e) => setMatchKeyword(e.target.value)} placeholder="예: 관리비" />
-          <span className="hint">승인 문자 가맹점에 이 말이 있으면 금액이 달라도 이 예정 항목을 확정</span>
-        </label>
+        {!isTransfer && (
+          <>
+            <label className="field">
+              구성원
+              <input className="input" value={member} onChange={(e) => setMember(e.target.value)} />
+            </label>
+            <label className="field">
+              자동입력 매칭 키워드
+              <input className="input" value={matchKeyword} onChange={(e) => setMatchKeyword(e.target.value)} placeholder="예: 관리비" />
+              <span className="hint">승인 문자 가맹점에 이 말이 있으면 금액이 달라도 이 예정 항목을 확정</span>
+            </label>
+          </>
+        )}
         <label className="field" style={{ gridColumn: '1 / -1' }}>
           메모
           <input className="input" value={memo} onChange={(e) => setMemo(e.target.value)} />
         </label>
-        <label className="check">
-          <input type="checkbox" checked={excludePerf} onChange={(e) => setExcludePerf(e.target.checked)} />
-          카드 전월실적에서 제외 (관리비·보험 등)
-        </label>
+        {!isTransfer && (
+          <label className="check">
+            <input type="checkbox" checked={excludePerf} onChange={(e) => setExcludePerf(e.target.checked)} />
+            카드 전월실적에서 제외 (관리비·보험 등)
+          </label>
+        )}
       </form>
     </Modal>
   )

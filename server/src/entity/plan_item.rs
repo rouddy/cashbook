@@ -2,7 +2,8 @@ use sea_orm::entity::prelude::*;
 
 use super::enums::PlanItemKind;
 
-/// 지출계획의 월 고정 항목: 수입(월급), 배분(용돈, 저축, 적금 등), 구성원 용돈.
+/// 지출계획의 월 고정 항목: 배분(저축 등), 구성원 용돈.
+/// 수입은 수입 항목(정기수익)의 반복 규칙으로, 다른 장부로 보내는 돈은 장부 이체 반복 규칙으로 예정에 넣는다.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, async_graphql::SimpleObject)]
 #[sea_orm(table_name = "plan_items")]
 #[graphql(name = "PlanItem")]

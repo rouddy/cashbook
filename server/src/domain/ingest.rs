@@ -181,11 +181,12 @@ pub struct Suggestion {
 }
 
 /// 추천에 쓰는 과거 거래: 확정 거래, `since`가 있으면 그날 이후만.
-/// 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게 뺀다.
+/// 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게, 장부 이체는 결제가 아니라서 뺀다.
 fn history(since: Option<NaiveDate>) -> Select<transaction::Entity> {
     transaction::Entity::find()
         .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
         .filter(transaction::Column::SplitParentId.is_null())
+        .filter(transaction::Column::TransferLedgerId.is_null())
         .apply_if(since, |q, d| q.filter(transaction::Column::Date.gte(d)))
 }
 
@@ -715,7 +716,6 @@ mod tests {
                 kind: Set(kind),
                 monthly_budget: Set(None),
                 is_fixed: Set(false),
-                excluded_from_spending: Set(false),
                 color: Set(None),
                 sort_order: Set(0),
                 archived: Set(false),
@@ -933,7 +933,6 @@ mod tests {
                 kind: Set(kind),
                 monthly_budget: Set(None),
                 is_fixed: Set(false),
-                excluded_from_spending: Set(false),
                 color: Set(None),
                 sort_order: Set(-5),
                 archived: Set(archived),

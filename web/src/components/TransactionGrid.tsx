@@ -6,6 +6,7 @@ import type { SplitPart, Suggestion, Transaction, TransactionPage, TxStatus } fr
 import { parseAmount, shortDate, SOURCE_LABEL, weekendClass, won } from '../lib/format'
 import { localToday } from '../lib/month'
 import { isSplit, splitTotal } from '../lib/split'
+import { parseTransferOption, transferDirection, transferLabel, transferOption, transferOptions } from '../lib/transfer'
 import BenefitChecks from './BenefitChecks'
 import DescriptionInput, { type SuggestScope } from './DescriptionInput'
 import { useToast } from './Toast'
@@ -39,6 +40,18 @@ const HEADERS: Record<GridColumn, { label: string; width?: number; num?: boolean
 /** 편집 가능한 열 (혜택액은 계산값) */
 const EDITABLE: GridColumn[] = ['date', 'amount', 'category', 'paymentMethod', 'description', 'member', 'memo', 'ledger', 'benefits']
 
+/**
+ * 이 행에서 편집할 수 있는 열. 장부 이체는 결제수단·혜택이 없고,
+ * 받은 이체는 보낸 장부에서 항목(이체 대상)을 바꾼다.
+ */
+function canEdit(tx: Transaction, col: GridColumn, viewLedgerId: number | null | undefined): boolean {
+  if (!EDITABLE.includes(col)) return false
+  const dir = transferDirection(tx, viewLedgerId)
+  if (dir && (col === 'paymentMethod' || col === 'benefits')) return false
+  if (dir === 'in' && col === 'category') return false
+  return true
+}
+
 interface Props {
   rows: Transaction[]
   refMaps: RefMaps
@@ -53,6 +66,8 @@ interface Props {
   selection?: { selected: ReadonlySet<number>; onChange: (next: Set<number>) => void }
   /** 내용 자동완성 범위 (기간은 행의 날짜 기준) */
   suggestScope?: SuggestScope
+  /** 보고 있는 장부 (null = 전체). 장부 이체를 받은 이체·보낸 이체로 나눠 보여준다 */
+  viewLedgerId?: number | null
 }
 
 type Patch = Record<string, unknown>
@@ -68,6 +83,7 @@ export default function TransactionGrid({
   footer,
   selection,
   suggestScope,
+  viewLedgerId,
 }: Props) {
   const gridId = useId()
   const toast = useToast()
@@ -131,7 +147,14 @@ export default function TransactionGrid({
         return save(tx, { amount: v }, { amount: v })
       }
       case 'category': {
+        const to = parseTransferOption(String(raw ?? ''))
+        if (to != null) {
+          if (to === tx.transferLedgerId) return
+          // 장부 이체로 바꾸면 서버가 항목·결제수단·혜택을 비운다
+          return save(tx, { transferLedgerId: to }, { transferLedgerId: to, categoryId: null, paymentMethodId: null, benefitIds: [] })
+        }
         const v = raw === '' || raw == null ? null : Number(raw)
+        if (tx.transferLedgerId != null) return save(tx, { categoryId: v, transferLedgerId: null }, { categoryId: v, transferLedgerId: null })
         if (v === tx.categoryId) return
         return save(tx, { categoryId: v }, { categoryId: v })
       }
@@ -176,10 +199,15 @@ export default function TransactionGrid({
             {shortDate(tx.date)}
           </span>
         )
-      case 'amount':
-        return <span className={tx.amount < 0 || tx.isIncome ? 'good' : ''}>{tx.isIncome ? `+${won(tx.amount)}` : won(tx.amount)}</span>
-      case 'category':
+      case 'amount': {
+        const plus = tx.isIncome || transferDirection(tx, viewLedgerId) === 'in'
+        return <span className={tx.amount < 0 || plus ? 'good' : ''}>{plus ? `+${won(tx.amount)}` : won(tx.amount)}</span>
+      }
+      case 'category': {
+        const transfer = transferLabel(tx, refMaps, viewLedgerId)
+        if (transfer) return <span title="장부 이체 (소비·수입 합계에 넣지 않음)">{transfer}</span>
         return tx.categoryId ? refMaps.categoryById.get(tx.categoryId)?.name : <span className="placeholder muted">미분류</span>
+      }
       case 'paymentMethod':
         return tx.paymentMethodId ? refMaps.paymentMethodById.get(tx.paymentMethodId)?.name : <span className="muted">-</span>
       case 'description':
@@ -209,7 +237,7 @@ export default function TransactionGrid({
       e.preventDefault()
       const [dr, dc] = moves[e.key]
       focusCell(Math.max(0, Math.min(view.length - 1, r + dr)), Math.max(0, Math.min(columns.length - 1, c + dc)))
-    } else if ((e.key === 'Enter' || e.key === 'F2') && EDITABLE.includes(col)) {
+    } else if ((e.key === 'Enter' || e.key === 'F2') && canEdit(tx, col, viewLedgerId)) {
       e.preventDefault()
       setEditing({ id: tx.id, col })
     }
@@ -224,7 +252,7 @@ export default function TransactionGrid({
     if (!move) return
     window.setTimeout(() => {
       if (move === 'next' || move === 'prev') {
-        const candidates = columns.map((col, i) => ({ col, i })).filter(({ col }) => EDITABLE.includes(col))
+        const candidates = columns.map((col, i) => ({ col, i })).filter(({ col }) => canEdit(tx, col, viewLedgerId))
         const target = move === 'next' ? candidates.find(({ i }) => i > c) : [...candidates].reverse().find(({ i }) => i < c)
         if (target) {
           setEditing({ id: tx.id, col: target.col })
@@ -308,10 +336,10 @@ export default function TransactionGrid({
                             type="button"
                             className={`cell-btn ${HEADERS[col].num ? 'num' : ''}`}
                             data-cell={`${gridId}:${r}:${c}`}
-                            onClick={() => EDITABLE.includes(col) && setEditing({ id: tx.id, col })}
+                            onClick={() => canEdit(tx, col, viewLedgerId) && setEditing({ id: tx.id, col })}
                             onKeyDown={(e) => onCellKey(e, r, c, tx, col)}
                             title={col === 'description' || col === 'memo' ? String(display(tx, col) ?? '') : undefined}
-                            style={{ cursor: EDITABLE.includes(col) ? 'text' : 'default' }}
+                            style={{ cursor: canEdit(tx, col, viewLedgerId) ? 'text' : 'default' }}
                           >
                             {display(tx, col, view[r - 1])}
                           </button>
@@ -423,6 +451,18 @@ export function PageTotals({ page, extra }: { page: TransactionPage; extra?: Rea
           예정 수입 <span className="num">{won(page.plannedIncomeTotal)}</span>
         </span>
       )}
+      {page.transferInTotal + page.plannedTransferInTotal !== 0 && (
+        <span>
+          받은 이체 <span className="num">{won(page.transferInTotal)}</span>
+          {page.plannedTransferInTotal !== 0 && <span className="text-2"> (+예정 {won(page.plannedTransferInTotal)})</span>}
+        </span>
+      )}
+      {page.transferOutTotal + page.plannedTransferOutTotal !== 0 && (
+        <span>
+          보낸 이체 <span className="num">{won(page.transferOutTotal)}</span>
+          {page.plannedTransferOutTotal !== 0 && <span className="text-2"> (+예정 {won(page.plannedTransferOutTotal)})</span>}
+        </span>
+      )}
       {extra}
     </div>
   )
@@ -512,7 +552,7 @@ function CellEditor({
       case 'amount':
         return String(tx.amount)
       case 'category':
-        return tx.categoryId ? String(tx.categoryId) : ''
+        return tx.transferLedgerId != null ? transferOption(tx.transferLedgerId) : tx.categoryId ? String(tx.categoryId) : ''
       case 'paymentMethod':
         return tx.paymentMethodId ? String(tx.paymentMethodId) : ''
       case 'ledger':
@@ -567,6 +607,7 @@ function CellEditor({
         ? [
             { value: '', label: '미분류' },
             ...refMaps.categoriesOf(tx.ledgerId).map((c) => ({ value: String(c.id), label: c.name })),
+            ...transferOptions(refMaps, tx.ledgerId),
           ]
         : col === 'paymentMethod'
           ? [
@@ -742,14 +783,16 @@ function NewRow({
       return
     }
     submitting.current = true
+    const transferTo = parseTransferOption(s.categoryId)
     try {
       const created = await run(CREATE_TX, {
         input: {
           ledgerId: s.ledgerId ? Number(s.ledgerId) : null,
           date: s.date,
           amount,
-          categoryId: s.categoryId ? Number(s.categoryId) : null,
-          paymentMethodId: s.paymentMethodId ? Number(s.paymentMethodId) : null,
+          categoryId: s.categoryId && transferTo == null ? Number(s.categoryId) : null,
+          transferLedgerId: transferTo,
+          paymentMethodId: s.paymentMethodId && transferTo == null ? Number(s.paymentMethodId) : null,
           description: s.description.trim(),
           memo: s.memo || null,
           member: s.member || null,
@@ -790,18 +833,38 @@ function NewRow({
         )
       case 'category':
         return (
-          <select className="cell-input" value={s.categoryId} onChange={(e) => set({ categoryId: e.target.value })} onKeyDown={enter} aria-label="항목">
+          <select
+            className="cell-input"
+            value={s.categoryId}
+            // 장부 이체에는 결제수단이 없다
+            onChange={(e) => set(parseTransferOption(e.target.value) == null ? { categoryId: e.target.value } : { categoryId: e.target.value, paymentMethodId: '' })}
+            onKeyDown={enter}
+            aria-label="항목"
+          >
             <option value="">항목</option>
             {refMaps.categoriesOf(ledgerForCategories).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
+            {ledgerForCategories != null &&
+              transferOptions(refMaps, ledgerForCategories).map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
           </select>
         )
       case 'paymentMethod':
         return (
-          <select className="cell-input" value={s.paymentMethodId} onChange={(e) => set({ paymentMethodId: e.target.value })} onKeyDown={enter} aria-label="결제수단">
+          <select
+            className="cell-input"
+            value={s.paymentMethodId}
+            disabled={parseTransferOption(s.categoryId) != null}
+            onChange={(e) => set({ paymentMethodId: e.target.value })}
+            onKeyDown={enter}
+            aria-label="결제수단"
+          >
             <option value="">결제수단</option>
             {refMaps.activePaymentMethods.map((p) => (
               <option key={p.id} value={p.id}>

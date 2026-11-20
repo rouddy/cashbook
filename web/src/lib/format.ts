@@ -133,7 +133,6 @@ export const SOURCE_LABEL: Record<string, string> = {
 }
 
 export const PLAN_KIND_LABEL: Record<string, string> = {
-  INCOME: '수입',
   ALLOCATION: '배분',
   MEMBER_ALLOWANCE: '구성원 용돈',
 }

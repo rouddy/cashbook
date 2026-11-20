@@ -4,6 +4,7 @@ import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { MOVE_TXS, SPLIT_TX, SUMMARY_QUERY, TRANSACTIONS_QUERY, UNSPLIT_TX } from '../api/queries'
 import type { MonthlySummary, Transaction, TransactionPage, TxStatus } from '../api/types'
 import { ErrorBox, Loading, Panel } from '../components/Common'
+import BalanceRows from '../components/BalanceRows'
 import DeleteSelectedButton from '../components/DeleteTransactions'
 import LedgerTabs from '../components/LedgerTabs'
 import Modal from '../components/Modal'
@@ -49,8 +50,9 @@ export default function Transactions() {
   const filter = {
     month,
     ledgerId,
-    categoryId: category && category !== 'none' ? Number(category) : null,
+    categoryId: category && category !== 'none' && category !== 'transfer' ? Number(category) : null,
     uncategorized: category === 'none' ? true : null,
+    transfers: category === 'transfer' ? true : null,
     paymentMethodId: pm ? Number(pm) : null,
     statuses,
     member: member || null,
@@ -105,7 +107,9 @@ export default function Transactions() {
         ? '한 건만 골라야 나눌 수 있습니다'
         : single.status !== 'CONFIRMED'
           ? '확정된 거래만 나눌 수 있습니다'
-          : undefined
+          : single.transferLedgerId != null
+            ? '장부 이체는 나눌 수 없습니다'
+            : undefined
   const unsplitSelected = async () => {
     if (!single || !isSplit(single)) return
     const origin = ref.ledgerById.get(splitOriginLedgerId(single))?.name
@@ -137,6 +141,7 @@ export default function Transactions() {
         <select className="input" value={category} onChange={(e) => setCategory(e.target.value)} aria-label="항목 필터">
           <option value="">모든 항목</option>
           <option value="none">미분류</option>
+          <option value="transfer">장부 이체</option>
           {ref.categoriesOf(ledgerId).map((c) => (
             <option key={c.id} value={c.id}>
               {ledgerId == null ? `${ref.ledgerById.get(c.ledgerId)?.name} · ` : ''}
@@ -231,6 +236,7 @@ export default function Transactions() {
               rows={page.items}
               refMaps={ref}
               columns={columns}
+              viewLedgerId={ledgerId}
               newRow={filtered ? undefined : { date: defaultDateFor(month), ledgerId }}
               selection={sel.grid}
               emptyText={filtered ? '조건에 맞는 거래가 없습니다' : `${monthLabel(month)} 거래가 없습니다. 아래 줄에 바로 입력하세요.`}
@@ -406,34 +412,7 @@ function SheetSummary({
                 <td className="num text-2">{won(s.plannedSpending)}</td>
               </tr>
             )}
-            {s.excludedSpending !== 0 && (
-              <tr>
-                <td className="text-2">합계 제외 (경조사·여행 등)</td>
-                <td className="num text-2">{won(s.excludedSpending)}</td>
-              </tr>
-            )}
-            {s.plan && (
-              <>
-                <tr>
-                  <td className="text-2">계획 수입</td>
-                  <td className="num text-2">{won(s.plan.income)}</td>
-                </tr>
-                {s.plan.items
-                  .filter((i) => i.kind === 'ALLOCATION')
-                  .map((i) => (
-                    <tr key={i.id}>
-                      <td className="text-2">− {i.name}</td>
-                      <td className="num text-2">{won(i.amount)}</td>
-                    </tr>
-                  ))}
-                <tr>
-                  <td style={{ fontWeight: 650 }}>월잔액</td>
-                  <td className={`num ${s.balance != null && s.balance < 0 ? 'bad' : ''}`} style={{ fontWeight: 650 }}>
-                    {won(s.balance)}
-                  </td>
-                </tr>
-              </>
-            )}
+            {s.plan && <BalanceRows s={s} refMaps={refMaps} />}
             {s.members.map((m) => (
               <tr key={m.member}>
                 <td className="text-2">

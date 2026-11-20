@@ -5,7 +5,8 @@ export type TxSource = 'MANUAL' | 'IMPORT' | 'API' | 'RECURRING'
 export type CategoryKind = 'EXPENSE' | 'INCOME'
 export type PaymentKind = 'CREDIT_CARD' | 'CHECK_CARD' | 'CASH' | 'BANK_TRANSFER' | 'OTHER'
 export type AccountKind = 'CHECKING' | 'SAVINGS' | 'DEPOSIT' | 'INVESTMENT' | 'CASH' | 'OTHER'
-export type PlanItemKind = 'INCOME' | 'ALLOCATION' | 'MEMBER_ALLOWANCE'
+/** 배분(저축 등) / 구성원 용돈. 수입은 정기수익 반복 규칙, 다른 장부로 보내는 돈은 장부 이체 반복 규칙 */
+export type PlanItemKind = 'ALLOCATION' | 'MEMBER_ALLOWANCE'
 /** 할인 / 포인트 적립 / 마일리지 적립 */
 export type BenefitKind = 'DISCOUNT' | 'POINT' | 'MILEAGE'
 
@@ -32,7 +33,6 @@ export interface Category {
   kind: CategoryKind
   monthlyBudget: number | null
   isFixed: boolean
-  excludedFromSpending: boolean
   color: string | null
   sortOrder: number
   archived: boolean
@@ -138,6 +138,8 @@ export interface Transaction {
   isIncome: boolean
   /** 분할해 옮긴 거래면 원래 거래 id */
   splitParentId: number | null
+  /** 장부 이체면 받는 장부 (보내는 장부는 ledgerId, 항목·결제수단 없음) */
+  transferLedgerId: number | null
   /** 같은 결제를 나눈 다른 장부의 거래들 (분할하지 않았으면 빈 목록) */
   splitWith: SplitPart[]
 }
@@ -159,6 +161,11 @@ export interface TransactionPage {
   /** 확정 수입 (수입 카테고리) */
   incomeTotal: number
   plannedIncomeTotal: number
+  /** 장부를 정한 목록에서 그 장부가 받은·보낸 이체 (지출·수입 합계와 별도) */
+  transferInTotal: number
+  plannedTransferInTotal: number
+  transferOutTotal: number
+  plannedTransferOutTotal: number
 }
 
 export interface StatementInfo {
@@ -178,7 +185,6 @@ export interface CategorySummary {
   name: string
   kind: CategoryKind
   isFixed: boolean
-  excludedFromSpending: boolean
   confirmed: number
   planned: number
   count: number
@@ -215,9 +221,18 @@ export interface MonthPoint {
   month: string
   spending: number
   plannedSpending: number
-  excludedSpending: number
   income: number
   fixedSpending: number
+}
+
+/** 상대 장부·방향별 장부 이체 합계 */
+export interface TransferSummary {
+  /** 받은 이체면 보낸 장부, 보낸 이체면 받은 장부 */
+  ledgerId: number
+  incoming: boolean
+  confirmed: number
+  planned: number
+  count: number
 }
 
 export interface PlanItem {
@@ -239,19 +254,22 @@ export interface MonthlySummary {
   plannedSpending: number
   fixedSpending: number
   variableSpending: number
-  excludedSpending: number
-  plannedExcludedSpending: number
   income: number
   plannedIncome: number
+  transferIn: number
+  plannedTransferIn: number
+  transferOut: number
+  plannedTransferOut: number
   averageSpending: number
   averageFixedSpending: number
   averageVariableSpending: number
   budgetTotal: number | null
-  plan: { income: number; allocations: number; memberAllowances: number; items: PlanItem[] } | null
+  plan: { allocations: number; memberAllowances: number; items: PlanItem[] } | null
   balance: number | null
   projectedBalance: number | null
   categories: CategorySummary[]
   paymentMethods: PaymentMethodSummary[]
+  transfers: TransferSummary[]
   members: MemberSummary[]
   daily: DailyPoint[]
   history: MonthPoint[]
@@ -360,6 +378,8 @@ export interface RecurringRule {
   memo: string | null
   matchKeyword: string | null
   excludeFromPerformance: boolean
+  /** 장부 이체 규칙이면 받는 장부 */
+  transferLedgerId: number | null
   active: boolean
   nextDate: string | null
 }

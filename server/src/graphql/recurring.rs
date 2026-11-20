@@ -1,8 +1,8 @@
-//! 반복 지출(수입) 규칙. 저장하면 이번 달부터 예정 거래를 다시 만든다.
+//! 반복 지출·수입·장부 이체 규칙. 저장하면 이번 달부터 예정 거래를 다시 만든다.
 
 use async_graphql::{ComplexObject, Context, InputObject, Object, Result};
 use chrono::{NaiveDate, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait};
+use sea_orm::{ActiveModelTrait, ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait};
 
 use super::{config, db, lookup, trim_opt, user_error};
 use crate::domain::dates::YearMonth;
@@ -41,10 +41,13 @@ pub struct RecurringQuery;
 
 #[Object]
 impl RecurringQuery {
+    /// 반복 규칙. `ledgerId`를 주면 그 장부의 규칙과 다른 장부에서 그 장부로 보내는 이체 규칙.
     async fn recurring_rules(&self, ctx: &Context<'_>, ledger_id: Option<i32>) -> Result<Vec<recurring_rule::Model>> {
         let mut q = recurring_rule::Entity::find();
         if let Some(id) = ledger_id {
-            q = q.filter(recurring_rule::Column::LedgerId.eq(id));
+            q = q.filter(
+                Condition::any().add(recurring_rule::Column::LedgerId.eq(id)).add(recurring_rule::Column::TransferLedgerId.eq(id)),
+            );
         }
         Ok(q.order_by_desc(recurring_rule::Column::Active)
             .order_by_asc(recurring_rule::Column::DayOfMonth)
@@ -73,6 +76,8 @@ pub struct RecurringRuleInput {
     pub match_keyword: Option<String>,
     #[graphql(default = false)]
     pub exclude_from_performance: bool,
+    /// 장부 이체 규칙이면 받는 장부 (항목·결제수단은 비운다)
+    pub transfer_ledger_id: Option<i32>,
     #[graphql(default = true)]
     pub active: bool,
 }
@@ -92,6 +97,15 @@ async fn validate(ctx: &Context<'_>, input: &RecurringRuleInput) -> Result<()> {
         return Err(user_error("종료 월이 시작 월보다 빠릅니다"));
     }
     ledger::Entity::find_by_id(input.ledger_id).one(db).await?.ok_or_else(|| user_error("장부가 없습니다"))?;
+    if let Some(to) = input.transfer_ledger_id {
+        if to == input.ledger_id {
+            return Err(user_error("받는 장부는 보내는 장부와 달라야 합니다"));
+        }
+        ledger::Entity::find_by_id(to).one(db).await?.ok_or_else(|| user_error("받는 장부가 없습니다"))?;
+        if input.category_id.is_some() || input.payment_method_id.is_some() {
+            return Err(user_error("장부 이체에는 항목·결제수단을 지정하지 않습니다"));
+        }
+    }
     if let Some(cid) = input.category_id {
         let c = category::Entity::find_by_id(cid).one(db).await?.ok_or_else(|| user_error("카테고리가 없습니다"))?;
         if c.ledger_id != input.ledger_id {
@@ -117,7 +131,8 @@ fn apply(active: &mut recurring_rule::ActiveModel, input: RecurringRuleInput) {
     active.member = Set(trim_opt(input.member));
     active.memo = Set(trim_opt(input.memo));
     active.match_keyword = Set(trim_opt(input.match_keyword));
-    active.exclude_from_performance = Set(input.exclude_from_performance);
+    active.exclude_from_performance = Set(input.exclude_from_performance && input.transfer_ledger_id.is_none());
+    active.transfer_ledger_id = Set(input.transfer_ledger_id);
     active.active = Set(input.active);
     active.updated_at = Set(Utc::now());
 }

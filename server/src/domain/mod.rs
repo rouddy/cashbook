@@ -7,6 +7,7 @@ pub mod dates;
 pub mod funds;
 pub mod import;
 pub mod ingest;
+pub mod legacy_plan;
 pub mod recurring;
 pub mod sms;
 pub mod split;
