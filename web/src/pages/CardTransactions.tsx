@@ -3,13 +3,13 @@ import { Link } from 'react-router-dom'
 import { useGql, useRefData, type RefMaps } from '../api/hooks'
 import { CARDS_MONTHLY_QUERY, STATEMENT_LINES_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
 import type { CardMonthReport, PaymentMethod, StatementLine, TransactionPage } from '../api/types'
-import { ErrorBox, Loading, Panel, PerformanceMeter } from '../components/Common'
+import { ErrorBox, Loading, Panel, PerformanceMeter, PlannedSwatch } from '../components/Common'
 import MonthPicker from '../components/MonthPicker'
 import { SelectionActions } from '../components/DeleteTransactions'
 import type { SuggestScope } from '../components/DescriptionInput'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
-import { benefitTotalsText, hasBenefit, txBenefitTexts } from '../lib/benefits'
-import { shortDate, won } from '../lib/format'
+import { benefitTotalsText, hasBenefit, plannedPerformance, txBenefitTexts } from '../lib/benefits'
+import { shortDate, signedWon, won } from '../lib/format'
 import { defaultDateFor, monthLabel, useMonthParam, useQueryParam } from '../lib/month'
 import { useTxSelection } from '../lib/selection'
 import { ReportPanel } from './CardDetail'
@@ -69,6 +69,12 @@ export default function CardTransactions() {
                           실적 {won(r.performance)} / {won(r.target)}
                           {r.remainingToTarget ? ` · ${won(r.remainingToTarget)} 남음` : ' · 달성'}
                         </div>
+                        {plannedPerformance(r) !== 0 && (
+                          <div className="small muted">
+                            {plannedPerformance(r) > 0 && <PlannedSwatch />}
+                            예정 {signedWon(plannedPerformance(r))} · 포함 {won(r.projectedPerformance)}
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="small muted">실적 {won(r.performance)}</div>

@@ -17,6 +17,8 @@
   --accent-strong: #1c5cab;
   --accent-soft: #e6f0fc;
   --accent-wash: rgba(42, 120, 214, 0.1);
+  /* 예정분: accent와 같은 파랑 램프의 밝은 단계 (meter 트랙 대비 2:1 이상) */
+  --accent-planned: #6da7ec;
   --series-context: #898781;
   --good: #006300;
   --good-mark: #0ca30c;
@@ -53,6 +55,7 @@
     --accent-strong: #6da7ec;
     --accent-soft: #1b2a3d;
     --accent-wash: rgba(57, 135, 229, 0.14);
+    --accent-planned: #1c5cab;
     --good: #0ca30c;
     --good-mark: #0ca30c;
     --bad: #e66767;
@@ -752,6 +755,21 @@ table.table {
 }
 .meter.over > span {
   background: var(--bad-mark);
+}
+/* 확정분 뒤에 쌓는 예정분: 2px 틈으로 확정분과 구분 */
+.meter > span.planned {
+  position: absolute;
+  top: 0;
+  background: var(--accent-planned);
+}
+.swatch.planned {
+  background: var(--accent-planned);
+}
+.swatch.key {
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  vertical-align: 0;
 }
 .meter .tick {
   position: absolute;

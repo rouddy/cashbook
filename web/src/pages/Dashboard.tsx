@@ -6,11 +6,11 @@ import { CARDS_MONTHLY_QUERY, CONFIRM_TX, FUNDS_QUERY, SKIP_TX, SUMMARY_QUERY, T
 import type { AvailableFunds, CardMonthReport, MonthlySummary, TransactionPage } from '../api/types'
 import ColumnChart from '../components/charts/ColumnChart'
 import LineChart from '../components/charts/LineChart'
-import { Delta, ErrorBox, Loading, Meter, Panel, PerformanceMeter, StatTile } from '../components/Common'
+import { Delta, ErrorBox, Loading, Meter, Panel, PerformanceMeter, PlannedSwatch, StatTile } from '../components/Common'
 import LedgerTabs from '../components/LedgerTabs'
 import MonthPicker from '../components/MonthPicker'
-import { benefitTotalsText } from '../lib/benefits'
-import { compactWon, longDate, percent, shortDate, won } from '../lib/format'
+import { benefitTotalsText, plannedPerformance } from '../lib/benefits'
+import { compactWon, longDate, percent, shortDate, signedWon, won } from '../lib/format'
 import { addDays, currentMonth, localToday, monthLabel, shortMonthLabel, useMonthParam, useQueryParam } from '../lib/month'
 
 const AVG_OPTIONS = ['3', '6', '12']
@@ -598,7 +598,12 @@ function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) 
                     <td className="num">
                       {won(r.performance)}
                       {r.target ? <span className="muted"> / {won(r.target)}</span> : null}
-                      {r.plannedSpending !== 0 && <div className="small muted">예정 포함 {won(r.projectedPerformance)}</div>}
+                      {plannedPerformance(r) !== 0 && (
+                        <div className="small muted">
+                          {plannedPerformance(r) > 0 && <PlannedSwatch />}
+                          예정 {signedWon(plannedPerformance(r))} · 포함 {won(r.projectedPerformance)}
+                        </div>
+                      )}
                     </td>
                     <td className="num">
                       {r.target == null ? '-' : r.remainingToTarget ? <b>{won(r.remainingToTarget)}</b> : <span className="good">✓ 달성</span>}
