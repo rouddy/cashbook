@@ -437,16 +437,16 @@ async fn check_payment_method<C: ConnectionTrait>(db: &C, id: Option<i32>) -> Re
     Ok(())
 }
 
-/// 거래의 혜택 항목을 바꾼다. 다른 카드의 혜택 id는 버린다.
-/// 중복 적용 혜택이 아닌 것을 둘 이상 고르면 거절한다.
-async fn set_benefits<C: ConnectionTrait>(db: &C, tx_id: i32, payment_method_id: Option<i32>, ids: &[i32]) -> Result<()> {
-    transaction_benefit::Entity::delete_many()
-        .filter(transaction_benefit::Column::TransactionId.eq(tx_id))
-        .exec(db)
-        .await?;
-    let Some(pid) = payment_method_id else { return Ok(()) };
+/// 고른 혜택 id 중 결제수단 카드의 혜택만 돌려준다 (다른 카드의 id는 버린다, 결제수단이 없으면 빈 목록).
+/// 중복 적용 혜택이 아닌 것을 둘 이상 고르면 거절한다. 거래와 반복 규칙이 같이 쓴다.
+pub(super) async fn card_benefits_of<C: ConnectionTrait>(
+    db: &C,
+    payment_method_id: Option<i32>,
+    ids: &[i32],
+) -> Result<Vec<card_benefit::Model>> {
+    let Some(pid) = payment_method_id else { return Ok(Vec::new()) };
     if ids.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let valid = card_benefit::Entity::find()
         .filter(card_benefit::Column::PaymentMethodId.eq(pid))
@@ -460,6 +460,17 @@ async fn set_benefits<C: ConnectionTrait>(db: &C, tx_id: i32, payment_method_id:
             names.join(", ")
         )));
     }
+    Ok(valid)
+}
+
+/// 거래의 혜택 항목을 바꾼다. 다른 카드의 혜택 id는 버린다.
+/// 중복 적용 혜택이 아닌 것을 둘 이상 고르면 거절한다.
+async fn set_benefits<C: ConnectionTrait>(db: &C, tx_id: i32, payment_method_id: Option<i32>, ids: &[i32]) -> Result<()> {
+    let valid = card_benefits_of(db, payment_method_id, ids).await?;
+    transaction_benefit::Entity::delete_many()
+        .filter(transaction_benefit::Column::TransactionId.eq(tx_id))
+        .exec(db)
+        .await?;
     for b in valid {
         transaction_benefit::ActiveModel { transaction_id: Set(tx_id), card_benefit_id: Set(b.id) }.insert(db).await?;
     }

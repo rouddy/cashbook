@@ -17,7 +17,7 @@ use super::legacy_plan::{self, Conversion, LedgerInfo, LegacyItem, LegacyKind};
 use crate::entity::{
     account, account_balance, card_benefit, card_tier, category,
     enums::{AccountKind, BenefitKind, CategoryKind, PaymentKind, PlanItemKind, TxSource, TxStatus},
-    ledger, payment_method, plan_item, recurring_rule, transaction, transaction_benefit,
+    ledger, payment_method, plan_item, recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
 };
 
 #[derive(Deserialize, Debug)]
@@ -236,6 +236,7 @@ async fn clear_all<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     // FK 순서대로 지운다. API 토큰은 남긴다.
     transaction_benefit::Entity::delete_many().exec(db).await?;
     transaction::Entity::delete_many().exec(db).await?;
+    recurring_rule_benefit::Entity::delete_many().exec(db).await?;
     recurring_rule::Entity::delete_many().exec(db).await?;
     plan_item::Entity::delete_many().exec(db).await?;
     card_tier::Entity::delete_many().exec(db).await?;

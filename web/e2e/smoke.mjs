@@ -491,6 +491,37 @@ await step('지출 계획: 반복 지출 추가 → 예정 거래 생성 → 삭
   assert.equal(left.data.transactions.totalCount, 0)
 })
 
+await step('지출 계획: 반복 항목에 카드 혜택 → 예정 거래에 붙고, 결제수단을 바꾸면 비워진다', async () => {
+  const { data } = await gql(`{ paymentMethods { id name benefits { id name } } }`)
+  const card = data.paymentMethods.find((p) => p.benefits.length > 0)
+  const other = data.paymentMethods.find((p) => p.id !== card?.id)
+  assert.ok(card && other, '혜택 있는 카드와 다른 결제수단이 있어야 합니다')
+  const benefit = card.benefits[0]
+  await page.goto(`${BASE}/plan`)
+  await page.getByRole('button', { name: '+ 반복 항목 추가' }).click()
+  const modal = page.getByRole('dialog')
+  await modal.getByLabel('내용 *').fill(`E2E혜택${STAMP}`)
+  await modal.getByLabel('금액 *').fill('15000')
+  // label로 감싼 select의 이름에는 고른 옵션 글자도 붙는다 ("결제수단 선택 안 함")
+  const pmSelect = modal.getByRole('combobox', { name: /^결제수단/ })
+  await pmSelect.selectOption(String(card.id))
+  const check = modal.getByRole('group', { name: `${card.name} 혜택` }).getByRole('checkbox').first()
+  await check.check()
+  await pmSelect.selectOption(String(other.id))
+  await pmSelect.selectOption(String(card.id))
+  assert.equal(await check.isChecked(), false, '결제수단을 바꾸면 고른 혜택이 비워져야 합니다')
+  await check.check()
+  await modal.getByRole('button', { name: '저장' }).click()
+  const row = page.locator('tbody tr', { hasText: `E2E혜택${STAMP}` })
+  await row.getByText(`혜택: ${benefit.name}`).waitFor()
+  const r = await gql(`{ transactions(filter: {search: "E2E혜택${STAMP}", statuses: [PLANNED]}) { totalCount items { benefitIds } } }`)
+  assert.ok(r.data.transactions.totalCount >= 1, `planned=${r.data.transactions.totalCount}`)
+  for (const t of r.data.transactions.items) assert.deepEqual(t.benefitIds, [benefit.id])
+  acceptNextDialog()
+  await row.getByRole('button', { name: '삭제' }).click()
+  await row.waitFor({ state: 'detached' })
+})
+
 await step('지출 계획: 반복 장부 이체 추가 → 받는 장부에 예정 이체 → 삭제', async () => {
   const { data } = await gql(`{ ledgers { id name isDefault } }`)
   const from = data.ledgers.find((l) => l.isDefault) ?? data.ledgers[0]

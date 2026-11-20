@@ -18,7 +18,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, 
 use crate::config::AppConfig;
 use crate::entity::{
     account as account_entity, card_benefit, card_tier, category, ledger as ledger_entity, payment_method,
-    transaction as transaction_entity, transaction_benefit,
+    recurring_rule_benefit, transaction as transaction_entity, transaction_benefit,
 };
 
 
@@ -64,6 +64,7 @@ pub struct Lookup {
     benefits: Slot<HashMap<i32, card_benefit::Model>>,
     tiers: Slot<HashMap<i32, Vec<card_tier::Model>>>,
     tx_benefits: Slot<HashMap<i32, Vec<i32>>>,
+    rule_benefits: Slot<HashMap<i32, Vec<i32>>>,
     split_groups: Slot<HashMap<i32, Vec<transaction_entity::Model>>>,
 }
 
@@ -93,6 +94,7 @@ impl Lookup {
             benefits: Mutex::default(),
             tiers: Mutex::default(),
             tx_benefits: Mutex::default(),
+            rule_benefits: Mutex::default(),
             split_groups: Mutex::default(),
         }
     }
@@ -106,6 +108,7 @@ impl Lookup {
         *self.benefits.lock().unwrap() = None;
         *self.tiers.lock().unwrap() = None;
         *self.tx_benefits.lock().unwrap() = None;
+        *self.rule_benefits.lock().unwrap() = None;
         *self.split_groups.lock().unwrap() = None;
     }
 
@@ -171,6 +174,23 @@ impl Lookup {
                 .await?;
             for tb in rows {
                 map.entry(tb.transaction_id).or_default().push(tb.card_benefit_id);
+            }
+            Ok(map)
+        })
+        .await
+    }
+
+    /// 반복 규칙 id → 골라 둔 혜택 id 목록 (혜택 id 순)
+    pub async fn rule_benefits(&self) -> Result<Arc<HashMap<i32, Vec<i32>>>, DbErr> {
+        cached(&self.rule_benefits, || async {
+            let mut map: HashMap<i32, Vec<i32>> = HashMap::new();
+            let rows = recurring_rule_benefit::Entity::find()
+                .order_by_asc(recurring_rule_benefit::Column::RecurringRuleId)
+                .order_by_asc(recurring_rule_benefit::Column::CardBenefitId)
+                .all(&self.db)
+                .await?;
+            for rb in rows {
+                map.entry(rb.recurring_rule_id).or_default().push(rb.card_benefit_id);
             }
             Ok(map)
         })

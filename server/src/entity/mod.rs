@@ -12,5 +12,6 @@ pub mod ledger;
 pub mod payment_method;
 pub mod plan_item;
 pub mod recurring_rule;
+pub mod recurring_rule_benefit;
 pub mod transaction;
 pub mod transaction_benefit;

@@ -18,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261120_000007_convert_legacy_plan::Migration),
             Box::new(m20261120_000008_drop_excluded_from_spending::Migration),
             Box::new(m20261120_000009_recurring_match_amount::Migration),
+            Box::new(m20261120_000010_recurring_rule_benefits::Migration),
         ]
     }
 }
@@ -1324,6 +1325,84 @@ mod m20261120_000009_recurring_match_amount {
                     .await?;
             }
             Ok(())
+        }
+    }
+}
+
+/// 반복 규칙에 미리 골라 둔 카드 혜택. 예정 거래를 만들 때 거래 혜택으로 옮긴다.
+/// 새 테이블이라 외래 키를 함께 만든다 (규칙·혜택을 지우면 같이 지워진다).
+mod m20261120_000010_recurring_rule_benefits {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261120_000010_recurring_rule_benefits"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum RecurringRuleBenefits {
+        Table,
+        RecurringRuleId,
+        CardBenefitId,
+    }
+
+    #[derive(DeriveIden)]
+    enum RecurringRules {
+        Table,
+        Id,
+    }
+
+    #[derive(DeriveIden)]
+    enum CardBenefits {
+        Table,
+        Id,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .create_table(
+                    Table::create()
+                        .table(RecurringRuleBenefits::Table)
+                        .col(integer(RecurringRuleBenefits::RecurringRuleId))
+                        .col(integer(RecurringRuleBenefits::CardBenefitId))
+                        .primary_key(
+                            Index::create()
+                                .col(RecurringRuleBenefits::RecurringRuleId)
+                                .col(RecurringRuleBenefits::CardBenefitId),
+                        )
+                        .foreign_key(
+                            ForeignKey::create()
+                                .name("fk_recurring_rule_benefits_rule")
+                                .from(RecurringRuleBenefits::Table, RecurringRuleBenefits::RecurringRuleId)
+                                .to(RecurringRules::Table, RecurringRules::Id)
+                                .on_delete(ForeignKeyAction::Cascade)
+                                .on_update(ForeignKeyAction::Cascade),
+                        )
+                        .foreign_key(
+                            ForeignKey::create()
+                                .name("fk_recurring_rule_benefits_card_benefit")
+                                .from(RecurringRuleBenefits::Table, RecurringRuleBenefits::CardBenefitId)
+                                .to(CardBenefits::Table, CardBenefits::Id)
+                                .on_delete(ForeignKeyAction::Cascade)
+                                .on_update(ForeignKeyAction::Cascade),
+                        )
+                        .to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("ix_recurring_rule_benefits_card_benefit")
+                        .table(RecurringRuleBenefits::Table)
+                        .col(RecurringRuleBenefits::CardBenefitId)
+                        .to_owned(),
+                )
+                .await
         }
     }
 }

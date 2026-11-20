@@ -17,6 +17,7 @@ import {
   UPDATE_RULE,
 } from '../api/queries'
 import type { Category, CategoryKind, MonthlySummary, PlanItem, PlanItemKind, RecurringRule } from '../api/types'
+import BenefitChecks from '../components/BenefitChecks'
 import { ErrorBox, Loading, Panel } from '../components/Common'
 import LedgerTabs from '../components/LedgerTabs'
 import Modal from '../components/Modal'
@@ -409,7 +410,10 @@ function RecurringRules({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefM
                   </td>
                   <td className={`num ${isIncome(r) || r.transferLedgerId === ledgerId ? 'good' : ''}`}>{won(r.amount)}</td>
                   <td>{transferLabel(r, refMaps, ledgerId) ?? refMaps.categoryById.get(r.categoryId ?? -1)?.name ?? '-'}</td>
-                  <td>{refMaps.paymentMethodById.get(r.paymentMethodId ?? -1)?.name ?? '-'}</td>
+                  <td>
+                    {refMaps.paymentMethodById.get(r.paymentMethodId ?? -1)?.name ?? '-'}
+                    {ruleBenefitNames(r, refMaps) && <div className="small muted">혜택: {ruleBenefitNames(r, refMaps)}</div>}
+                  </td>
                   <td className="small nowrap">
                     {r.startMonth} ~ {r.endMonth ?? ''}
                   </td>
@@ -469,6 +473,13 @@ function matchLabel(r: RecurringRule): string | null {
   return [r.matchKeyword, range].filter(Boolean).join(' · ') || null
 }
 
+/** 규칙에 골라 둔 카드 혜택 이름 "10% 할인, 주유" (없으면 null) */
+function ruleBenefitNames(r: RecurringRule, refMaps: RefMaps): string | null {
+  const benefits = refMaps.paymentMethodById.get(r.paymentMethodId ?? -1)?.benefits ?? []
+  const names = r.benefitIds.map((id) => benefits.find((b) => b.id === id)?.name).filter(Boolean)
+  return names.join(', ') || null
+}
+
 function ruleInput(r: RecurringRule, patch: Partial<RecurringRule> = {}) {
   const x = { ...r, ...patch }
   return {
@@ -486,6 +497,7 @@ function ruleInput(r: RecurringRule, patch: Partial<RecurringRule> = {}) {
     matchKeyword: x.matchKeyword,
     matchAmountMin: x.matchAmountMin,
     matchAmountMax: x.matchAmountMax,
+    benefitIds: x.benefitIds,
     excludeFromPerformance: x.excludeFromPerformance,
     transferLedgerId: x.transferLedgerId,
     active: x.active,
@@ -509,6 +521,9 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
   const [matchMin, setMatchMin] = useState(rule?.matchAmountMin != null ? String(rule.matchAmountMin) : '')
   const [matchMax, setMatchMax] = useState(rule?.matchAmountMax != null ? String(rule.matchAmountMax) : '')
   const [excludePerf, setExcludePerf] = useState(rule?.excludeFromPerformance ?? false)
+  // 혜택은 카드에 딸려 있어 결제수단을 바꾸면 비운다
+  const [benefitIds, setBenefitIds] = useState<number[]>(rule?.benefitIds ?? [])
+  const pm = paymentMethodId ? refMaps.paymentMethodById.get(Number(paymentMethodId)) : undefined
   const fromLedger = rule?.ledgerId ?? ledgerId
   const otherLedgers = refMaps.ledgers.filter((l) => l.id !== fromLedger)
   // 지출·수입은 항목으로, 장부 이체는 받는 장부로 정한다
@@ -549,6 +564,7 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
       matchKeyword: (!isTransfer && matchKeyword) || null,
       matchAmountMin: isTransfer ? null : matchMinValue,
       matchAmountMax: isTransfer ? null : matchMaxValue,
+      benefitIds: isTransfer || !pm ? [] : benefitIds,
       excludeFromPerformance: excludePerf && !isTransfer,
       active: rule?.active ?? true,
     }
@@ -637,7 +653,14 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
             </label>
             <label className="field">
               결제수단
-              <select className="input" value={paymentMethodId} onChange={(e) => setPaymentMethodId(e.target.value)}>
+              <select
+                className="input"
+                value={paymentMethodId}
+                onChange={(e) => {
+                  setPaymentMethodId(e.target.value)
+                  setBenefitIds([])
+                }}
+              >
                 <option value="">선택 안 함</option>
                 {refMaps.activePaymentMethods.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -646,6 +669,15 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
                 ))}
               </select>
             </label>
+            {pm && pm.benefits.length > 0 && (
+              <div className="field-group" role="group" aria-label={`${pm.name} 혜택`} style={{ gridColumn: '1 / -1' }}>
+                {pm.name} 혜택
+                <div className="row wrap" style={{ gap: 10 }}>
+                  <BenefitChecks benefits={pm.benefits} selected={benefitIds} onChange={setBenefitIds} />
+                </div>
+                <span className="hint">예정 거래에 미리 붙여 둡니다. 결제수단을 바꾸면 비워집니다</span>
+              </div>
+            )}
           </>
         )}
         <label className="field">

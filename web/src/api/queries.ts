@@ -98,7 +98,7 @@ export const CARD_LIST_QUERY = `query CardList($includeArchived: Boolean!) {
 export const RECURRING_QUERY = `query Recurring($ledgerId: Int) {
   recurringRules(ledgerId: $ledgerId) {
     id ledgerId description amount categoryId paymentMethodId dayOfMonth intervalMonths startMonth endMonth
-    member memo matchKeyword matchAmountMin matchAmountMax excludeFromPerformance transferLedgerId active nextDate
+    member memo matchKeyword matchAmountMin matchAmountMax benefitIds excludeFromPerformance transferLedgerId active nextDate
   }
 }`
 

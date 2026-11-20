@@ -381,6 +381,8 @@ export interface RecurringRule {
   /** 자동 입력 매칭 금액 범위 (양끝 포함, 한쪽만 정해도 됨). 정했으면 실제 금액이 이 안이어야 확정 */
   matchAmountMin: number | null
   matchAmountMax: number | null
+  /** 예정 거래에 붙일 결제수단 카드의 혜택 (결제수단을 바꾸면 비운다) */
+  benefitIds: number[]
   excludeFromPerformance: boolean
   /** 장부 이체 규칙이면 받는 장부 */
   transferLedgerId: number | null
