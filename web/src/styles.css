@@ -369,6 +369,12 @@ select:focus-visible,
 .btn.ghost:hover {
   background: var(--surface-2);
 }
+/* 고른 값이 있는 토글 버튼 (가계부 상태 칸의 혜택) */
+.btn.picked {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
 .btn.sm {
   height: 26px;
   padding: 0 8px;

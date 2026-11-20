@@ -1,4 +1,5 @@
-import { Fragment, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type Ref } from 'react'
+import { createPortal } from 'react-dom'
 
 import { type RefMaps, useMutate } from '../api/hooks'
 import { CONFIRM_TX, CREATE_TX, RESTORE_TX, SKIP_TX, UPDATE_TX } from '../api/queries'
@@ -116,6 +117,10 @@ export default function TransactionGrid({
     el?.focus()
   }
 
+  /** 혜택 열이 없는 화면(가계부)에서는 확정 거래의 상태 칸에서 혜택을 고른다 */
+  const benefitsInStatus = !columns.includes('benefits')
+  const cardBenefits = (tx: Transaction) => refMaps.paymentMethodById.get(tx.paymentMethodId ?? -1)?.benefits ?? []
+
   const save = async (tx: Transaction, input: Patch, optimistic: Partial<Transaction>) => {
     setOverrides((o) => ({ ...o, [tx.id]: { ...o[tx.id], ...optimistic } }))
     try {
@@ -186,10 +191,15 @@ export default function TransactionGrid({
       }
       case 'benefits': {
         const ids = (raw as number[]) ?? []
+        if (ids.length === tx.benefitIds.length && ids.every((id) => tx.benefitIds.includes(id))) return
         return save(tx, { benefitIds: ids }, { benefitIds: ids })
       }
     }
   }
+
+  /** 거래에 고른 혜택 이름 (결제수단에 없는 혜택은 뺀다) */
+  const benefitNames = (tx: Transaction): string[] =>
+    tx.benefitIds.map((id) => cardBenefits(tx).find((b) => b.id === id)?.name).filter((n): n is string => !!n)
 
   const display = (tx: Transaction, col: GridColumn, prev?: Transaction): ReactNode => {
     switch (col) {
@@ -219,9 +229,7 @@ export default function TransactionGrid({
       case 'ledger':
         return refMaps.ledgerById.get(tx.ledgerId)?.name
       case 'benefits': {
-        const names = tx.benefitIds
-          .map((id) => refMaps.paymentMethodById.get(tx.paymentMethodId ?? -1)?.benefits.find((b) => b.id === id)?.name)
-          .filter(Boolean)
+        const names = benefitNames(tx)
         return names.length ? names.join(', ') : <span className="muted">-</span>
       }
       case 'benefitAmount': {
@@ -351,6 +359,21 @@ export default function TransactionGrid({
                     <div className="cell-actions">
                       <StatusBadges tx={tx} overdue={overdue} refMaps={refMaps} />
                       <span className="spacer" />
+                      {benefitsInStatus && tx.status === 'CONFIRMED' && cardBenefits(tx).length > 0 && (
+                        <StatusBenefits
+                          tx={tx}
+                          refMaps={refMaps}
+                          names={benefitNames(tx)}
+                          // 칸 편집과 같은 상태를 써서 다른 칸을 누르면 닫힌다
+                          open={editing?.id === tx.id && editing.col === 'benefits'}
+                          onOpenChange={(open) =>
+                            open
+                              ? setEditing({ id: tx.id, col: 'benefits' })
+                              : setEditing((cur) => (cur && cur.id === tx.id && cur.col === 'benefits' ? null : cur))
+                          }
+                          onCommit={(ids) => commit(tx, 'benefits', ids)}
+                        />
+                      )}
                       {tx.status === 'PLANNED' && (
                         <button className="btn sm" disabled={pending} onClick={() => run(CONFIRM_TX, { id: tx.id })} title="예정 금액·날짜로 확정">
                           확정
@@ -669,14 +692,118 @@ function CellEditor({
   )
 }
 
-function BenefitEditor({
+/**
+ * 상태 칸의 혜택 버튼(고른 혜택이 있으면 개수, 이름은 툴팁)과 고르기 창.
+ * 창은 body에 고정 위치로 띄운다 (표의 스크롤 영역에 잘리지 않게). 아래 공간이 좁으면 위로 연다.
+ * 적용·취소·Esc는 버튼으로 포커스를 돌리고, 바깥을 눌러 닫으면 저장하지 않고 누른 곳의 포커스를 건드리지 않는다.
+ */
+function StatusBenefits({
   tx,
   refMaps,
+  names,
+  open,
+  onOpenChange,
   onCommit,
-  onCancel,
 }: {
   tx: Transaction
   refMaps: RefMaps
+  names: string[]
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCommit: (ids: number[]) => void
+}) {
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<CSSProperties | null>(null)
+  // 행마다 새로 만드는 콜백이라 리스너를 다시 달지 않게 최신 것만 들고 있는다
+  const onOpenChangeRef = useRef(onOpenChange)
+  useLayoutEffect(() => {
+    onOpenChangeRef.current = onOpenChange
+  })
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const update = () => {
+      const r = btnRef.current?.getBoundingClientRect()
+      if (!r) return
+      const below = window.innerHeight - r.bottom - 8
+      const above = r.top - 8
+      const openUp = below < 200 && above > below
+      setPos({
+        position: 'fixed',
+        right: window.innerWidth - r.right,
+        maxHeight: Math.min(360, openUp ? above : below),
+        overflowY: 'auto',
+        ...(openUp ? { bottom: window.innerHeight - r.top + 2 } : { top: r.bottom + 2 }),
+      })
+    }
+    update()
+    const outside = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (!panelRef.current?.contains(t) && !btnRef.current?.contains(t)) onOpenChangeRef.current(false)
+    }
+    window.addEventListener('scroll', update, true)
+    window.addEventListener('resize', update)
+    document.addEventListener('mousedown', outside)
+    return () => {
+      window.removeEventListener('scroll', update, true)
+      window.removeEventListener('resize', update)
+      document.removeEventListener('mousedown', outside)
+      setPos(null)
+    }
+  }, [open])
+
+  const close = () => {
+    onOpenChange(false)
+    btnRef.current?.focus()
+  }
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className={`btn sm ${names.length ? 'picked' : 'ghost'}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={names.length ? `${tx.description} 혜택: ${names.join(', ')}` : `${tx.description} 혜택 고르기`}
+        title={names.length ? `혜택: ${names.join(', ')}` : '카드 혜택 고르기'}
+        onClick={() => onOpenChange(!open)}
+      >
+        {names.length ? `혜택 ${names.length}` : '혜택'}
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <BenefitEditor
+            ref={panelRef}
+            tx={tx}
+            refMaps={refMaps}
+            style={{ ...pos, zIndex: 70 }}
+            onCommit={(ids) => {
+              onCommit(ids)
+              close()
+            }}
+            onCancel={close}
+          />,
+          document.body,
+        )}
+    </>
+  )
+}
+
+function BenefitEditor({
+  ref,
+  tx,
+  refMaps,
+  style,
+  onCommit,
+  onCancel,
+}: {
+  ref?: Ref<HTMLDivElement>
+  tx: Transaction
+  refMaps: RefMaps
+  /** 패널 위치 (기본은 칸 안 왼쪽 위) */
+  style?: CSSProperties
   onCommit: (ids: number[]) => void
   onCancel: () => void
 }) {
@@ -684,8 +811,11 @@ function BenefitEditor({
   const [selected, setSelected] = useState<number[]>(tx.benefitIds)
   return (
     <div
+      ref={ref}
       className="panel"
-      style={{ position: 'absolute', zIndex: 20, padding: 10, minWidth: 220 }}
+      role="dialog"
+      aria-label="혜택 고르기"
+      style={{ position: 'absolute', zIndex: 20, padding: 10, minWidth: 220, ...style }}
       onKeyDown={(e) => e.key === 'Escape' && onCancel()}
     >
       {benefits.length === 0 ? (

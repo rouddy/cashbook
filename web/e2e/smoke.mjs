@@ -375,6 +375,64 @@ await step('카드 혜택: 중복 적용·한도 없는 혜택·혜택 종류', 
   assert.equal(del.data.deletePaymentMethod.deleted, true)
 })
 
+await step('가계부: 확정 거래의 상태 칸 혜택 버튼으로 카드 혜택 고르기', async () => {
+  const created = await gql(
+    `mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id name } } }`,
+    {
+      input: {
+        name: `E2E상태칸카드${STAMP}`,
+        kind: 'CREDIT_CARD',
+        benefits: [
+          { name: '백화점', rate: 0.01 },
+          { name: '간편결제', rate: 0.03, stackable: true },
+        ],
+      },
+    },
+  )
+  const card = created.data.createPaymentMethod
+  const id = Object.fromEntries(card.benefits.map((b) => [b.name, b.id]))
+  const ids = []
+  for (const status of ['CONFIRMED', 'PLANNED']) {
+    const r = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id } }`, {
+      input: { date: '2026-08-12', amount: 20000, paymentMethodId: card.id, description: `E2E상태칸${status}${STAMP}`, status },
+    })
+    ids.push(r.data.createTransaction.id)
+  }
+  try {
+    await page.goto(`${BASE}/transactions?month=2026-08&pm=${card.id}`)
+    const confirmed = page.locator('table.sheet tbody tr', { hasText: `E2E상태칸CONFIRMED${STAMP}` })
+    const planned = page.locator('table.sheet tbody tr', { hasText: `E2E상태칸PLANNED${STAMP}` })
+    await planned.waitFor()
+    // 예정 거래에는 혜택 버튼이 없다
+    assert.equal(await planned.getByRole('button', { name: /혜택/ }).count(), 0)
+    await confirmed.getByRole('button', { name: /혜택 고르기/ }).click()
+    // 창은 표 스크롤 영역에 잘리지 않게 body에 띄운다
+    const dialog = page.getByRole('dialog', { name: '혜택 고르기' })
+    await dialog.getByRole('checkbox', { name: /백화점/ }).check()
+    await dialog.getByRole('checkbox', { name: /간편결제/ }).check()
+    await dialog.getByRole('button', { name: '적용' }).click()
+    await confirmed.getByRole('button', { name: /혜택: 백화점, 간편결제/ }).waitFor()
+    const saved = await gql(`query($id: Int!) { transaction(id: $id) { benefitIds } }`, { id: ids[0] })
+    assert.deepEqual([...saved.data.transaction.benefitIds].sort(), [id['백화점'], id['간편결제']].sort())
+    // 다시 열어 하나를 풀고 Esc로 닫으면 저장하지 않고 버튼으로 포커스가 돌아온다
+    const button = confirmed.getByRole('button', { name: /혜택:/ })
+    await button.click()
+    await dialog.getByRole('checkbox', { name: /백화점/ }).uncheck()
+    await page.keyboard.press('Escape')
+    await dialog.waitFor({ state: 'detached' })
+    assert.equal(await button.evaluate((el) => el === document.activeElement), true)
+    // 바깥을 눌러도 저장하지 않고 닫는다
+    await button.click()
+    await dialog.getByRole('checkbox', { name: /백화점/ }).uncheck()
+    await page.getByRole('heading', { name: '가계부' }).click()
+    await dialog.waitFor({ state: 'detached' })
+    await confirmed.getByRole('button', { name: /혜택: 백화점, 간편결제/ }).waitFor()
+  } finally {
+    for (const txId of ids) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: txId })
+    await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: card.id })
+  }
+})
+
 await step('은행 잔고: 계좌 추가 → 잔고 기록 → 이력', async () => {
   await page.goto(`${BASE}/accounts`)
   await page.getByRole('button', { name: '+ 계좌 추가' }).click()
