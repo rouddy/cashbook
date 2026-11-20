@@ -6,6 +6,7 @@ import type { CardMonthReport, PaymentMethod, StatementLine, TransactionPage } f
 import { ErrorBox, Loading, Panel, PerformanceMeter } from '../components/Common'
 import MonthPicker from '../components/MonthPicker'
 import { SelectionActions } from '../components/DeleteTransactions'
+import type { SuggestScope } from '../components/DescriptionInput'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
 import { benefitTotalsText, hasBenefit, txBenefitTexts } from '../lib/benefits'
 import { shortDate, won } from '../lib/format'
@@ -111,6 +112,9 @@ export default function CardTransactions() {
   )
 }
 
+/** 내용 자동완성: 그 날짜(오늘보다 늦으면 오늘)부터 3개월 전 이후 내역만, 같은 내용이라도 항목이 다르면 따로 */
+const CARD_SUGGEST_SCOPE: SuggestScope = { recentMonths: 3, byCategory: true }
+
 function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMethod; month: string; refMaps: RefMaps; report: CardMonthReport }) {
   const filter = { month, paymentMethodId: card.id, statuses: ['CONFIRMED', 'PLANNED'] }
   const q = useGql<{ transactions: TransactionPage }>(['transactions', filter], TRANSACTIONS_QUERY, { filter, sort: 'DATE_ASC', limit: 2000 })
@@ -130,6 +134,7 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
           benefitAmounts={txBenefitTexts(report)}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
           selection={sel.grid}
+          suggestScope={CARD_SUGGEST_SCOPE}
           footer={<PageTotals page={page} extra={<span>혜택 {benefitTotalsText(report)}</span>} />}
         />
       )}

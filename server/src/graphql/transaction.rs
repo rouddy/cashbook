@@ -234,18 +234,26 @@ impl TransactionQuery {
         Ok(transaction::Entity::find_by_id(id).one(db(ctx)).await?)
     }
 
-    /// 입력 중인 내용과 비슷한 과거 가맹점과 그때의 분류 (자주 쓴 순)
+    /// 입력 중인 내용과 비슷한 과거 가맹점과 그때의 분류 (자주 쓴 순).
+    /// `since`가 있으면 그날 이후 거래만 본다. `byCategory`면 같은 내용이라도 장부·항목이 다르면 따로 돌려주고,
+    /// 아니면 내용마다 가장 많이 쓴 분류 하나만 돌려준다.
     async fn description_suggestions(
         &self,
         ctx: &Context<'_>,
         query: String,
         ledger_id: Option<i32>,
         #[graphql(default = 8)] limit: u64,
+        since: Option<NaiveDate>,
+        #[graphql(default = false)] by_category: bool,
     ) -> Result<Vec<Suggestion>> {
         let db = db(ctx);
         let q = query.trim();
         if q.is_empty() {
             return Ok(vec![]);
+        }
+        let limit = limit.min(30);
+        if by_category {
+            return Ok(ingest::suggestions_by_category(db, q, ledger_id, since, limit).await?);
         }
         let mut select = transaction::Entity::find()
             .select_only()
@@ -255,19 +263,22 @@ impl TransactionQuery {
         if let Some(id) = ledger_id {
             select = select.filter(transaction::Column::LedgerId.eq(id));
         }
+        if let Some(d) = since {
+            select = select.filter(transaction::Column::Date.gte(d));
+        }
         let descriptions: Vec<String> = select
             .group_by(transaction::Column::Description)
             // 횟수가 같으면 최근에 쓴 것, 그다음 이름순 (DB와 관계없이 같은 결과)
             .order_by_desc(Expr::cust("count(*)"))
             .order_by_desc(Expr::cust("max(date)"))
             .order_by_asc(transaction::Column::Description)
-            .limit(limit.min(30))
+            .limit(limit)
             .into_tuple()
             .all(db)
             .await?;
         let mut out = Vec::new();
         for d in descriptions {
-            if let Some(mut s) = ingest::suggest(db, &d, None).await? {
+            if let Some(mut s) = ingest::suggest_since(db, &d, None, since).await? {
                 s.description = d;
                 out.push(s);
             }
@@ -1037,6 +1048,64 @@ mod tests {
         }
         assert_eq!(gql(&schema, &read(recurring)).await["transaction"]["status"], "SKIPPED");
         assert_eq!(gql(&schema, &read(keep.into())).await["transaction"]["status"], "CONFIRMED");
+    }
+
+    #[tokio::test]
+    async fn description_suggestions_within_period_split_by_category() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger(&db, "가계부", 0).await;
+        let cafe = category(&db, home, "카페", CategoryKind::Expense, false).await;
+        let dinner = category(&db, home, "회식", CategoryKind::Expense, false).await;
+        let schema = crate::graphql::build_schema(db.clone(), crate::config::AppConfig::for_tests());
+        for (date, amount, description, category) in [
+            ("2026-04-01", 6000, "스타벅스 역삼", Some(cafe)),
+            ("2026-05-01", 5000, "스타벅스", Some(dinner)),
+            ("2026-05-02", 5000, "스타벅스", Some(dinner)),
+            ("2026-09-01", 3000, "스타벅스", None),
+            ("2026-10-01", 4500, "스타벅스", Some(cafe)),
+            ("2026-10-15", 80000, "스타벅스", Some(dinner)),
+            ("2026-11-01", 5500, "스타벅스", Some(cafe)),
+        ] {
+            let category = category.map_or("null".to_string(), |id| id.to_string());
+            gql(
+                &schema,
+                &format!(
+                    r#"mutation {{ createTransaction(input: {{ledgerId: {home}, date: "{date}", amount: {amount}, categoryId: {category}, description: "{description}"}}) {{ id }} }}"#
+                ),
+            )
+            .await;
+        }
+        let fields = "description categoryId count lastAmount lastDate";
+
+        // 기간 안에서 (내용, 항목)마다 따로: 많이 쓴 순, 같으면 최근 순. 기간 밖 거래는 횟수에도 넣지 않는다
+        let out = gql(&schema, &format!(r#"{{ descriptionSuggestions(query: "스타", since: "2026-08-20", byCategory: true) {{ {fields} }} }}"#)).await;
+        assert_eq!(
+            out["descriptionSuggestions"],
+            serde_json::json!([
+                {"description": "스타벅스", "categoryId": cafe, "count": 2, "lastAmount": 5500, "lastDate": "2026-11-01"},
+                {"description": "스타벅스", "categoryId": dinner, "count": 1, "lastAmount": 80000, "lastDate": "2026-10-15"},
+                {"description": "스타벅스", "categoryId": null, "count": 1, "lastAmount": 3000, "lastDate": "2026-09-01"},
+            ])
+        );
+
+        // 항목별로 나누지 않으면 내용마다 기간 안에서 가장 많이 쓴 분류 하나
+        let out = gql(&schema, &format!(r#"{{ descriptionSuggestions(query: "스타", since: "2026-08-20") {{ {fields} }} }}"#)).await;
+        assert_eq!(
+            out["descriptionSuggestions"],
+            serde_json::json!([{"description": "스타벅스", "categoryId": cafe, "count": 2, "lastAmount": 5500, "lastDate": "2026-11-01"}])
+        );
+
+        // 기간이 없으면 전체 내역
+        let out = gql(&schema, r#"{ descriptionSuggestions(query: "스타", byCategory: true) { description categoryId count } }"#).await;
+        assert_eq!(
+            out["descriptionSuggestions"],
+            serde_json::json!([
+                {"description": "스타벅스", "categoryId": dinner, "count": 3},
+                {"description": "스타벅스", "categoryId": cafe, "count": 2},
+                {"description": "스타벅스", "categoryId": null, "count": 1},
+                {"description": "스타벅스 역삼", "categoryId": cafe, "count": 1},
+            ])
+        );
     }
 
     #[tokio::test]

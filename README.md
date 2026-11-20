@@ -24,7 +24,7 @@
 | 결제 입력 `/entry` | 휴대폰용 입력 폼, 카드 승인 문자 붙여넣기 |
 | 카드 `/cards` | 카드 목록·추가·삭제, 다음 결제일·금액, 이번 달 실적 |
 | 카드 상세 `/cards/:id` | 카드 정보·정산 일정, 청구서별 결제 예정 금액, 실적·혜택, 카드 거래 |
-| 카드별 내역 `/card-transactions` | 카드별 월 이용 내역과 혜택액 (이용월/결제월 기준) |
+| 카드별 내역 `/card-transactions` | 카드별 월 이용 내역과 혜택액 (이용월/결제월 기준). 내용 자동완성은 최근 3개월 내역에서 찾고, 같은 내용이라도 항목이 다르면 따로 보여 줌 |
 | 은행 잔고 `/accounts` | 계좌, 잔고 기록과 이력, 여유자금 포함 여부 |
 | 지출 계획 `/plan` | 카테고리 예산, 월 수입·배분, 반복 지출 규칙 |
 | 설정 `/settings` | 장부, 카드 외 결제수단, 자동 입력 API 토큰과 사용법 |
@@ -259,7 +259,7 @@ cd server && cargo test        # 정산 일정·할부·혜택·여유자금·�
 sqlite3 server/data/cashbook.db ".backup /tmp/cashbook-e2e.db"
 (cd server && DATABASE_URL="sqlite:///tmp/cashbook-e2e.db?mode=rwc" CASHBOOK_PASSWORD=e2e-pass \
    CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 cargo run) &
-cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙, 토큰 권한·교차 사이트 차단 (19단계)
+cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙, 토큰 권한·교차 사이트 차단 (20단계)
 ```
 
 E2E 환경 변수: `E2E_BASE_URL`(기본 `http://127.0.0.1:8001`), `E2E_PASSWORD`(기본 `e2e-pass`), `CHROME_PATH`(기본 macOS Google Chrome 경로).

@@ -108,8 +108,8 @@ export const ACCOUNT_HISTORY_QUERY = `query AccountHistory($id: Int!) {
   account(id: $id) { id history(limit: 60) { id accountId balance balanceDate memo createdAt } }
 }`
 
-export const SUGGESTIONS_QUERY = `query Suggestions($query: String!, $ledgerId: Int) {
-  descriptionSuggestions(query: $query, ledgerId: $ledgerId, limit: 8) {
+export const SUGGESTIONS_QUERY = `query Suggestions($query: String!, $ledgerId: Int, $since: NaiveDate, $byCategory: Boolean) {
+  descriptionSuggestions(query: $query, ledgerId: $ledgerId, limit: 8, since: $since, byCategory: $byCategory) {
     description ledgerId categoryId paymentMethodId member benefitIds lastAmount lastDate count
   }
 }`

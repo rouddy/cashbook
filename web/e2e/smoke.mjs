@@ -272,6 +272,41 @@ await step('카드별 내역: 혜택 태그 편집과 결제월 기준 보기', 
   await footer.getByText(total.toLocaleString('ko-KR')).waitFor()
 })
 
+await step('카드별 내역: 내용 자동완성은 최근 3개월 안, 같은 내용이라도 항목이 다르면 따로', async () => {
+  const ref = await gql(`{ ledgers { id isDefault } categories { id name ledgerId kind } }`)
+  const home = ref.data.ledgers.find((l) => l.isDefault) ?? ref.data.ledgers[0]
+  const cats = ref.data.categories.filter((c) => c.ledgerId === home.id && c.kind === 'EXPENSE')
+  assert.ok(cats.length >= 3, '기본 장부에 지출 항목이 3개 이상 필요합니다')
+  const name = `E2E가맹점${STAMP}`
+  const ids = []
+  // 8월에 넣으면 기준일은 8/1 → 5/1 이후 내역만. 2월 것(세 번째 항목)은 나오지 않아야 한다
+  for (const [date, category] of [
+    ['2026-07-10', cats[0]],
+    ['2026-07-20', cats[1]],
+    ['2026-02-10', cats[2]],
+  ]) {
+    const r = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id } }`, {
+      input: { ledgerId: home.id, date, amount: 1000, categoryId: category.id, paymentMethodId: 3, description: name },
+    })
+    ids.push(r.data.createTransaction.id)
+  }
+  try {
+    await page.goto(`${BASE}/card-transactions?month=2026-08&card=3`)
+    const newRow = page.locator('tr.new-row')
+    await newRow.getByLabel('내용').fill(name)
+    const options = page.getByRole('option', { name: new RegExp(name) })
+    await options.first().waitFor()
+    assert.equal(await options.count(), 2)
+    // 횟수가 같으면 최근 것부터, 항목 이름을 붙여 따로 보인다
+    assert.match(await options.nth(0).locator('.badge').innerText(), new RegExp(`${cats[1].name}$`))
+    assert.match(await options.nth(1).locator('.badge').innerText(), new RegExp(`${cats[0].name}$`))
+    await options.nth(1).click()
+    assert.equal(await newRow.getByLabel('항목').inputValue(), String(cats[0].id))
+  } finally {
+    for (const id of ids) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id })
+  }
+})
+
 await step('카드 혜택: 중복 적용·한도 없는 혜택·혜택 종류', async () => {
   const created = await gql(
     `mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id name } } }`,

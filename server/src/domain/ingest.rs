@@ -17,7 +17,7 @@ use async_graphql::{InputObject, SimpleObject};
 use chrono::{Duration, NaiveDate, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, sea_query::Expr,
+    QuerySelect, QueryTrait, Select, Set, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -180,11 +180,41 @@ pub struct Suggestion {
     pub count: i32,
 }
 
+/// 추천에 쓰는 과거 거래: 확정 거래, `since`가 있으면 그날 이후만.
+/// 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게 뺀다.
+fn history(since: Option<NaiveDate>) -> Select<transaction::Entity> {
+    transaction::Entity::find()
+        .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
+        .filter(transaction::Column::SplitParentId.is_null())
+        .apply_if(since, |q, d| q.filter(transaction::Column::Date.gte(d)))
+}
+
+async fn benefit_ids_of<C: ConnectionTrait>(db: &C, transaction_id: i32) -> Result<Vec<i32>, DbErr> {
+    Ok(transaction_benefit::Entity::find()
+        .filter(transaction_benefit::Column::TransactionId.eq(transaction_id))
+        .order_by_asc(transaction_benefit::Column::CardBenefitId)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|b| b.card_benefit_id)
+        .collect())
+}
+
 /// 같은(또는 서로 포함하는) 내용의 최근 확정 거래로 장부/카테고리를 추천한다.
 pub async fn suggest<C: ConnectionTrait>(
     db: &C,
     description: &str,
     payment_method_id: Option<i32>,
+) -> Result<Option<Suggestion>, DbErr> {
+    suggest_since(db, description, payment_method_id, None).await
+}
+
+/// [`suggest`]와 같고, `since`가 있으면 그날 이후 거래만 본다.
+pub async fn suggest_since<C: ConnectionTrait>(
+    db: &C,
+    description: &str,
+    payment_method_id: Option<i32>,
+    since: Option<NaiveDate>,
 ) -> Result<Option<Suggestion>, DbErr> {
     let d = description.trim();
     if d.chars().count() < 2 {
@@ -194,10 +224,7 @@ pub async fn suggest<C: ConnectionTrait>(
         "({}(description) >= 2 AND instr(?, description) > 0)",
         sql::char_length(db.get_database_backend())
     );
-    let rows = transaction::Entity::find()
-        .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
-        // 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게 뺀다
-        .filter(transaction::Column::SplitParentId.is_null())
+    let rows = history(since)
         .filter(
             Condition::any()
                 .add(transaction::Column::Description.eq(d))
@@ -232,14 +259,7 @@ pub async fn suggest<C: ConnectionTrait>(
     let pm_for_benefits = payment_method_id.or(latest.payment_method_id);
     let benefit_source = pool.iter().find(|r| r.payment_method_id == pm_for_benefits && pm_for_benefits.is_some());
     let benefit_ids = match benefit_source {
-        Some(src) => transaction_benefit::Entity::find()
-            .filter(transaction_benefit::Column::TransactionId.eq(src.id))
-            .order_by_asc(transaction_benefit::Column::CardBenefitId)
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|b| b.card_benefit_id)
-            .collect(),
+        Some(src) => benefit_ids_of(db, src.id).await?,
         None => vec![],
     };
     Ok(Some(Suggestion {
@@ -253,6 +273,73 @@ pub async fn suggest<C: ConnectionTrait>(
         last_date: latest.date,
         count: count as i32,
     }))
+}
+
+/// 내용에 `query`가 들어간 과거 거래를 (내용, 장부, 카테고리)마다 하나씩, 자주 쓴 순으로 돌려준다.
+/// 같은 내용이라도 분류가 다르면 따로 나와 어느 쪽이든 고를 수 있다.
+/// 결제수단·구성원·혜택·최근 금액은 그 묶음의 가장 최근 거래 것이고, 횟수는 `since` 이후만 센다.
+pub async fn suggestions_by_category<C: ConnectionTrait>(
+    db: &C,
+    query: &str,
+    ledger_id: Option<i32>,
+    since: Option<NaiveDate>,
+    limit: u64,
+) -> Result<Vec<Suggestion>, DbErr> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(vec![]);
+    }
+    let groups: Vec<(String, i32, Option<i32>, i64)> = history(since)
+        .select_only()
+        .column(transaction::Column::Description)
+        .column(transaction::Column::LedgerId)
+        .column(transaction::Column::CategoryId)
+        .column_as(Expr::cust("count(*)"), "n")
+        .filter(Expr::cust_with_values("instr(description, ?) > 0", [q]))
+        .apply_if(ledger_id, |s, id| s.filter(transaction::Column::LedgerId.eq(id)))
+        .group_by(transaction::Column::Description)
+        .group_by(transaction::Column::LedgerId)
+        .group_by(transaction::Column::CategoryId)
+        // 횟수가 같으면 최근에 쓴 것, 그다음 이름·장부·카테고리 순 (DB와 관계없이 같은 결과)
+        .order_by_desc(Expr::cust("count(*)"))
+        .order_by_desc(Expr::cust("max(date)"))
+        .order_by_asc(transaction::Column::Description)
+        .order_by_asc(transaction::Column::LedgerId)
+        .order_by_asc(transaction::Column::CategoryId)
+        .limit(limit)
+        .into_tuple()
+        .all(db)
+        .await?;
+    let mut out = Vec::with_capacity(groups.len());
+    for (description, ledger_id, category_id, count) in groups {
+        let same_category = match category_id {
+            Some(id) => transaction::Column::CategoryId.eq(id),
+            None => transaction::Column::CategoryId.is_null(),
+        };
+        let Some(latest) = history(since)
+            .filter(transaction::Column::Description.eq(description.as_str()))
+            .filter(transaction::Column::LedgerId.eq(ledger_id))
+            .filter(same_category)
+            .order_by_desc(transaction::Column::Date)
+            .order_by_desc(transaction::Column::Id)
+            .one(db)
+            .await?
+        else {
+            continue;
+        };
+        out.push(Suggestion {
+            benefit_ids: benefit_ids_of(db, latest.id).await?,
+            description,
+            ledger_id,
+            category_id,
+            payment_method_id: latest.payment_method_id,
+            member: latest.member,
+            last_amount: latest.amount,
+            last_date: latest.date,
+            count: count as i32,
+        });
+    }
+    Ok(out)
 }
 
 fn strip_day_prefix(s: &str) -> &str {

@@ -7,7 +7,7 @@ import { parseAmount, shortDate, SOURCE_LABEL, weekendClass, won } from '../lib/
 import { localToday } from '../lib/month'
 import { isSplit, splitTotal } from '../lib/split'
 import BenefitChecks from './BenefitChecks'
-import DescriptionInput from './DescriptionInput'
+import DescriptionInput, { type SuggestScope } from './DescriptionInput'
 import { useToast } from './Toast'
 
 export type GridColumn =
@@ -51,6 +51,8 @@ interface Props {
   footer?: ReactNode
   /** 선택 모드: 행 번호 대신 체크박스를 보이고 새 행 입력은 숨긴다 (삭제·장부 이동은 선택 모드에서만) */
   selection?: { selected: ReadonlySet<number>; onChange: (next: Set<number>) => void }
+  /** 내용 자동완성 범위 (기간은 행의 날짜 기준) */
+  suggestScope?: SuggestScope
 }
 
 type Patch = Record<string, unknown>
@@ -65,6 +67,7 @@ export default function TransactionGrid({
   emptyText = '거래가 없습니다',
   footer,
   selection,
+  suggestScope,
 }: Props) {
   const gridId = useId()
   const toast = useToast()
@@ -293,6 +296,7 @@ export default function TransactionGrid({
                             tx={tx}
                             col={col}
                             refMaps={refMaps}
+                            suggestScope={suggestScope}
                             onCommit={(v, move) => {
                               commit(tx, col, v)
                               stopEditing(tx, col, r, c, move)
@@ -350,6 +354,7 @@ export default function TransactionGrid({
               columns={columns}
               refMaps={refMaps}
               defaults={newRow}
+              suggestScope={suggestScope}
             />
           )}
         </tbody>
@@ -489,12 +494,14 @@ function CellEditor({
   tx,
   col,
   refMaps,
+  suggestScope,
   onCommit,
   onCancel,
 }: {
   tx: Transaction
   col: GridColumn
   refMaps: RefMaps
+  suggestScope?: SuggestScope
   onCommit: (value: string | number[] | null, move?: Move) => void
   onCancel: () => void
 }) {
@@ -596,6 +603,9 @@ function CellEditor({
         value={value}
         onChange={setValue}
         ledgerId={tx.ledgerId}
+        scope={suggestScope}
+        baseDate={tx.date}
+        refMaps={refMaps}
         autoFocus
         onKeyDown={keys}
         onBlur={() => finish()}
@@ -670,7 +680,17 @@ interface NewRowState {
   status: TxStatus
 }
 
-function NewRow({ columns, refMaps, defaults }: { columns: GridColumn[]; refMaps: RefMaps; defaults: NonNullable<Props['newRow']> }) {
+function NewRow({
+  columns,
+  refMaps,
+  defaults,
+  suggestScope,
+}: {
+  columns: GridColumn[]
+  refMaps: RefMaps
+  defaults: NonNullable<Props['newRow']>
+  suggestScope?: SuggestScope
+}) {
   const { run, pending } = useMutate()
   const toast = useToast()
   const amountRef = useRef<HTMLInputElement>(null)
@@ -798,6 +818,9 @@ function NewRow({ columns, refMaps, defaults }: { columns: GridColumn[]; refMaps
             onChange={(v) => set({ description: v })}
             onPick={pick}
             ledgerId={columns.includes('ledger') ? null : ledgerForCategories}
+            scope={suggestScope}
+            baseDate={s.date}
+            refMaps={refMaps}
             onKeyDown={enter}
           />
         )
