@@ -2,8 +2,9 @@
 //!
 //! 이번 달부터 `months_ahead`개월 뒤까지, 규칙마다 (규칙, 월) 하나씩 예정 거래를 만든다.
 //! (recurring_rule_id, recurring_month) 유니크 인덱스로 중복을 막고, 건너뛴 달은 SKIPPED로 남겨 다시 만들지 않는다.
+//! 규칙에 골라 둔 카드 혜택(`recurring_rule_benefits`)은 만든 예정 거래의 혜택으로 옮긴다.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{NaiveDate, Utc};
 use sea_orm::{
@@ -13,7 +14,7 @@ use sea_orm::{
 use super::dates::YearMonth;
 use crate::entity::{
     enums::{TxSource, TxStatus},
-    recurring_rule, transaction,
+    recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
 };
 
 pub fn occurs_in(rule: &recurring_rule::Model, month: YearMonth) -> bool {
@@ -59,6 +60,14 @@ pub async fn ensure_planned<C: ConnectionTrait>(
         .into_iter()
         .filter_map(|(rule, month)| Some((rule?, month?)))
         .collect();
+    let mut benefits: HashMap<i32, Vec<i32>> = HashMap::new();
+    for rb in recurring_rule_benefit::Entity::find()
+        .filter(recurring_rule_benefit::Column::RecurringRuleId.is_in(rules.iter().map(|r| r.id)))
+        .all(db)
+        .await?
+    {
+        benefits.entry(rb.recurring_rule_id).or_default().push(rb.card_benefit_id);
+    }
 
     let now = Utc::now();
     let mut created = 0;
@@ -67,7 +76,7 @@ pub async fn ensure_planned<C: ConnectionTrait>(
             if !occurs_in(rule, month) || existing.contains(&(rule.id, month.to_string())) {
                 continue;
             }
-            transaction::ActiveModel {
+            let saved = transaction::ActiveModel {
                 ledger_id: Set(rule.ledger_id),
                 date: Set(month.day(rule.day_of_month.max(1) as u32)),
                 amount: Set(rule.amount),
@@ -81,6 +90,7 @@ pub async fn ensure_planned<C: ConnectionTrait>(
                 exclude_from_performance: Set(rule.exclude_from_performance),
                 recurring_rule_id: Set(Some(rule.id)),
                 recurring_month: Set(Some(month.to_string())),
+                transfer_ledger_id: Set(rule.transfer_ledger_id),
                 source: Set(TxSource::Recurring),
                 external_id: Set(None),
                 raw_text: Set(None),
@@ -90,6 +100,9 @@ pub async fn ensure_planned<C: ConnectionTrait>(
             }
             .insert(db)
             .await?;
+            for &bid in benefits.get(&rule.id).into_iter().flatten() {
+                transaction_benefit::ActiveModel { transaction_id: Set(saved.id), card_benefit_id: Set(bid) }.insert(db).await?;
+            }
             created += 1;
         }
     }
@@ -137,7 +150,10 @@ mod tests {
             member: None,
             memo: None,
             match_keyword: None,
+            match_amount_min: None,
+            match_amount_max: None,
             exclude_from_performance: false,
+            transfer_ledger_id: None,
             active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),

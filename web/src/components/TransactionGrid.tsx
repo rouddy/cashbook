@@ -1,13 +1,15 @@
-import { Fragment, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { Fragment, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type Ref } from 'react'
+import { createPortal } from 'react-dom'
 
 import { type RefMaps, useMutate } from '../api/hooks'
-import { CONFIRM_TX, CREATE_TX, DELETE_TX, RESTORE_TX, SKIP_TX, UPDATE_TX } from '../api/queries'
+import { CONFIRM_TX, CREATE_TX, RESTORE_TX, SKIP_TX, UPDATE_TX } from '../api/queries'
 import type { SplitPart, Suggestion, Transaction, TransactionPage, TxStatus } from '../api/types'
 import { parseAmount, shortDate, SOURCE_LABEL, weekendClass, won } from '../lib/format'
 import { localToday } from '../lib/month'
 import { isSplit, splitTotal } from '../lib/split'
+import { parseTransferOption, transferDirection, transferLabel, transferOption, transferOptions } from '../lib/transfer'
 import BenefitChecks from './BenefitChecks'
-import DescriptionInput from './DescriptionInput'
+import DescriptionInput, { type SuggestScope } from './DescriptionInput'
 import { useToast } from './Toast'
 
 export type GridColumn =
@@ -39,6 +41,18 @@ const HEADERS: Record<GridColumn, { label: string; width?: number; num?: boolean
 /** 편집 가능한 열 (혜택액은 계산값) */
 const EDITABLE: GridColumn[] = ['date', 'amount', 'category', 'paymentMethod', 'description', 'member', 'memo', 'ledger', 'benefits']
 
+/**
+ * 이 행에서 편집할 수 있는 열. 장부 이체는 결제수단·혜택이 없고,
+ * 받은 이체는 보낸 장부에서 항목(이체 대상)을 바꾼다.
+ */
+function canEdit(tx: Transaction, col: GridColumn, viewLedgerId: number | null | undefined): boolean {
+  if (!EDITABLE.includes(col)) return false
+  const dir = transferDirection(tx, viewLedgerId)
+  if (dir && (col === 'paymentMethod' || col === 'benefits')) return false
+  if (dir === 'in' && col === 'category') return false
+  return true
+}
+
 interface Props {
   rows: Transaction[]
   refMaps: RefMaps
@@ -49,8 +63,12 @@ interface Props {
   benefitAmounts?: Map<number, string>
   emptyText?: string
   footer?: ReactNode
-  /** 선택 모드: 행 번호 대신 체크박스를 보이고 새 행 입력은 숨긴다 */
+  /** 선택 모드: 행 번호 대신 체크박스를 보이고 새 행 입력은 숨긴다 (삭제·장부 이동은 선택 모드에서만) */
   selection?: { selected: ReadonlySet<number>; onChange: (next: Set<number>) => void }
+  /** 내용 자동완성 범위 (기간은 행의 날짜 기준) */
+  suggestScope?: SuggestScope
+  /** 보고 있는 장부 (null = 전체). 장부 이체를 받은 이체·보낸 이체로 나눠 보여준다 */
+  viewLedgerId?: number | null
 }
 
 type Patch = Record<string, unknown>
@@ -65,6 +83,8 @@ export default function TransactionGrid({
   emptyText = '거래가 없습니다',
   footer,
   selection,
+  suggestScope,
+  viewLedgerId,
 }: Props) {
   const gridId = useId()
   const toast = useToast()
@@ -97,6 +117,10 @@ export default function TransactionGrid({
     el?.focus()
   }
 
+  /** 혜택 열이 없는 화면(가계부)에서는 확정 거래의 상태 칸에서 혜택을 고른다 */
+  const benefitsInStatus = !columns.includes('benefits')
+  const cardBenefits = (tx: Transaction) => refMaps.paymentMethodById.get(tx.paymentMethodId ?? -1)?.benefits ?? []
+
   const save = async (tx: Transaction, input: Patch, optimistic: Partial<Transaction>) => {
     setOverrides((o) => ({ ...o, [tx.id]: { ...o[tx.id], ...optimistic } }))
     try {
@@ -128,7 +152,14 @@ export default function TransactionGrid({
         return save(tx, { amount: v }, { amount: v })
       }
       case 'category': {
+        const to = parseTransferOption(String(raw ?? ''))
+        if (to != null) {
+          if (to === tx.transferLedgerId) return
+          // 장부 이체로 바꾸면 서버가 항목·결제수단·혜택을 비운다
+          return save(tx, { transferLedgerId: to }, { transferLedgerId: to, categoryId: null, paymentMethodId: null, benefitIds: [] })
+        }
         const v = raw === '' || raw == null ? null : Number(raw)
+        if (tx.transferLedgerId != null) return save(tx, { categoryId: v, transferLedgerId: null }, { categoryId: v, transferLedgerId: null })
         if (v === tx.categoryId) return
         return save(tx, { categoryId: v }, { categoryId: v })
       }
@@ -160,10 +191,15 @@ export default function TransactionGrid({
       }
       case 'benefits': {
         const ids = (raw as number[]) ?? []
+        if (ids.length === tx.benefitIds.length && ids.every((id) => tx.benefitIds.includes(id))) return
         return save(tx, { benefitIds: ids }, { benefitIds: ids })
       }
     }
   }
+
+  /** 거래에 고른 혜택 이름 (결제수단에 없는 혜택은 뺀다) */
+  const benefitNames = (tx: Transaction): string[] =>
+    tx.benefitIds.map((id) => cardBenefits(tx).find((b) => b.id === id)?.name).filter((n): n is string => !!n)
 
   const display = (tx: Transaction, col: GridColumn, prev?: Transaction): ReactNode => {
     switch (col) {
@@ -173,10 +209,15 @@ export default function TransactionGrid({
             {shortDate(tx.date)}
           </span>
         )
-      case 'amount':
-        return <span className={tx.amount < 0 || tx.isIncome ? 'good' : ''}>{tx.isIncome ? `+${won(tx.amount)}` : won(tx.amount)}</span>
-      case 'category':
+      case 'amount': {
+        const plus = tx.isIncome || transferDirection(tx, viewLedgerId) === 'in'
+        return <span className={tx.amount < 0 || plus ? 'good' : ''}>{plus ? `+${won(tx.amount)}` : won(tx.amount)}</span>
+      }
+      case 'category': {
+        const transfer = transferLabel(tx, refMaps, viewLedgerId)
+        if (transfer) return <span title="장부 이체 (소비·수입 합계에 넣지 않음)">{transfer}</span>
         return tx.categoryId ? refMaps.categoryById.get(tx.categoryId)?.name : <span className="placeholder muted">미분류</span>
+      }
       case 'paymentMethod':
         return tx.paymentMethodId ? refMaps.paymentMethodById.get(tx.paymentMethodId)?.name : <span className="muted">-</span>
       case 'description':
@@ -188,9 +229,7 @@ export default function TransactionGrid({
       case 'ledger':
         return refMaps.ledgerById.get(tx.ledgerId)?.name
       case 'benefits': {
-        const names = tx.benefitIds
-          .map((id) => refMaps.paymentMethodById.get(tx.paymentMethodId ?? -1)?.benefits.find((b) => b.id === id)?.name)
-          .filter(Boolean)
+        const names = benefitNames(tx)
         return names.length ? names.join(', ') : <span className="muted">-</span>
       }
       case 'benefitAmount': {
@@ -206,7 +245,7 @@ export default function TransactionGrid({
       e.preventDefault()
       const [dr, dc] = moves[e.key]
       focusCell(Math.max(0, Math.min(view.length - 1, r + dr)), Math.max(0, Math.min(columns.length - 1, c + dc)))
-    } else if ((e.key === 'Enter' || e.key === 'F2') && EDITABLE.includes(col)) {
+    } else if ((e.key === 'Enter' || e.key === 'F2') && canEdit(tx, col, viewLedgerId)) {
       e.preventDefault()
       setEditing({ id: tx.id, col })
     }
@@ -221,7 +260,7 @@ export default function TransactionGrid({
     if (!move) return
     window.setTimeout(() => {
       if (move === 'next' || move === 'prev') {
-        const candidates = columns.map((col, i) => ({ col, i })).filter(({ col }) => EDITABLE.includes(col))
+        const candidates = columns.map((col, i) => ({ col, i })).filter(({ col }) => canEdit(tx, col, viewLedgerId))
         const target = move === 'next' ? candidates.find(({ i }) => i > c) : [...candidates].reverse().find(({ i }) => i < c)
         if (target) {
           setEditing({ id: tx.id, col: target.col })
@@ -293,6 +332,7 @@ export default function TransactionGrid({
                             tx={tx}
                             col={col}
                             refMaps={refMaps}
+                            suggestScope={suggestScope}
                             onCommit={(v, move) => {
                               commit(tx, col, v)
                               stopEditing(tx, col, r, c, move)
@@ -304,10 +344,10 @@ export default function TransactionGrid({
                             type="button"
                             className={`cell-btn ${HEADERS[col].num ? 'num' : ''}`}
                             data-cell={`${gridId}:${r}:${c}`}
-                            onClick={() => EDITABLE.includes(col) && setEditing({ id: tx.id, col })}
+                            onClick={() => canEdit(tx, col, viewLedgerId) && setEditing({ id: tx.id, col })}
                             onKeyDown={(e) => onCellKey(e, r, c, tx, col)}
                             title={col === 'description' || col === 'memo' ? String(display(tx, col) ?? '') : undefined}
-                            style={{ cursor: EDITABLE.includes(col) ? 'text' : 'default' }}
+                            style={{ cursor: canEdit(tx, col, viewLedgerId) ? 'text' : 'default' }}
                           >
                             {display(tx, col, view[r - 1])}
                           </button>
@@ -319,6 +359,21 @@ export default function TransactionGrid({
                     <div className="cell-actions">
                       <StatusBadges tx={tx} overdue={overdue} refMaps={refMaps} />
                       <span className="spacer" />
+                      {benefitsInStatus && tx.status === 'CONFIRMED' && cardBenefits(tx).length > 0 && (
+                        <StatusBenefits
+                          tx={tx}
+                          refMaps={refMaps}
+                          names={benefitNames(tx)}
+                          // 칸 편집과 같은 상태를 써서 다른 칸을 누르면 닫힌다
+                          open={editing?.id === tx.id && editing.col === 'benefits'}
+                          onOpenChange={(open) =>
+                            open
+                              ? setEditing({ id: tx.id, col: 'benefits' })
+                              : setEditing((cur) => (cur && cur.id === tx.id && cur.col === 'benefits' ? null : cur))
+                          }
+                          onCommit={(ids) => commit(tx, 'benefits', ids)}
+                        />
+                      )}
                       {tx.status === 'PLANNED' && (
                         <button className="btn sm" disabled={pending} onClick={() => run(CONFIRM_TX, { id: tx.id })} title="예정 금액·날짜로 확정">
                           확정
@@ -332,24 +387,6 @@ export default function TransactionGrid({
                       {tx.status === 'SKIPPED' && (
                         <button className="btn sm ghost" disabled={pending} onClick={() => run(RESTORE_TX, { id: tx.id })}>
                           복원
-                        </button>
-                      )}
-                      {!(tx.status === 'SKIPPED' && tx.recurringRuleId) && (
-                        <button
-                          className="btn sm ghost icon danger"
-                          aria-label="삭제"
-                          title="삭제"
-                          disabled={pending}
-                          onClick={() => {
-                            const message = isSplit(tx)
-                              ? `여러 장부에 나눈 결제 '${tx.description}' ${won(splitTotal(tx))}원 전체를 삭제할까요?\n(${tx.splitWith
-                                  .map((p) => refMaps.ledgerById.get(p.ledgerId)?.name)
-                                  .join(', ')}에 나눈 몫도 함께 삭제됩니다)`
-                              : `'${tx.description}' ${won(tx.amount)}원을 삭제할까요?`
-                            if (window.confirm(message)) run(DELETE_TX, { id: tx.id })
-                          }}
-                        >
-                          ✕
                         </button>
                       )}
                     </div>
@@ -368,6 +405,7 @@ export default function TransactionGrid({
               columns={columns}
               refMaps={refMaps}
               defaults={newRow}
+              suggestScope={suggestScope}
             />
           )}
         </tbody>
@@ -434,6 +472,18 @@ export function PageTotals({ page, extra }: { page: TransactionPage; extra?: Rea
       {page.plannedIncomeTotal !== 0 && (
         <span className="text-2">
           예정 수입 <span className="num">{won(page.plannedIncomeTotal)}</span>
+        </span>
+      )}
+      {page.transferInTotal + page.plannedTransferInTotal !== 0 && (
+        <span>
+          받은 이체 <span className="num">{won(page.transferInTotal)}</span>
+          {page.plannedTransferInTotal !== 0 && <span className="text-2"> (+예정 {won(page.plannedTransferInTotal)})</span>}
+        </span>
+      )}
+      {page.transferOutTotal + page.plannedTransferOutTotal !== 0 && (
+        <span>
+          보낸 이체 <span className="num">{won(page.transferOutTotal)}</span>
+          {page.plannedTransferOutTotal !== 0 && <span className="text-2"> (+예정 {won(page.plannedTransferOutTotal)})</span>}
         </span>
       )}
       {extra}
@@ -507,12 +557,14 @@ function CellEditor({
   tx,
   col,
   refMaps,
+  suggestScope,
   onCommit,
   onCancel,
 }: {
   tx: Transaction
   col: GridColumn
   refMaps: RefMaps
+  suggestScope?: SuggestScope
   onCommit: (value: string | number[] | null, move?: Move) => void
   onCancel: () => void
 }) {
@@ -523,7 +575,7 @@ function CellEditor({
       case 'amount':
         return String(tx.amount)
       case 'category':
-        return tx.categoryId ? String(tx.categoryId) : ''
+        return tx.transferLedgerId != null ? transferOption(tx.transferLedgerId) : tx.categoryId ? String(tx.categoryId) : ''
       case 'paymentMethod':
         return tx.paymentMethodId ? String(tx.paymentMethodId) : ''
       case 'ledger':
@@ -578,6 +630,7 @@ function CellEditor({
         ? [
             { value: '', label: '미분류' },
             ...refMaps.categoriesOf(tx.ledgerId).map((c) => ({ value: String(c.id), label: c.name })),
+            ...transferOptions(refMaps, tx.ledgerId),
           ]
         : col === 'paymentMethod'
           ? [
@@ -614,6 +667,9 @@ function CellEditor({
         value={value}
         onChange={setValue}
         ledgerId={tx.ledgerId}
+        scope={suggestScope}
+        baseDate={tx.date}
+        refMaps={refMaps}
         autoFocus
         onKeyDown={keys}
         onBlur={() => finish()}
@@ -636,14 +692,118 @@ function CellEditor({
   )
 }
 
-function BenefitEditor({
+/**
+ * 상태 칸의 혜택 버튼(고른 혜택이 있으면 개수, 이름은 툴팁)과 고르기 창.
+ * 창은 body에 고정 위치로 띄운다 (표의 스크롤 영역에 잘리지 않게). 아래 공간이 좁으면 위로 연다.
+ * 적용·취소·Esc는 버튼으로 포커스를 돌리고, 바깥을 눌러 닫으면 저장하지 않고 누른 곳의 포커스를 건드리지 않는다.
+ */
+function StatusBenefits({
   tx,
   refMaps,
+  names,
+  open,
+  onOpenChange,
   onCommit,
-  onCancel,
 }: {
   tx: Transaction
   refMaps: RefMaps
+  names: string[]
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCommit: (ids: number[]) => void
+}) {
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const [pos, setPos] = useState<CSSProperties | null>(null)
+  // 행마다 새로 만드는 콜백이라 리스너를 다시 달지 않게 최신 것만 들고 있는다
+  const onOpenChangeRef = useRef(onOpenChange)
+  useLayoutEffect(() => {
+    onOpenChangeRef.current = onOpenChange
+  })
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const update = () => {
+      const r = btnRef.current?.getBoundingClientRect()
+      if (!r) return
+      const below = window.innerHeight - r.bottom - 8
+      const above = r.top - 8
+      const openUp = below < 200 && above > below
+      setPos({
+        position: 'fixed',
+        right: window.innerWidth - r.right,
+        maxHeight: Math.min(360, openUp ? above : below),
+        overflowY: 'auto',
+        ...(openUp ? { bottom: window.innerHeight - r.top + 2 } : { top: r.bottom + 2 }),
+      })
+    }
+    update()
+    const outside = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (!panelRef.current?.contains(t) && !btnRef.current?.contains(t)) onOpenChangeRef.current(false)
+    }
+    window.addEventListener('scroll', update, true)
+    window.addEventListener('resize', update)
+    document.addEventListener('mousedown', outside)
+    return () => {
+      window.removeEventListener('scroll', update, true)
+      window.removeEventListener('resize', update)
+      document.removeEventListener('mousedown', outside)
+      setPos(null)
+    }
+  }, [open])
+
+  const close = () => {
+    onOpenChange(false)
+    btnRef.current?.focus()
+  }
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className={`btn sm ${names.length ? 'picked' : 'ghost'}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={names.length ? `${tx.description} 혜택: ${names.join(', ')}` : `${tx.description} 혜택 고르기`}
+        title={names.length ? `혜택: ${names.join(', ')}` : '카드 혜택 고르기'}
+        onClick={() => onOpenChange(!open)}
+      >
+        {names.length ? `혜택 ${names.length}` : '혜택'}
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <BenefitEditor
+            ref={panelRef}
+            tx={tx}
+            refMaps={refMaps}
+            style={{ ...pos, zIndex: 70 }}
+            onCommit={(ids) => {
+              onCommit(ids)
+              close()
+            }}
+            onCancel={close}
+          />,
+          document.body,
+        )}
+    </>
+  )
+}
+
+function BenefitEditor({
+  ref,
+  tx,
+  refMaps,
+  style,
+  onCommit,
+  onCancel,
+}: {
+  ref?: Ref<HTMLDivElement>
+  tx: Transaction
+  refMaps: RefMaps
+  /** 패널 위치 (기본은 칸 안 왼쪽 위) */
+  style?: CSSProperties
   onCommit: (ids: number[]) => void
   onCancel: () => void
 }) {
@@ -651,8 +811,11 @@ function BenefitEditor({
   const [selected, setSelected] = useState<number[]>(tx.benefitIds)
   return (
     <div
+      ref={ref}
       className="panel"
-      style={{ position: 'absolute', zIndex: 20, padding: 10, minWidth: 220 }}
+      role="dialog"
+      aria-label="혜택 고르기"
+      style={{ position: 'absolute', zIndex: 20, padding: 10, minWidth: 220, ...style }}
       onKeyDown={(e) => e.key === 'Escape' && onCancel()}
     >
       {benefits.length === 0 ? (
@@ -688,7 +851,17 @@ interface NewRowState {
   status: TxStatus
 }
 
-function NewRow({ columns, refMaps, defaults }: { columns: GridColumn[]; refMaps: RefMaps; defaults: NonNullable<Props['newRow']> }) {
+function NewRow({
+  columns,
+  refMaps,
+  defaults,
+  suggestScope,
+}: {
+  columns: GridColumn[]
+  refMaps: RefMaps
+  defaults: NonNullable<Props['newRow']>
+  suggestScope?: SuggestScope
+}) {
   const { run, pending } = useMutate()
   const toast = useToast()
   const amountRef = useRef<HTMLInputElement>(null)
@@ -740,14 +913,16 @@ function NewRow({ columns, refMaps, defaults }: { columns: GridColumn[]; refMaps
       return
     }
     submitting.current = true
+    const transferTo = parseTransferOption(s.categoryId)
     try {
       const created = await run(CREATE_TX, {
         input: {
           ledgerId: s.ledgerId ? Number(s.ledgerId) : null,
           date: s.date,
           amount,
-          categoryId: s.categoryId ? Number(s.categoryId) : null,
-          paymentMethodId: s.paymentMethodId ? Number(s.paymentMethodId) : null,
+          categoryId: s.categoryId && transferTo == null ? Number(s.categoryId) : null,
+          transferLedgerId: transferTo,
+          paymentMethodId: s.paymentMethodId && transferTo == null ? Number(s.paymentMethodId) : null,
           description: s.description.trim(),
           memo: s.memo || null,
           member: s.member || null,
@@ -788,18 +963,38 @@ function NewRow({ columns, refMaps, defaults }: { columns: GridColumn[]; refMaps
         )
       case 'category':
         return (
-          <select className="cell-input" value={s.categoryId} onChange={(e) => set({ categoryId: e.target.value })} onKeyDown={enter} aria-label="항목">
+          <select
+            className="cell-input"
+            value={s.categoryId}
+            // 장부 이체에는 결제수단이 없다
+            onChange={(e) => set(parseTransferOption(e.target.value) == null ? { categoryId: e.target.value } : { categoryId: e.target.value, paymentMethodId: '' })}
+            onKeyDown={enter}
+            aria-label="항목"
+          >
             <option value="">항목</option>
             {refMaps.categoriesOf(ledgerForCategories).map((c) => (
               <option key={c.id} value={c.id}>
                 {c.name}
               </option>
             ))}
+            {ledgerForCategories != null &&
+              transferOptions(refMaps, ledgerForCategories).map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
           </select>
         )
       case 'paymentMethod':
         return (
-          <select className="cell-input" value={s.paymentMethodId} onChange={(e) => set({ paymentMethodId: e.target.value })} onKeyDown={enter} aria-label="결제수단">
+          <select
+            className="cell-input"
+            value={s.paymentMethodId}
+            disabled={parseTransferOption(s.categoryId) != null}
+            onChange={(e) => set({ paymentMethodId: e.target.value })}
+            onKeyDown={enter}
+            aria-label="결제수단"
+          >
             <option value="">결제수단</option>
             {refMaps.activePaymentMethods.map((p) => (
               <option key={p.id} value={p.id}>
@@ -816,6 +1011,9 @@ function NewRow({ columns, refMaps, defaults }: { columns: GridColumn[]; refMaps
             onChange={(v) => set({ description: v })}
             onPick={pick}
             ledgerId={columns.includes('ledger') ? null : ledgerForCategories}
+            scope={suggestScope}
+            baseDate={s.date}
+            refMaps={refMaps}
             onKeyDown={enter}
           />
         )

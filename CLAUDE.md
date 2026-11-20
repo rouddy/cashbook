@@ -34,17 +34,19 @@ cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug   # 에뮬레�
   - `ingest.rs` 자동 입력(중복 방지 → 결제수단 해석 → 분류 추천 → 예정 매칭), `sms.rs` 승인 문자 파서
   - `import.rs` 정규화 JSON 가져오기
   - `split.rs` 거래 분할(한 결제를 두 장부에 — 자식이 `split_parent_id`로 부모를 가리킴, 결제 속성 동기화·금액 재분배·합치기)
+  - `legacy_plan.rs` 예전 지출계획(월 수입·배분·합계 제외)을 정기수익 반복 수입·장부 이체 반복·장부로 옮기는 규칙 (마이그레이션 `m20261120_000007`과 `import.rs`가 공용)
 - `graphql/` — 도메인별 Query/Mutation을 `MergedObject`로 합침. 요청마다 `Lookup`(작은 테이블 캐시)을 `request.data`로 넣는다. 뮤테이션 후엔 `lookup(ctx).invalidate()`.
 - `routes.rs` — `/api/graphql`(POST JSON, `FullAccess` 가드), `/api/ingest`(JSON·text/plain, `Auth` 가드), `/api/ingest/options`(GET, `Auth` — 안드로이드 규칙의 장부·카테고리·결제수단 선택 목록, 이름만), 세션/로그인, SPA 서빙. `auth.rs` — 비밀번호 세션(암호화 쿠키, SameSite=Strict) + API 토큰(SHA-256 해시, 권한 `INGEST`(기본, ingest와 규칙용 이름 목록 `/api/ingest/options`만)/`FULL`). `Auth` 가드는 Origin≠Host 요청을 403으로 막고, 인증이 꺼진 로컬 모드에서는 localhost Host만 받는다. `CASHBOOK_PASSWORD`가 없으면 인증이 꺼지고, 그때 비루프백 주소로는 시작을 거부한다. 403 사유는 `ForbiddenReason`으로 요청 캐시에 남겨 catcher가 JSON으로 돌려준다.
 
 ## 놓치기 쉬운 것
 
-- 금액 부호: 지출 카테고리는 +지출/−환불, 수입 카테고리는 +수입. 카드 청구·결제수단 합계는 `summary::outflow()`(수입이면 부호 반전)를 쓴다.
+- 금액 부호: 지출 카테고리는 +지출/−환불, 수입 카테고리는 +수입. 카드 청구·결제수단 합계는 `summary::outflow()`(수입이면 부호 반전, 장부 이체는 0)를 쓴다.
+- 장부 이체: `transfer_ledger_id`가 있는 거래 한 행 = `ledger_id`에서 그 장부로 옮긴 돈(항목·결제수단 없음, 반복 규칙도 같은 컬럼). 소비·수입이 아니라 `summary::classify(tx, cats, ledger_id)`가 보는 장부 기준으로 받은/보낸 이체로 나누고, 전체 장부 합계·카드·여유자금·추천(`ingest::history`)에서는 뺀다. 장부를 정한 조회(`transactions` 필터, `monthlySummary`, `recurringRules`)는 받은 이체(`transfer_ledger_id = 장부`)도 함께 가져온다 — 장부별로 거래를 읽는 경로를 새로 만들면 받은 이체를 빠뜨리지 않는다. 월잔액 = 수입 + 받은 이체 − 소비 − 보낸 이체 − 배분. 지출계획의 월 수입(`INCOME`)과 카테고리 '합계 제외'는 없어졌다(정기수익 반복 수입, 장부 분리로 대체). 웹 표시는 `lib/transfer.ts`.
 - 반복 규칙이 이번 달 이후에 만든 항목은 상태와 관계없이 삭제하면 SKIPPED로 남긴다(유니크 `(recurring_rule_id, recurring_month)` 자리를 비우면 `ensure_planned`가 다시 만든다). 규칙 수정 시 이번 달 이후 PLANNED만 다시 만든다.
 - 사용 중인 카테고리/결제수단 삭제는 보관(archived) 처리. 결제수단 보관 시 그 결제수단의 반복 규칙을 끄고 이번 달 이후 예정분을 지운다.
 - 여유자금은 결제 계좌가 여유자금 제외 계좌인 카드의 대금·예정 출금을 빼지 않는다(`CardDue.counted`). 혜택 환불은 그 달에 받은 혜택까지만 되돌린다.
 - 거래 분할: 부모 + 자식(`split_parent_id`) 금액의 합이 실제 결제. 확정 거래만 나눈다(예정은 반복 규칙이 지우고 다시 만들어 짝이 깨짐). 묶음의 날짜·결제수단·할부·실적 제외·상태는 `split::sync_payment_fields`로 맞추고, 금액을 고치면 짝이 차액을 맡는다(`split::rebalance`). 혜택 지정은 부모에 두고(`benefit_owner`), 카드 실적·혜택은 묶음을 한 건으로 계산한다(`card_report::card_txs`). 묶음 거래는 장부 이동·상태 변경을 막고, 삭제는 합친 뒤 결제 전체를 지운다 — 거래를 지우거나 상태를 바꾸는 경로를 새로 만들면 분할 묶음을 먼저 처리한다. 웹의 분할 판단·합계·금액 규칙은 `lib/split.ts`(서버 `split::check_part`와 같게).
-- 카드 혜택: 거래에 고른 혜택은 모두 더하고, `stackable`이 아닌 혜택은 거래당 하나만(`benefits::stacking_conflict`, UI는 `lib/benefits.ts`의 `toggleBenefit`). 혜택액은 `kind` 단위(할인 원·포인트 P·마일리지 마일)라 종류별로 합친다(`discountTotal`/`pointTotal`/`mileageTotal`, `benefitTotal` = 할인+포인트). 통합 한도 사용은 `limitUsed`(한도 없는·별도 한도 혜택 제외).
+- 카드 혜택: 거래에 고른 혜택은 모두 더하고, `stackable`이 아닌 혜택은 거래당 하나만(`benefits::stacking_conflict`, UI는 `lib/benefits.ts`의 `toggleBenefit`). 혜택액은 `kind` 단위(할인 원·포인트 P·마일리지 마일)라 종류별로 합친다(`discountTotal`/`pointTotal`/`mileageTotal`, `benefitTotal` = 할인+포인트). 통합 한도 사용은 `limitUsed`(한도 없는·별도 한도 혜택 제외). 반복 규칙도 혜택을 고를 수 있고(`recurring_rule_benefits`, 검증은 거래와 같은 `card_benefits_of`), `ensure_planned`가 예정 거래의 `transaction_benefits`로 옮긴다. 규칙·거래 모두 결제수단이 바뀌면 다른 카드 혜택을 버린다.
 - 프론트는 뮤테이션 성공 시 `queryClient.invalidateQueries()`로 전부 다시 읽는다(`api/hooks.ts`의 `useMutate`). `run()`은 실패해도 던지지 않고 토스트 후 `undefined`를 돌려주므로, 성공해야 하는 후속 동작은 결과를 확인한다.
 - URL 쿼리 상태(`lib/month.ts`의 `useMonthParam`/`useQueryParam`)는 한 핸들러에서 여러 개를 바꿀 수 있게 항상 `window.location.search`에서 시작해 갱신한다.
 - 가계부 그리드 편집은 blur로 끝나면 포커스를 옮기지 않는다(다른 칸을 누른 사용자 입력을 뺏지 않기). Enter/Tab/Esc일 때만 다음 칸으로 이동.

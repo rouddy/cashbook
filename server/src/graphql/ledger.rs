@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use async_graphql::{Context, InputObject, MaybeUndefined, Object, Result};
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set,
     TransactionTrait,
 };
 
@@ -51,7 +51,7 @@ impl LedgerQuery {
             .await?)
     }
 
-    /// 지출계획 고정 항목 (수입/배분/구성원 용돈)
+    /// 지출계획 고정 항목 (배분/구성원 용돈)
     async fn plan_items(&self, ctx: &Context<'_>, ledger_id: Option<i32>) -> Result<Vec<plan_item::Model>> {
         let mut q = plan_item::Entity::find();
         if let Some(id) = ledger_id {
@@ -104,8 +104,6 @@ pub struct CategoryInput {
     pub monthly_budget: Option<i64>,
     #[graphql(default)]
     pub is_fixed: bool,
-    #[graphql(default)]
-    pub excluded_from_spending: bool,
     pub color: Option<String>,
 }
 
@@ -115,7 +113,6 @@ pub struct CategoryPatch {
     pub kind: Option<CategoryKind>,
     pub monthly_budget: MaybeUndefined<i64>,
     pub is_fixed: Option<bool>,
-    pub excluded_from_spending: Option<bool>,
     pub color: MaybeUndefined<String>,
     pub archived: Option<bool>,
     pub sort_order: Option<i32>,
@@ -190,12 +187,22 @@ impl LedgerMutation {
         Ok(saved)
     }
 
-    /// 거래가 없는 장부만 지울 수 있다.
+    /// 거래(받은 이체 포함)가 없고, 다른 장부의 반복 이체가 받지 않는 장부만 지울 수 있다.
     async fn delete_ledger(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
         let db = db(ctx);
-        let used = transaction::Entity::find().filter(transaction::Column::LedgerId.eq(id)).count(db).await?;
+        let used = transaction::Entity::find()
+            .filter(Condition::any().add(transaction::Column::LedgerId.eq(id)).add(transaction::Column::TransferLedgerId.eq(id)))
+            .count(db)
+            .await?;
         if used > 0 {
-            return Err(user_error(format!("거래 {used}건이 있는 장부는 지울 수 없습니다")));
+            return Err(user_error(format!("거래 {used}건(받은 이체 포함)이 있는 장부는 지울 수 없습니다")));
+        }
+        let incoming = recurring_rule::Entity::find()
+            .filter(recurring_rule::Column::TransferLedgerId.eq(id))
+            .count(db)
+            .await?;
+        if incoming > 0 {
+            return Err(user_error(format!("이 장부로 보내는 반복 이체 {incoming}개를 먼저 지우세요")));
         }
         let res = ledger::Entity::delete_by_id(id).exec(db).await?;
         lookup(ctx).invalidate();
@@ -234,7 +241,6 @@ impl LedgerMutation {
             kind: Set(input.kind),
             monthly_budget: Set(input.monthly_budget),
             is_fixed: Set(input.is_fixed),
-            excluded_from_spending: Set(input.excluded_from_spending),
             color: Set(trim_opt(input.color)),
             sort_order: Set(count as i32),
             archived: Set(false),
@@ -263,9 +269,6 @@ impl LedgerMutation {
         }
         if let Some(v) = input.is_fixed {
             active.is_fixed = Set(v);
-        }
-        if let Some(v) = input.excluded_from_spending {
-            active.excluded_from_spending = Set(v);
         }
         match input.color {
             MaybeUndefined::Value(v) => active.color = Set(trim_opt(Some(v))),

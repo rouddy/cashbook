@@ -45,6 +45,11 @@ export function benefitValueText(kind: BenefitKind, amount: number): string {
 
 type Totals = Pick<CardMonthReport, 'discountTotal' | 'pointTotal' | 'mileageTotal'>
 
+/** 예정 거래가 이번 달 실적에 더하는 금액 (예정 포함 전망 − 확정 실적). 예정 환불이면 음수. */
+export function plannedPerformance(r: Pick<CardMonthReport, 'performance' | 'projectedPerformance'>): number {
+  return r.projectedPerformance - r.performance
+}
+
 export function hasBenefit(r: Totals): boolean {
   return r.discountTotal !== 0 || r.pointTotal !== 0 || r.mileageTotal !== 0
 }

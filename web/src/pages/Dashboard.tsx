@@ -3,15 +3,17 @@ import { Link, useNavigate } from 'react-router-dom'
 
 import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { CARDS_MONTHLY_QUERY, CONFIRM_TX, FUNDS_QUERY, SKIP_TX, SUMMARY_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
-import type { AvailableFunds, CardMonthReport, MonthlySummary, TransactionPage } from '../api/types'
+import type { AvailableFunds, CardMonthReport, MonthlySummary, Transaction, TransactionPage } from '../api/types'
+import BalanceRows from '../components/BalanceRows'
 import ColumnChart from '../components/charts/ColumnChart'
 import LineChart from '../components/charts/LineChart'
-import { Delta, ErrorBox, Loading, Meter, Panel, PerformanceMeter, StatTile } from '../components/Common'
+import { Delta, ErrorBox, Loading, Meter, Panel, PerformanceMeter, PlannedSwatch, StatTile } from '../components/Common'
 import LedgerTabs from '../components/LedgerTabs'
 import MonthPicker from '../components/MonthPicker'
-import { benefitTotalsText } from '../lib/benefits'
-import { compactWon, longDate, percent, shortDate, won } from '../lib/format'
+import { benefitTotalsText, plannedPerformance } from '../lib/benefits'
+import { compactWon, longDate, percent, shortDate, signedWon, won } from '../lib/format'
 import { addDays, currentMonth, localToday, monthLabel, shortMonthLabel, useMonthParam, useQueryParam } from '../lib/month'
+import { transferDirection, transferLabel } from '../lib/transfer'
 
 const AVG_OPTIONS = ['3', '6', '12']
 
@@ -72,7 +74,7 @@ export default function Dashboard() {
           <CardPlanPanel month={month} refMaps={ref} />
           <div className="grid-2">
             <MethodPanel s={s} />
-            <MemberPanel s={s} />
+            <MemberPanel s={s} refMaps={ref} />
           </div>
         </div>
       )}
@@ -116,9 +118,9 @@ function Kpis({ s }: { s: MonthlySummary }) {
       </StatTile>
       {s.balance != null ? (
         <StatTile
-          label="월잔액 (계획 기준)"
+          label="월잔액"
           value={<span className={s.balance < 0 ? 'bad' : ''}>{won(s.balance)}원</span>}
-          delta={<span className="text-2">예정 반영 시 {won(s.projectedBalance ?? s.balance)}원</span>}
+          delta={<span className="text-2">예정(월급·이체 등) 반영 시 {won(s.projectedBalance ?? s.balance)}원</span>}
         />
       ) : (
         <StatTile label="수입" value={`${won(s.income)}원`} delta={<span className="text-2">수입 카테고리 합계</span>} />
@@ -147,7 +149,7 @@ function DailyPanel({ s }: { s: MonthlySummary }) {
   return (
     <Panel
       title="일별 누적 소비"
-      sub={`소비 합계 기준 (경조사비·여행 등 제외 카테고리 빼고) · ${monthLabel(s.month)}`}
+      sub={`소비 합계 기준 (수입·장부 이체 제외) · ${monthLabel(s.month)}`}
       actions={
         <button className="btn sm ghost" onClick={() => setAsTable((v) => !v)}>
           {asTable ? '차트로 보기' : '표로 보기'}
@@ -324,7 +326,6 @@ function CategoryPanel({ s, ledgerId, refMaps }: { s: MonthlySummary; ledgerId: 
                   <td className="nowrap">
                     {ledgerId == null && c.ledgerId != null && <span className="muted">{refMaps.ledgerById.get(c.ledgerId)?.name} · </span>}
                     {c.name}
-                    {c.excludedFromSpending && <span className="badge" style={{ marginLeft: 6 }}>합계 제외</span>}
                     {c.isFixed && <span className="badge" style={{ marginLeft: 6 }}>고정</span>}
                   </td>
                   <td className="hide-sm">
@@ -377,32 +378,41 @@ function PlannedPanel({ refMaps, ledgerId }: { refMaps: RefMaps; ledgerId: numbe
   const items = q.data?.transactions.items ?? []
   const overdue = items.filter((t) => t.date < today)
   const upcoming = items.filter((t) => t.date >= today)
-  const row = (t: (typeof items)[number], isOverdue: boolean) => (
-    <tr key={t.id}>
-      <td className="nowrap">{shortDate(t.date)}</td>
-      <td>
-        {t.description}
-        <div className="small muted">
-          {[refMaps.categoryById.get(t.categoryId ?? -1)?.name, refMaps.paymentMethodById.get(t.paymentMethodId ?? -1)?.name]
-            .filter(Boolean)
-            .join(' · ')}
-        </div>
-      </td>
-      <td className="num">{won(t.amount)}</td>
-      <td className="nowrap" style={{ textAlign: 'right' }}>
-        <button className="btn sm" disabled={pending} onClick={() => run(CONFIRM_TX, { id: t.id })} title="이 금액·날짜로 확정">
-          확정
-        </button>{' '}
-        {isOverdue && (
-          <button className="btn sm ghost" disabled={pending} onClick={() => run(SKIP_TX, { id: t.id })}>
-            건너뛰기
-          </button>
-        )}
-      </td>
-    </tr>
-  )
+  // 합계는 지출만 (수입과 장부 이체는 따로 표시)
+  const isSpending = (t: Transaction) => !t.isIncome && t.transferLedgerId == null
+  const spendingOf = (list: Transaction[]) => list.filter(isSpending).reduce((a, t) => a + t.amount, 0)
+  const row = (t: Transaction, isOverdue: boolean) => {
+    const plus = t.isIncome || transferDirection(t, ledgerId) === 'in'
+    return (
+      <tr key={t.id}>
+        <td className="nowrap">{shortDate(t.date)}</td>
+        <td>
+          {t.description}
+          <div className="small muted">
+            {[
+              transferLabel(t, refMaps, ledgerId) ?? refMaps.categoryById.get(t.categoryId ?? -1)?.name,
+              refMaps.paymentMethodById.get(t.paymentMethodId ?? -1)?.name,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </div>
+        </td>
+        <td className={`num ${plus ? 'good' : ''}`}>{plus ? `+${won(t.amount)}` : won(t.amount)}</td>
+        <td className="nowrap" style={{ textAlign: 'right' }}>
+          <button className="btn sm" disabled={pending} onClick={() => run(CONFIRM_TX, { id: t.id })} title="이 금액·날짜로 확정">
+            확정
+          </button>{' '}
+          {isOverdue && (
+            <button className="btn sm ghost" disabled={pending} onClick={() => run(SKIP_TX, { id: t.id })}>
+              건너뛰기
+            </button>
+          )}
+        </td>
+      </tr>
+    )
+  }
   return (
-    <Panel title="예정 지출" sub="반복 규칙과 예정으로 입력한 거래 · 실제 결제되면 확정하세요" flush>
+    <Panel title="예정 거래" sub="반복 규칙(지출·월급·장부 이체)과 예정으로 입력한 거래 · 실제로 오가면 확정하세요" flush>
       {q.isLoading ? (
         <Loading />
       ) : q.error ? (
@@ -413,7 +423,7 @@ function PlannedPanel({ refMaps, ledgerId }: { refMaps: RefMaps; ledgerId: numbe
             <div className="notice" style={{ margin: '0 12px 8px' }}>
               <span className="notice-icon">!</span>
               <span>
-                날짜가 지났는데 확정되지 않은 예정 항목 {overdue.length}건 (합계 {won(overdue.reduce((a, t) => a + t.amount, 0))}원)
+                날짜가 지났는데 확정되지 않은 예정 항목 {overdue.length}건 (지출 {won(spendingOf(overdue))}원)
               </span>
             </div>
           )}
@@ -422,13 +432,13 @@ function PlannedPanel({ refMaps, ledgerId }: { refMaps: RefMaps; ledgerId: numbe
               {overdue.map((t) => row(t, true))}
               {upcoming.length === 0 && overdue.length === 0 && (
                 <tr>
-                  <td className="empty">예정된 지출이 없습니다</td>
+                  <td className="empty">예정된 거래가 없습니다</td>
                 </tr>
               )}
               {upcoming.length > 0 && (
                 <tr>
                   <td colSpan={4} className="small text-2" style={{ background: 'var(--surface-2)' }}>
-                    앞으로 31일 · {won(upcoming.reduce((a, t) => a + t.amount, 0))}원
+                    앞으로 31일 · 지출 {won(spendingOf(upcoming))}원
                   </td>
                 </tr>
               )}
@@ -457,7 +467,6 @@ function HistoryPanel({ s, onSelect }: { s: MonthlySummary; onSelect: (m: string
         detailFor={(i) => {
           const h = s.history[i]
           const parts = [`고정 ${compactWon(h.fixedSpending)}`]
-          if (h.excludedSpending) parts.push(`합계 제외 ${compactWon(h.excludedSpending)}`)
           if (h.plannedSpending) parts.push(`예정 ${compactWon(h.plannedSpending)}`)
           return parts.join(' · ')
         }}
@@ -499,39 +508,12 @@ function MethodPanel({ s }: { s: MonthlySummary }) {
   )
 }
 
-function MemberPanel({ s }: { s: MonthlySummary }) {
+function MemberPanel({ s, refMaps }: { s: MonthlySummary; refMaps: RefMaps }) {
   return (
     <Panel title="구성원 · 지출 계획" flush>
       <table className="table">
         <tbody>
-          {s.plan && (
-            <>
-              <tr>
-                <td>계획 수입</td>
-                <td className="num">{won(s.plan.income)}</td>
-              </tr>
-              <tr>
-                <td>배분 (용돈·저축·적금 등)</td>
-                <td className="num">−{won(s.plan.allocations)}</td>
-              </tr>
-              <tr>
-                <td>소비</td>
-                <td className="num">−{won(s.spending)}</td>
-              </tr>
-              {s.income !== 0 && (
-                <tr>
-                  <td>기타 수입</td>
-                  <td className="num">+{won(s.income)}</td>
-                </tr>
-              )}
-              <tr>
-                <td style={{ fontWeight: 650 }}>월잔액</td>
-                <td className={`num ${s.balance != null && s.balance < 0 ? 'bad' : ''}`} style={{ fontWeight: 650 }}>
-                  {won(s.balance)}
-                </td>
-              </tr>
-            </>
-          )}
+          {s.plan && <BalanceRows s={s} refMaps={refMaps} showSpending />}
           {s.members.map((m) => (
             <tr key={m.member}>
               <td>
@@ -598,7 +580,12 @@ function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) 
                     <td className="num">
                       {won(r.performance)}
                       {r.target ? <span className="muted"> / {won(r.target)}</span> : null}
-                      {r.plannedSpending !== 0 && <div className="small muted">예정 포함 {won(r.projectedPerformance)}</div>}
+                      {plannedPerformance(r) !== 0 && (
+                        <div className="small muted">
+                          {plannedPerformance(r) > 0 && <PlannedSwatch />}
+                          예정 {signedWon(plannedPerformance(r))} · 포함 {won(r.projectedPerformance)}
+                        </div>
+                      )}
                     </td>
                     <td className="num">
                       {r.target == null ? '-' : r.remainingToTarget ? <b>{won(r.remainingToTarget)}</b> : <span className="good">✓ 달성</span>}

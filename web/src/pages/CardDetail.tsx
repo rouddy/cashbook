@@ -5,14 +5,16 @@ import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { CARD_DETAIL_QUERY, DELETE_PM, RESTORE_PM, STATEMENT_LINES_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
 import type { CardMonthReport, PaymentMethod, StatementInfo, StatementLine, TransactionPage } from '../api/types'
 import CardForm from '../components/CardForm'
-import { ErrorBox, Loading, Meter, Panel, PerformanceMeter } from '../components/Common'
+import { ErrorBox, Loading, Meter, Panel, PerformanceMeter, PlannedSwatch } from '../components/Common'
 import Modal from '../components/Modal'
 import MonthPicker from '../components/MonthPicker'
 import { useToast } from '../components/Toast'
+import { SelectionActions } from '../components/DeleteTransactions'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
-import { benefitRateText, benefitTotalsText, benefitValueText, separateLimitLabel, txBenefitTexts } from '../lib/benefits'
-import { longDate, PAYMENT_KIND_LABEL, shortDate, won } from '../lib/format'
+import { benefitRateText, benefitTotalsText, benefitValueText, plannedPerformance, separateLimitLabel, txBenefitTexts } from '../lib/benefits'
+import { longDate, PAYMENT_KIND_LABEL, shortDate, signedWon, won } from '../lib/format'
 import { defaultDateFor, localToday, monthLabel, useMonthParam } from '../lib/month'
+import { useTxSelection } from '../lib/selection'
 
 type Detail = PaymentMethod & {
   transactionCount: number
@@ -318,7 +320,12 @@ export function ReportPanel({ report: r, card }: { report: CardMonthReport; card
           ) : (
             <div className="small text-2">목표 미설정</div>
           )}
-          {r.plannedSpending !== 0 && <div className="small text-2">예정 포함 전망 {won(r.projectedPerformance)}원</div>}
+          {plannedPerformance(r) !== 0 && (
+            <div className="small text-2">
+              {plannedPerformance(r) > 0 && <PlannedSwatch />}
+              예정 {signedWon(plannedPerformance(r))}원 · 예정 포함 전망 {won(r.projectedPerformance)}원
+            </div>
+          )}
         </div>
         <div>
           <div className="stat-label">이번 달 혜택</div>
@@ -413,8 +420,14 @@ function CardMonthTransactions({ card, month, refMaps, report }: { card: Payment
   const q = useGql<{ transactions: TransactionPage }>(['transactions', filter], TRANSACTIONS_QUERY, { filter, sort: 'DATE_ASC', limit: 2000 })
   const benefitAmounts = txBenefitTexts(report)
   const page = q.data?.transactions
+  const sel = useTxSelection(page?.items)
   return (
-    <Panel title={`${monthLabel(month)} ${card.name} 거래`} sub="혜택 칸을 눌러 거래별 혜택 항목을 지정하세요" flush>
+    <Panel
+      title={`${monthLabel(month)} ${card.name} 거래`}
+      sub="혜택 칸을 눌러 거래별 혜택 항목을 지정하세요"
+      actions={<SelectionActions sel={sel} refMaps={refMaps} />}
+      flush
+    >
       {q.error ? (
         <ErrorBox error={q.error} />
       ) : !page ? (
@@ -426,6 +439,7 @@ function CardMonthTransactions({ card, month, refMaps, report }: { card: Payment
           columns={['date', 'amount', 'category', 'description', 'benefits', 'benefitAmount', 'member', 'memo']}
           benefitAmounts={benefitAmounts}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
+          selection={sel.grid}
           footer={<PageTotals page={page} />}
         />
       )}

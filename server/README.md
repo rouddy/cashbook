@@ -37,11 +37,13 @@ server/
     │   ├── billing.rs      카드 정산 주기, 결제일 주말 보정, 할부 분할
     │   ├── benefits.rs     전월실적·혜택 (건별 → 항목 월한도 → 통합한도 날짜순 누적)
     │   ├── card_report.rs  카드별 이번 달 실적·혜택 잔여·다음 구간
-    │   ├── summary.rs      월 요약 (소비·월잔액·평균), outflow()
+    │   ├── summary.rs      월 요약 (소비·월잔액·평균·장부 이체), outflow()
     │   ├── funds.rs        여유자금 (잔고 − 미반영 카드대금·출금)
     │   ├── recurring.rs    반복 규칙 → 예정 거래 (ensure_planned)
     │   ├── sms.rs          카드 승인 문자 파서
     │   ├── ingest.rs       자동 입력 (중복 방지 → 결제수단 해석 → 분류 추천 → 예정 매칭)
+    │   ├── split.rs        거래 분할 (한 결제를 두 장부에)
+    │   ├── legacy_plan.rs  예전 지출계획(월 수입·배분)을 정기수익·장부 이체 반복으로 옮기는 규칙
     │   └── import.rs       정규화 JSON 가져오기
     └── graphql/            도메인별 Query / Mutation → MergedObject
         ├── mod.rs          스키마 빌드, 요청 단위 캐시 Lookup, 공용 도우미
@@ -49,7 +51,7 @@ server/
         ├── payment.rs      결제수단(카드)·혜택·구간·청구서·실적 리포트
         ├── account.rs      계좌·잔고·여유자금
         ├── transaction.rs  거래, 확정/건너뛰기/복원, 자동 입력, 추천
-        ├── recurring.rs    반복 규칙
+        ├── recurring.rs    반복 규칙 (지출·수입·장부 이체)
         ├── summary.rs      월 요약·앱 정보
         └── token.rs        API 토큰 발급/폐기
 ```
@@ -88,8 +90,8 @@ flowchart LR
 | `ledger.rs` | `ledgers` `categories(ledgerId)` `planItems(ledgerId)` `members` | 장부·카테고리·계획 항목 create/update/delete, `reorderCategories` | — |
 | `payment.rs` | `paymentMethods(cardsOnly)` `paymentMethod(id)` `cardsMonthly(month)` `statementLines(paymentMethodId, month)` `suggestedBilling(paymentDay)` | create/update/delete/`restorePaymentMethod` (create/update는 혜택·구간 포함), `reorderPaymentMethods` | `PaymentMethod`: `aliases` `isCard` `billingConfigured` `usagePeriodLabel` `account` `benefits` `tiers` `transactionCount` `lastUsedOn` `statements` `nextPayment` `monthReport(month)` |
 | `account.rs` | `accounts` `account(id)` `availableFunds` | create/update/`deleteAccount`, `updateAccountBalance` `deleteAccountBalance` `reorderAccounts` | `Account`: `history` `paymentMethods` |
-| `transaction.rs` | `transactions(filter, sort)` `transaction(id)` `descriptionSuggestions(query)` `suggestCategory(description)` `parseMessage(text)` | create/update/`deleteTransaction`, `createTransactions`(일괄), `confirm`/`skip`/`restoreTransaction`, `ingestTransaction` | `Transaction`: `ledger` `category` `paymentMethod` `benefitIds` `benefits` `isIncome` `statementMonth` `paymentDate` |
-| `recurring.rs` | `recurringRules(ledgerId)` | create/update/`deleteRecurringRule`, `generatePlanned` | `RecurringRule`: `category` `paymentMethod` `nextDate` |
+| `transaction.rs` | `transactions(filter, sort)` (장부 필터는 받은 이체 포함, `transfers` 필터, 이체 합계 별도) `transaction(id)` `descriptionSuggestions(query)` `suggestCategory(description)` `parseMessage(text)` | create/update/`deleteTransaction`, `deleteTransactions`(일괄, 한 트랜잭션), `createTransactions`(일괄), `confirm`/`skip`/`restoreTransaction`, `ingestTransaction` | `Transaction`: `ledger` `category` `paymentMethod` `benefitIds` `benefits` `isIncome` `statementMonth` `paymentDate` |
+| `recurring.rs` | `recurringRules(ledgerId)` (그 장부로 보내는 이체 규칙 포함) | create/update/`deleteRecurringRule`, `generatePlanned` | `RecurringRule`: `category` `paymentMethod` `nextDate` |
 | `summary.rs` | `monthlySummary(month, ledgerId, averageMonths, historyMonths)` `appInfo` | — | — |
 | `token.rs` | `apiTokens` | `createApiToken` `deleteApiToken` | — |
 
@@ -124,6 +126,8 @@ erDiagram
     ledgers ||--o{ plan_items : "지출계획"
     ledgers ||--o{ recurring_rules : "반복 규칙"
     ledgers ||--o{ transactions : "거래"
+    ledgers |o--o{ transactions : "받은 장부 이체"
+    ledgers |o--o{ recurring_rules : "받는 장부 이체"
     categories |o--o{ transactions : "분류"
     categories |o--o{ recurring_rules : "분류"
     payment_methods |o--o{ transactions : "결제수단"
@@ -152,7 +156,6 @@ erDiagram
         CategoryKind kind
         bigint monthly_budget "null, 월 예산"
         bool is_fixed "고정비"
-        bool excluded_from_spending "합계 제외"
         string color "null"
         int sort_order
         bool archived
@@ -254,6 +257,7 @@ erDiagram
         string memo "null"
         string match_keyword "null, 자동 입력 매칭 키워드"
         bool exclude_from_performance
+        int transfer_ledger_id "null, 장부 이체면 받는 장부"
         bool active
         timestamptz created_at
         timestamptz updated_at
@@ -277,6 +281,8 @@ erDiagram
         TxSource source
         string external_id UK "null, 자동 입력 중복 방지 키"
         string raw_text "null, 자동 입력 원문 (text 그대로, 없으면 받은 필드 JSON)"
+        int split_parent_id "null, 분할해 옮긴 거래면 원래 거래"
+        int transfer_ledger_id "null, 장부 이체면 받는 장부 (ledger_id가 보내는 장부)"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -310,6 +316,7 @@ erDiagram
 | `transactions.category_id`, `recurring_rules.category_id` | `categories` | SET NULL |
 | `transactions.payment_method_id`, `recurring_rules.payment_method_id` | `payment_methods` | SET NULL |
 | `transactions.recurring_rule_id` | `recurring_rules` | SET NULL |
+| `transactions.split_parent_id`, `transactions.transfer_ledger_id`, `recurring_rules.transfer_ledger_id` | `transactions` / `ledgers` | (외래 키 없음, 인덱스만 — SQLite는 ALTER TABLE로 외래 키를 붙일 수 없음. 장부 삭제는 받은 이체·이체 규칙이 있으면 앱이 거절) |
 | `card_benefits.payment_method_id`, `card_tiers.payment_method_id` | `payment_methods` | CASCADE |
 | `payment_methods.account_id` | `accounts` | SET NULL |
 | `account_balances.account_id` | `accounts` | CASCADE |
@@ -325,7 +332,7 @@ erDiagram
 | `uq_categories_ledger_name` | `categories (ledger_id, name)` | 장부 안 카테고리 이름 중복 방지 |
 | `uq_transactions_recurring_occurrence` | `transactions (recurring_rule_id, recurring_month)` | 규칙 하나당 한 달에 한 건. 일반 거래는 둘 다 NULL이라 영향 없음 |
 | `uq_transactions_external_id` | `transactions (external_id)` | 자동 입력 중복 방지 |
-| `ix_transactions_*` | `(date)`, `(ledger_id, date)`, `(payment_method_id, date)`, `(status, date)`, `(description)` | 월별·카드별·상태별 조회, 가맹점 자동완성 |
+| `ix_transactions_*` | `(date)`, `(ledger_id, date)`, `(payment_method_id, date)`, `(status, date)`, `(description)`, `(split_parent_id)`, `(transfer_ledger_id, date)` | 월별·카드별·상태별 조회, 가맹점 자동완성, 분할 묶음, 받은 이체 |
 | `ix_account_balances_account_date` | `account_balances (account_id, balance_date)` | 잔고 이력 |
 | `ix_transaction_benefits_card_benefit` | `transaction_benefits (card_benefit_id)` | 혜택별 거래 조회 |
 
@@ -340,12 +347,13 @@ erDiagram
 | `AccountKind` | `accounts.kind` | `CHECKING`, `SAVINGS`, `DEPOSIT`, `INVESTMENT`, `CASH`, `OTHER` |
 | `TxStatus` | `transactions.status` | `CONFIRMED`, `PLANNED`, `SKIPPED` |
 | `TxSource` | `transactions.source` | `MANUAL`, `IMPORT`, `API`, `RECURRING` |
-| `PlanItemKind` | `plan_items.kind` | `INCOME`, `ALLOCATION`, `MEMBER_ALLOWANCE` |
+| `PlanItemKind` | `plan_items.kind` | `ALLOCATION`, `MEMBER_ALLOWANCE` (예전 `INCOME`은 정기수익 반복 규칙으로 옮겨 없음) |
 | `TokenScope` | `api_tokens.scope` | `INGEST`, `FULL` |
 
 ### 스키마에 드러나지 않는 규칙
 
 - **금액 부호**: 원 단위 `i64`. 지출 카테고리는 양수=지출·음수=환불, 수입 카테고리는 양수=수입. 카드 청구·결제수단 합계는 `summary::outflow()`(수입이면 부호 반전)로 계산합니다.
+- **장부 이체**: `transfer_ledger_id`가 있는 거래 한 행이 `ledger_id` 장부에서 그 장부로 금액을 옮깁니다(항목·결제수단·할부·혜택 없음). 장부를 정한 요약·목록에서는 보낸 이체/받은 이체로 따로 모으고, 소비·수입 합계·카드·여유자금에는 넣지 않습니다(`summary::classify`, `outflow()`는 0). 전체 장부 합계에서는 장부 사이에서만 오가는 돈이라 뺍니다. 반복 규칙의 `transfer_ledger_id`가 그대로 예정 이체에 들어갑니다. 이체는 분할할 수 없고, 받는 장부로 옮길 수 없습니다.
 - **SeaORM Relation 미사용**: 엔티티의 `Relation` enum은 비어 있고 외래 키는 마이그레이션에만 있습니다. 연관 데이터는 `Lookup` 캐시나 명시적인 쿼리로 가져옵니다.
 - **예정 거래**: 예정(`PLANNED`)도 `transactions`에 함께 둡니다. 삭제한 반복 항목을 `SKIPPED`로 남기는 규칙([지출 예정](../README.md#지출-예정))은 `(recurring_rule_id, recurring_month)` 유니크 자리를 지키기 위한 것입니다. 행을 지워 자리를 비우면 `ensure_planned`가 다시 만듭니다.
 - **할부**: 거래는 한 행으로 저장하고, 청구서별 회차 분할은 `billing.rs`가 계산 시점에 합니다.
@@ -362,6 +370,10 @@ erDiagram
 | `m20261023_000002_api_token_scope` | `api_tokens.scope` 추가 (기존 토큰은 `INGEST`) |
 | `m20261102_000003_card_benefit_kind_stackable` | `card_benefits.kind`(기본 `DISCOUNT`)·`stackable`(기본 false) 추가 |
 | `m20261109_000004_mysql_text_columns` | MySQL에서만: 긴 글 컬럼(`raw_text`, 각 `memo`, `aliases`, `match_keyword`, `ledgers.description`)을 varchar(255) → TEXT. SQLite는 기록만 |
+| `m20261119_000005_transaction_split` | `transactions.split_parent_id` + 인덱스 |
+| `m20261120_000006_ledger_transfers` | `transactions.transfer_ledger_id`(+ `(transfer_ledger_id, date)` 인덱스), `recurring_rules.transfer_ledger_id` |
+| `m20261120_000007_convert_legacy_plan` | 데이터만, 한 트랜잭션: 합계 제외 카테고리 → 같은 이름 장부로(거래·반복 규칙째), 월 수입 계획 → 정기수익 항목 매월 10일 반복 수입, 장부와 이름이 맞는 배분 → 매월 1일 장부 이체 반복(이번 달부터), 이체가 대신하는 받는 장부의 월 수입 삭제. 규칙은 `domain::legacy_plan`, 가져오기도 같은 규칙 |
+| `m20261120_000008_drop_excluded_from_spending` | `categories.excluded_from_spending` 삭제 |
 
 스키마를 바꿀 때:
 

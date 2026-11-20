@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 
 import { errorMessage } from '../api/client'
 import type { CardMonthReport } from '../api/types'
+import { plannedPerformance } from '../lib/benefits'
 import { won } from '../lib/format'
 
 export function Loading({ label = '불러오는 중…' }: { label?: string }) {
@@ -64,26 +65,34 @@ export function Delta({ value, upIsGood = false, suffix = '' }: { value: number;
   )
 }
 
-/** goal=true면 목표형(넘으면 달성), 아니면 한도형(넘으면 초과 경고) */
+/** goal=true면 목표형(넘으면 달성), 아니면 한도형(넘으면 초과 경고). planned는 value 뒤에 다른 색으로 쌓는 예정분. */
 export function Meter({
   value,
+  planned = 0,
   max,
   ticks,
   label,
   title,
+  valueText,
   goal,
 }: {
   value: number
+  planned?: number
   max: number
   /** 막대 위 구분선 위치 (값 기준) */
   ticks?: number[]
   label: string
   title?: string
+  valueText?: string
   goal?: boolean
 }) {
-  const ratio = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0
+  const clamp = (v: number) => (max > 0 ? Math.min(1, Math.max(0, v / max)) : 0)
+  const ratio = clamp(value)
+  const plannedRatio = clamp(value + Math.max(0, planned)) - ratio
   const over = !goal && max > 0 && value > max
   const tickRatios = max > 0 ? (ticks ?? []).filter((t) => t >= 0).map((t) => Math.min(1, t / max)) : []
+  // 확정분이 있으면 그 끝에서 2px 띄운다
+  const gap = ratio > 0 ? 2 : 0
   return (
     <div
       className={`meter ${over ? 'over' : ''}`}
@@ -92,9 +101,16 @@ export function Meter({
       aria-valuemin={0}
       aria-valuemax={max}
       aria-valuenow={value}
+      aria-valuetext={valueText}
       title={title}
     >
       <span style={{ width: `${ratio * 100}%` }} />
+      {plannedRatio > 0 && (
+        <span
+          className="planned"
+          style={{ left: `calc(${ratio * 100}% + ${gap}px)`, width: `max(0px, calc(${plannedRatio * 100}% - ${gap}px))` }}
+        />
+      )}
       {tickRatios.map((t) => (
         <i key={t} className="tick" style={{ left: `calc(${t * 100}% - 1px)` }} />
       ))}
@@ -102,19 +118,28 @@ export function Meter({
   )
 }
 
-/** 전월실적 막대: 끝은 마지막 단계, 중간 단계마다 구분선. 단계가 없으면 그리지 않는다. */
+/** 실적 막대 예정분의 색 견본 (예정분 글자 앞에 둔다) */
+export function PlannedSwatch() {
+  return <i className="swatch planned key" aria-hidden />
+}
+
+/** 전월실적 막대: 끝은 마지막 단계, 중간 단계마다 구분선. 확정 실적은 진한 파랑, 예정분은 그 뒤에 밝은 파랑. 단계가 없으면 그리지 않는다. */
 export function PerformanceMeter({ report: r, label }: { report: CardMonthReport; label: string }) {
   const steps = r.performanceSteps
   const max = steps[steps.length - 1]
   if (max == null) return null
+  const planned = Math.max(0, plannedPerformance(r))
+  const amounts = `확정 ${won(r.performance)}원` + (planned > 0 ? ` · 예정 +${won(planned)}원 (예정 포함 ${won(r.projectedPerformance)}원)` : '')
   return (
     <Meter
       goal
       value={r.performance}
+      planned={planned}
       max={max}
       ticks={steps.slice(0, -1)}
       label={label}
-      title={steps.length > 1 ? `실적 단계 ${steps.map((s) => won(s)).join(' · ')}` : undefined}
+      valueText={amounts}
+      title={steps.length > 1 ? `${amounts}\n실적 단계 ${steps.map((s) => won(s)).join(' · ')}` : amounts}
     />
   )
 }

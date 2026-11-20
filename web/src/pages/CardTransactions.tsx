@@ -3,12 +3,15 @@ import { Link } from 'react-router-dom'
 import { useGql, useRefData, type RefMaps } from '../api/hooks'
 import { CARDS_MONTHLY_QUERY, STATEMENT_LINES_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
 import type { CardMonthReport, PaymentMethod, StatementLine, TransactionPage } from '../api/types'
-import { ErrorBox, Loading, Panel, PerformanceMeter } from '../components/Common'
+import { ErrorBox, Loading, Panel, PerformanceMeter, PlannedSwatch } from '../components/Common'
 import MonthPicker from '../components/MonthPicker'
+import { SelectionActions } from '../components/DeleteTransactions'
+import type { SuggestScope } from '../components/DescriptionInput'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
-import { benefitTotalsText, hasBenefit, txBenefitTexts } from '../lib/benefits'
-import { shortDate, won } from '../lib/format'
+import { benefitTotalsText, hasBenefit, plannedPerformance, txBenefitTexts } from '../lib/benefits'
+import { shortDate, signedWon, won } from '../lib/format'
 import { defaultDateFor, monthLabel, useMonthParam, useQueryParam } from '../lib/month'
+import { useTxSelection } from '../lib/selection'
 import { ReportPanel } from './CardDetail'
 
 export default function CardTransactions() {
@@ -66,6 +69,12 @@ export default function CardTransactions() {
                           실적 {won(r.performance)} / {won(r.target)}
                           {r.remainingToTarget ? ` · ${won(r.remainingToTarget)} 남음` : ' · 달성'}
                         </div>
+                        {plannedPerformance(r) !== 0 && (
+                          <div className="small muted">
+                            {plannedPerformance(r) > 0 && <PlannedSwatch />}
+                            예정 {signedWon(plannedPerformance(r))} · 포함 {won(r.projectedPerformance)}
+                          </div>
+                        )}
                       </div>
                     ) : (
                       <div className="small muted">실적 {won(r.performance)}</div>
@@ -109,12 +118,16 @@ export default function CardTransactions() {
   )
 }
 
+/** 내용 자동완성: 그 날짜(오늘보다 늦으면 오늘)부터 3개월 전 이후 내역만, 같은 내용이라도 항목이 다르면 따로 */
+const CARD_SUGGEST_SCOPE: SuggestScope = { recentMonths: 3, byCategory: true }
+
 function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMethod; month: string; refMaps: RefMaps; report: CardMonthReport }) {
   const filter = { month, paymentMethodId: card.id, statuses: ['CONFIRMED', 'PLANNED'] }
   const q = useGql<{ transactions: TransactionPage }>(['transactions', filter], TRANSACTIONS_QUERY, { filter, sort: 'DATE_ASC', limit: 2000 })
   const page = q.data?.transactions
+  const sel = useTxSelection(page?.items)
   return (
-    <Panel title={`${monthLabel(month)} 이용 내역`} flush>
+    <Panel title={`${monthLabel(month)} 이용 내역`} actions={<SelectionActions sel={sel} refMaps={refMaps} />} flush>
       {q.error ? (
         <ErrorBox error={q.error} />
       ) : !page ? (
@@ -123,9 +136,11 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
         <TransactionGrid
           rows={page.items}
           refMaps={refMaps}
-          columns={['date', 'amount', 'category', 'description', 'benefits', 'benefitAmount', 'ledger', 'memo']}
+          columns={['date', 'amount', 'description', 'ledger', 'category', 'benefits', 'benefitAmount', 'memo']}
           benefitAmounts={txBenefitTexts(report)}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
+          selection={sel.grid}
+          suggestScope={CARD_SUGGEST_SCOPE}
           footer={<PageTotals page={page} extra={<span>혜택 {benefitTotalsText(report)}</span>} />}
         />
       )}

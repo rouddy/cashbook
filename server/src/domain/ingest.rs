@@ -5,7 +5,8 @@
 //! 2. `externalId`(없으면 원문 해시)로 중복을 막는다.
 //! 3. 결제수단: 이름·별칭 → 카드번호 끝 4자리 → 원문에 나온 카드 이름 → 카드사(해당 카드사 카드가 하나일 때)
 //! 4. 장부/카테고리: 명시값 → 같은 가맹점의 과거 거래에서 가장 많이 쓴 분류 → 기본 장부
-//! 5. 같은 결제수단의 ±7일 예정 거래와 금액(또는 내용/키워드)이 맞으면 그 예정 거래를 확정 처리
+//! 5. 같은 결제수단의 ±7일 예정 거래와 금액(또는 내용/키워드)이 맞으면 그 예정 거래를 확정 처리.
+//!    반복 규칙에 금액 범위·매칭 키워드를 정했으면 둘 다 맞아야 한다 (`match_rank`).
 //! 6. 아니면 새 확정 거래를 만든다.
 //!
 //! 거래의 `raw_text`에는 받은 원문을 남긴다: `text`는 받은 그대로, `text` 없이 필드만 오면 받은 필드의 JSON.
@@ -17,7 +18,7 @@ use async_graphql::{InputObject, SimpleObject};
 use chrono::{Duration, NaiveDate, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, sea_query::Expr,
+    QuerySelect, QueryTrait, Select, Set, sea_query::Expr,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -180,11 +181,42 @@ pub struct Suggestion {
     pub count: i32,
 }
 
+/// 추천에 쓰는 과거 거래: 확정 거래, `since`가 있으면 그날 이후만.
+/// 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게, 장부 이체는 결제가 아니라서 뺀다.
+fn history(since: Option<NaiveDate>) -> Select<transaction::Entity> {
+    transaction::Entity::find()
+        .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
+        .filter(transaction::Column::SplitParentId.is_null())
+        .filter(transaction::Column::TransferLedgerId.is_null())
+        .apply_if(since, |q, d| q.filter(transaction::Column::Date.gte(d)))
+}
+
+async fn benefit_ids_of<C: ConnectionTrait>(db: &C, transaction_id: i32) -> Result<Vec<i32>, DbErr> {
+    Ok(transaction_benefit::Entity::find()
+        .filter(transaction_benefit::Column::TransactionId.eq(transaction_id))
+        .order_by_asc(transaction_benefit::Column::CardBenefitId)
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|b| b.card_benefit_id)
+        .collect())
+}
+
 /// 같은(또는 서로 포함하는) 내용의 최근 확정 거래로 장부/카테고리를 추천한다.
 pub async fn suggest<C: ConnectionTrait>(
     db: &C,
     description: &str,
     payment_method_id: Option<i32>,
+) -> Result<Option<Suggestion>, DbErr> {
+    suggest_since(db, description, payment_method_id, None).await
+}
+
+/// [`suggest`]와 같고, `since`가 있으면 그날 이후 거래만 본다.
+pub async fn suggest_since<C: ConnectionTrait>(
+    db: &C,
+    description: &str,
+    payment_method_id: Option<i32>,
+    since: Option<NaiveDate>,
 ) -> Result<Option<Suggestion>, DbErr> {
     let d = description.trim();
     if d.chars().count() < 2 {
@@ -194,10 +226,7 @@ pub async fn suggest<C: ConnectionTrait>(
         "({}(description) >= 2 AND instr(?, description) > 0)",
         sql::char_length(db.get_database_backend())
     );
-    let rows = transaction::Entity::find()
-        .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
-        // 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게 뺀다
-        .filter(transaction::Column::SplitParentId.is_null())
+    let rows = history(since)
         .filter(
             Condition::any()
                 .add(transaction::Column::Description.eq(d))
@@ -232,14 +261,7 @@ pub async fn suggest<C: ConnectionTrait>(
     let pm_for_benefits = payment_method_id.or(latest.payment_method_id);
     let benefit_source = pool.iter().find(|r| r.payment_method_id == pm_for_benefits && pm_for_benefits.is_some());
     let benefit_ids = match benefit_source {
-        Some(src) => transaction_benefit::Entity::find()
-            .filter(transaction_benefit::Column::TransactionId.eq(src.id))
-            .order_by_asc(transaction_benefit::Column::CardBenefitId)
-            .all(db)
-            .await?
-            .into_iter()
-            .map(|b| b.card_benefit_id)
-            .collect(),
+        Some(src) => benefit_ids_of(db, src.id).await?,
         None => vec![],
     };
     Ok(Some(Suggestion {
@@ -255,6 +277,73 @@ pub async fn suggest<C: ConnectionTrait>(
     }))
 }
 
+/// 내용에 `query`가 들어간 과거 거래를 (내용, 장부, 카테고리)마다 하나씩, 자주 쓴 순으로 돌려준다.
+/// 같은 내용이라도 분류가 다르면 따로 나와 어느 쪽이든 고를 수 있다.
+/// 결제수단·구성원·혜택·최근 금액은 그 묶음의 가장 최근 거래 것이고, 횟수는 `since` 이후만 센다.
+pub async fn suggestions_by_category<C: ConnectionTrait>(
+    db: &C,
+    query: &str,
+    ledger_id: Option<i32>,
+    since: Option<NaiveDate>,
+    limit: u64,
+) -> Result<Vec<Suggestion>, DbErr> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(vec![]);
+    }
+    let groups: Vec<(String, i32, Option<i32>, i64)> = history(since)
+        .select_only()
+        .column(transaction::Column::Description)
+        .column(transaction::Column::LedgerId)
+        .column(transaction::Column::CategoryId)
+        .column_as(Expr::cust("count(*)"), "n")
+        .filter(Expr::cust_with_values("instr(description, ?) > 0", [q]))
+        .apply_if(ledger_id, |s, id| s.filter(transaction::Column::LedgerId.eq(id)))
+        .group_by(transaction::Column::Description)
+        .group_by(transaction::Column::LedgerId)
+        .group_by(transaction::Column::CategoryId)
+        // 횟수가 같으면 최근에 쓴 것, 그다음 이름·장부·카테고리 순 (DB와 관계없이 같은 결과)
+        .order_by_desc(Expr::cust("count(*)"))
+        .order_by_desc(Expr::cust("max(date)"))
+        .order_by_asc(transaction::Column::Description)
+        .order_by_asc(transaction::Column::LedgerId)
+        .order_by_asc(transaction::Column::CategoryId)
+        .limit(limit)
+        .into_tuple()
+        .all(db)
+        .await?;
+    let mut out = Vec::with_capacity(groups.len());
+    for (description, ledger_id, category_id, count) in groups {
+        let same_category = match category_id {
+            Some(id) => transaction::Column::CategoryId.eq(id),
+            None => transaction::Column::CategoryId.is_null(),
+        };
+        let Some(latest) = history(since)
+            .filter(transaction::Column::Description.eq(description.as_str()))
+            .filter(transaction::Column::LedgerId.eq(ledger_id))
+            .filter(same_category)
+            .order_by_desc(transaction::Column::Date)
+            .order_by_desc(transaction::Column::Id)
+            .one(db)
+            .await?
+        else {
+            continue;
+        };
+        out.push(Suggestion {
+            benefit_ids: benefit_ids_of(db, latest.id).await?,
+            description,
+            ledger_id,
+            category_id,
+            payment_method_id: latest.payment_method_id,
+            member: latest.member,
+            last_amount: latest.amount,
+            last_date: latest.date,
+            count: count as i32,
+        });
+    }
+    Ok(out)
+}
+
 fn strip_day_prefix(s: &str) -> &str {
     // "(25)아파트관리비" 같은 예정 표기
     if let Some(rest) = s.strip_prefix('(')
@@ -268,6 +357,57 @@ fn strip_day_prefix(s: &str) -> &str {
 fn similar(a: &str, b: &str) -> bool {
     let (a, b) = (norm(strip_day_prefix(a)), norm(strip_day_prefix(b)));
     a.chars().count() >= 2 && b.chars().count() >= 2 && (a.contains(&b) || b.contains(&a))
+}
+
+/// 반복 규칙이 예정 항목에 거는 자동 입력 매칭 조건. 정한 조건은 모두 맞아야 한다(필터).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuleMatch {
+    /// 정규화한 키워드 (비어 있으면 조건 없음)
+    keywords: Vec<String>,
+    min: Option<i64>,
+    max: Option<i64>,
+}
+
+impl RuleMatch {
+    fn new(keyword: Option<&str>, min: Option<i64>, max: Option<i64>) -> Self {
+        let keywords = keyword.unwrap_or("").split(',').map(norm).filter(|k| !k.is_empty()).collect();
+        Self { keywords, min, max }
+    }
+
+    fn of(rule: &recurring_rule::Model) -> Self {
+        Self::new(rule.match_keyword.as_deref(), rule.match_amount_min, rule.match_amount_max)
+    }
+
+    /// 금액 범위를 정했으면 그 안인지 (양끝 포함). 범위가 없으면 `None`.
+    fn amount_in_range(&self, amount: i64) -> Option<bool> {
+        (self.min.is_some() || self.max.is_some())
+            .then(|| self.min.is_none_or(|m| amount >= m) && self.max.is_none_or(|m| amount <= m))
+    }
+
+    /// 키워드를 정했으면 정규화한 가맹점에 하나라도 들어 있는지. 키워드가 없으면 `None`.
+    fn keyword_hit(&self, description_norm: &str) -> Option<bool> {
+        (!self.keywords.is_empty()).then(|| self.keywords.iter().any(|k| description_norm.contains(k.as_str())))
+    }
+}
+
+/// 예정 항목 하나가 자동 입력과 맞으면 우선순위(작을수록 먼저), 아니면 `None`.
+/// 반복 규칙의 금액 범위·키워드는 정했으면 반드시 맞아야 한다. 그다음 금액(범위가 있으면 범위 안, 없으면 예정 금액과 같음)·
+/// 키워드·내용 비슷함 중 하나는 맞아야 하고, 금액과 내용(키워드)이 함께 맞을수록 먼저 고른다.
+fn match_rank(planned: (i64, &str), rule: Option<&RuleMatch>, amount: i64, description: &str) -> Option<u8> {
+    let (planned_amount, planned_description) = planned;
+    let in_range = rule.and_then(|r| r.amount_in_range(amount));
+    let keyword = rule.and_then(|r| r.keyword_hit(&norm(description)));
+    if in_range == Some(false) || keyword == Some(false) {
+        return None;
+    }
+    let amount_match = in_range.unwrap_or(planned_amount == amount);
+    let text_match = keyword == Some(true) || similar(planned_description, description);
+    match (amount_match, text_match) {
+        (true, true) => Some(0),
+        (false, true) => Some(1),
+        (true, false) => Some(2),
+        (false, false) => None,
+    }
 }
 
 async fn find_planned_match<C: ConnectionTrait>(
@@ -287,38 +427,23 @@ async fn find_planned_match<C: ConnectionTrait>(
         return Ok(None);
     }
     let rule_ids: Vec<i32> = candidates.iter().filter_map(|c| c.recurring_rule_id).collect();
-    let keywords: HashMap<i32, String> = if rule_ids.is_empty() {
+    let rules: HashMap<i32, RuleMatch> = if rule_ids.is_empty() {
         HashMap::new()
     } else {
         recurring_rule::Entity::find()
             .filter(recurring_rule::Column::Id.is_in(rule_ids))
             .all(db)
             .await?
-            .into_iter()
-            .filter_map(|r| Some((r.id, r.match_keyword.filter(|k| !k.trim().is_empty())?)))
+            .iter()
+            .map(|r| (r.id, RuleMatch::of(r)))
             .collect()
     };
-    let desc = norm(description);
     let best = candidates
         .into_iter()
         .filter_map(|c| {
-            let amount_match = c.amount == amount;
-            let keyword_match = c
-                .recurring_rule_id
-                .and_then(|id| keywords.get(&id))
-                .is_some_and(|k| k.split(',').map(norm).any(|k| !k.is_empty() && desc.contains(&k)));
-            let text_match = similar(&c.description, description);
-            if !(amount_match || keyword_match || text_match) {
-                return None;
-            }
-            let rank = if amount_match && (keyword_match || text_match) {
-                0
-            } else if keyword_match || text_match {
-                1
-            } else {
-                2
-            };
-            Some(((rank, (c.date - date).num_days().abs(), c.id), c))
+            let rule = c.recurring_rule_id.and_then(|id| rules.get(&id));
+            let rank = match_rank((c.amount, &c.description), rule, amount, description)?;
+            Some(((rank, (c.date - date).num_days().abs(), (c.amount - amount).abs(), c.id), c))
         })
         .min_by_key(|(key, _)| *key)
         .map(|(_, c)| c);
@@ -628,7 +753,6 @@ mod tests {
                 kind: Set(kind),
                 monthly_budget: Set(None),
                 is_fixed: Set(false),
-                excluded_from_spending: Set(false),
                 color: Set(None),
                 sort_order: Set(0),
                 archived: Set(false),
@@ -754,6 +878,92 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rule_amount_range_and_keyword_are_filters() {
+        let planned = (350_000, "(25)아파트관리비");
+        let rule = RuleMatch::new;
+        // 조건 없는 예정(규칙 없음 또는 규칙에 조건 없음): 금액이 같거나 내용이 비슷하면
+        for r in [None, Some(&rule(Some(" , "), None, None))] {
+            assert_eq!(match_rank(planned, r, 350_000, "위례아파트관리비"), Some(0));
+            assert_eq!(match_rank(planned, r, 302_590, "위례아파트관리비"), Some(1));
+            assert_eq!(match_rank(planned, r, 350_000, "스타벅스"), Some(2));
+            assert_eq!(match_rank(planned, r, 302_590, "스타벅스"), None);
+        }
+        // 시작 = 끝: 그 금액일 때만
+        let exact = rule(None, Some(350_000), Some(350_000));
+        assert_eq!(match_rank(planned, Some(&exact), 350_000, "스타벅스"), Some(2));
+        assert_eq!(match_rank(planned, Some(&exact), 350_001, "위례아파트관리비"), None);
+        // 범위: 양끝 포함, 범위 안이면 금액이 맞는 것으로 본다
+        let range = rule(None, Some(300_000), Some(400_000));
+        assert_eq!(match_rank(planned, Some(&range), 300_000, "위례아파트관리비"), Some(0));
+        assert_eq!(match_rank(planned, Some(&range), 400_000, "스타벅스"), Some(2));
+        assert_eq!(match_rank(planned, Some(&range), 299_999, "위례아파트관리비"), None);
+        // 한쪽만 정한 범위
+        let at_least = rule(None, Some(300_000), None);
+        assert_eq!(match_rank(planned, Some(&at_least), 9_000_000, "관리비"), Some(0));
+        assert_eq!(match_rank(planned, Some(&at_least), 200_000, "관리비"), None);
+        // 키워드: 가맹점에 없으면 금액이 같아도 안 맞고, 있으면 금액이 달라도 맞는다 (쉼표로 여러 개, 공백·대소문자 무시)
+        let kw = rule(Some("관리 비, LH"), None, None);
+        assert_eq!(match_rank(planned, Some(&kw), 350_000, "스타벅스"), None);
+        assert_eq!(match_rank(planned, Some(&kw), 123_456, "lh공사"), Some(1));
+        // 키워드 + 범위: 둘 다 맞아야
+        let both = rule(Some("관리비"), Some(300_000), Some(400_000));
+        assert_eq!(match_rank(planned, Some(&both), 320_000, "위례아파트관리비"), Some(0));
+        assert_eq!(match_rank(planned, Some(&both), 320_000, "스타벅스"), None);
+        assert_eq!(match_rank(planned, Some(&both), 420_000, "위례아파트관리비"), None);
+    }
+
+    #[tokio::test]
+    async fn exact_amount_rule_confirms_only_that_amount() {
+        let db = setup().await;
+        let now = Utc::now();
+        let rule = recurring_rule::ActiveModel {
+            ledger_id: Set(1),
+            description: Set("아파트관리비".into()),
+            amount: Set(350_000),
+            category_id: Set(Some(2)),
+            payment_method_id: Set(Some(1)),
+            day_of_month: Set(25),
+            interval_months: Set(1),
+            start_month: Set("2026-10".into()),
+            end_month: Set(None),
+            member: Set(None),
+            memo: Set(None),
+            match_keyword: Set(None),
+            match_amount_min: Set(Some(350_000)),
+            match_amount_max: Set(Some(350_000)),
+            exclude_from_performance: Set(false),
+            transfer_ledger_id: Set(None),
+            active: Set(true),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let planned = insert_tx(&db, "아파트관리비", 350_000, 2, 1, TxStatus::Planned, NaiveDate::from_ymd_opt(2026, 10, 25).unwrap()).await;
+        let mut active: transaction::ActiveModel = planned.clone().into();
+        active.recurring_rule_id = Set(Some(rule.id));
+        active.recurring_month = Set(Some("2026-10".into()));
+        active.update(&db).await.unwrap();
+        let send = |amount: i64| IngestInput {
+            amount: Some(amount),
+            description: Some("위례아파트관리비".into()),
+            payment_method: Some("알뜰교통신한".into()),
+            date: NaiveDate::from_ymd_opt(2026, 10, 24),
+            ..Default::default()
+        };
+        // 내용이 비슷해도 금액이 다르면 새 거래로 저장하고 예정은 그대로 둔다
+        let other = ingest(&db, send(302_590), today()).await.unwrap();
+        assert!(other.created && !other.matched_planned);
+        assert_ne!(other.transaction.id, planned.id);
+        let exact = ingest(&db, send(350_000), today()).await.unwrap();
+        assert!(exact.matched_planned, "{:?}", exact.warnings);
+        assert_eq!(exact.transaction.id, planned.id);
+        assert_eq!(exact.transaction.status, TxStatus::Confirmed);
+    }
+
     #[tokio::test]
     async fn ambiguous_issuer_leaves_payment_method_empty() {
         let db = setup().await;
@@ -846,7 +1056,6 @@ mod tests {
                 kind: Set(kind),
                 monthly_budget: Set(None),
                 is_fixed: Set(false),
-                excluded_from_spending: Set(false),
                 color: Set(None),
                 sort_order: Set(-5),
                 archived: Set(archived),

@@ -1,10 +1,19 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { createPortal } from 'react-dom'
 
-import { useGql } from '../api/hooks'
+import { type RefMaps, useGql } from '../api/hooks'
 import { SUGGESTIONS_QUERY } from '../api/queries'
 import type { Suggestion } from '../api/types'
 import { won } from '../lib/format'
+import { localToday, monthsBefore } from '../lib/month'
+
+/** 자동완성으로 찾는 범위 (없으면 전체 내역에서 내용마다 가장 많이 쓴 분류 하나) */
+export interface SuggestScope {
+  /** 기준일(오늘보다 늦으면 오늘)에서 이만큼 전부터 쓴 내역만 찾는다 */
+  recentMonths?: number
+  /** 같은 내용이라도 장부·항목이 다르면 항목을 붙여 따로 보여 준다 */
+  byCategory?: boolean
+}
 
 /**
  * 내용(가맹점) 입력 + 과거 내역 자동완성.
@@ -15,6 +24,9 @@ export default function DescriptionInput({
   onChange,
   onPick,
   ledgerId,
+  scope,
+  baseDate,
+  refMaps,
   className = 'input',
   placeholder = '내용 (가맹점)',
   autoFocus,
@@ -26,6 +38,11 @@ export default function DescriptionInput({
   onChange: (v: string) => void
   onPick?: (s: Suggestion) => void
   ledgerId?: number | null
+  scope?: SuggestScope
+  /** `scope.recentMonths`의 기준일 (입력 중인 거래의 날짜, 없으면 오늘) */
+  baseDate?: string
+  /** `scope.byCategory`일 때 항목·장부 이름 */
+  refMaps?: RefMaps
   className?: string
   placeholder?: string
   autoFocus?: boolean
@@ -45,12 +62,21 @@ export default function DescriptionInput({
     return () => window.clearTimeout(t)
   }, [value])
 
+  const since = scope?.recentMonths ? monthsBefore(minDate(baseDate, localToday()), scope.recentMonths) : null
+  const byCategory = scope?.byCategory ?? false
   const q = useGql<{ descriptionSuggestions: Suggestion[] }>(
-    ['suggest', debounced, ledgerId ?? null],
+    ['suggest', debounced, ledgerId ?? null, since, byCategory],
     SUGGESTIONS_QUERY,
-    { query: debounced, ledgerId: ledgerId ?? null },
+    { query: debounced, ledgerId: ledgerId ?? null, since, byCategory },
     { enabled: open && debounced.length > 0, staleTime: 60_000 },
   )
+  // 장부를 정해 두지 않았으면 다른 장부의 같은 이름 항목과 구별되게 장부도 붙인다
+  const showLedger = ledgerId == null && (refMaps?.ledgers.length ?? 0) > 1
+  const classification = (s: Suggestion) => {
+    const category = s.categoryId != null ? refMaps?.categoryById.get(s.categoryId)?.name : undefined
+    const ledger = showLedger ? refMaps?.ledgerById.get(s.ledgerId)?.name : undefined
+    return [ledger, category ?? '항목 없음'].filter(Boolean).join(' · ')
+  }
   const items = open && debounced.length > 0 ? (q.data?.descriptionSuggestions ?? []) : []
   const hasItems = items.length > 0
 
@@ -160,7 +186,7 @@ export default function DescriptionInput({
         >
           {items.map((s, i) => (
             <li
-              key={s.description}
+              key={JSON.stringify([s.description, s.ledgerId, s.categoryId])}
               role="option"
               aria-selected={i === active}
               onMouseDown={(e) => {
@@ -174,10 +200,16 @@ export default function DescriptionInput({
                 cursor: 'pointer',
                 background: i === active ? 'var(--accent-soft)' : undefined,
                 display: 'flex',
+                alignItems: 'center',
                 gap: 8,
               }}
             >
               <span style={{ flex: 1 }}>{s.description}</span>
+              {byCategory && (
+                <span className="badge" style={{ flexShrink: 0 }}>
+                  {classification(s)}
+                </span>
+              )}
               <span className="small muted">
                 {s.count}회 · 최근 {won(s.lastAmount)}
               </span>
@@ -188,4 +220,9 @@ export default function DescriptionInput({
         )}
     </div>
   )
+}
+
+/** 둘 중 이른 날짜 (YYYY-MM-DD 문자열 비교) */
+function minDate(a: string | undefined, b: string): string {
+  return a && a < b ? a : b
 }

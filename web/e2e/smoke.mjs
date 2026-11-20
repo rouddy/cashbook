@@ -68,13 +68,13 @@ await step('로그인 (틀린 비밀번호 → 오류, 맞는 비밀번호 → �
   await page.getByRole('heading', { name: '대시보드' }).waitFor()
 })
 
-await step('대시보드: 지표·여유자금·차트·예정 지출', async () => {
+await step('대시보드: 지표·여유자금·차트·예정 거래', async () => {
   await page.goto(`${BASE}/?month=2026-08`)
   await page.getByText('2026년 8월 소비').waitFor()
   await page.getByText('5,349,932원').first().waitFor()
   await page.getByRole('heading', { name: '여유자금' }).waitFor()
   await page.getByRole('img', { name: /일별 누적 소비/ }).waitFor()
-  await page.getByRole('heading', { name: '예정 지출' }).waitFor()
+  await page.getByRole('heading', { name: '예정 거래' }).waitFor()
   // 차트 툴팁: 키보드로 크로스헤어 이동
   const chart = page.getByRole('img', { name: /일별 누적 소비/ })
   await chart.focus()
@@ -107,7 +107,7 @@ await step('가계부: 항목 셀 select 변경', async () => {
   await row.locator('button.cell-btn', { hasText: '기타' }).waitFor()
 })
 
-await step('가계부: 새 행으로 입력 (가맹점 자동완성) 후 삭제', async () => {
+await step('가계부: 새 행으로 입력 (가맹점 자동완성) 후 선택 → 삭제 확인 창', async () => {
   await page.goto(`${BASE}/transactions?month=2026-10`)
   const newRow = page.locator('tr.new-row')
   await newRow.getByLabel('금액').fill('4500')
@@ -120,8 +120,18 @@ await step('가계부: 새 행으로 입력 (가맹점 자동완성) 후 삭제'
   await newRow.getByRole('button', { name: '추가' }).click()
   const created = page.locator('table.sheet tbody tr', { hasText: `E2E 커피 ${STAMP}` })
   await created.waitFor()
-  acceptNextDialog()
-  await created.getByRole('button', { name: '삭제' }).click()
+  // 행마다 삭제 버튼은 없고, 선택 모드에서 체크한 뒤 확인 창을 거쳐야 지운다
+  assert.equal(await created.getByRole('button', { name: '삭제' }).count(), 0)
+  await page.getByRole('button', { name: '선택', exact: true }).click()
+  await created.getByRole('checkbox').check()
+  await page.getByRole('button', { name: '삭제', exact: true }).click()
+  const confirm = page.getByRole('dialog')
+  await confirm.getByText(`E2E 커피 ${STAMP}`).waitFor()
+  await confirm.getByRole('button', { name: '취소' }).click()
+  await confirm.waitFor({ state: 'detached' })
+  assert.equal(await created.count(), 1)
+  await page.getByRole('button', { name: '삭제', exact: true }).click()
+  await confirm.getByRole('button', { name: '1건 삭제' }).click()
   await created.waitFor({ state: 'detached' })
 })
 
@@ -244,7 +254,8 @@ await step('카드별 내역: 혜택 태그 편집과 결제월 기준 보기', 
   await page.goto(`${BASE}/card-transactions?month=2026-08&card=3`)
   await page.getByRole('heading', { name: /2026년 8월 이용 내역/ }).waitFor()
   const row = page.locator('table.sheet tbody tr', { hasText: 'GS25' }).first()
-  await row.locator('button.cell-btn').nth(4).click()
+  // 날짜·금액·내용·장부·항목·혜택 순서라 혜택 칸은 6번째
+  await row.locator('button.cell-btn').nth(5).click()
   await row.getByRole('checkbox', { name: /간편결제/ }).check()
   await row.getByRole('button', { name: '적용' }).click()
   await row.locator('button.cell-btn', { hasText: '간편결제' }).waitFor()
@@ -259,6 +270,41 @@ await step('카드별 내역: 혜택 태그 편집과 결제월 기준 보기', 
   const r = await gql(`{ statementLines(paymentMethodId: 2, month: "2026-09") { amount } }`)
   const total = r.data.statementLines.reduce((a, l) => a + l.amount, 0)
   await footer.getByText(total.toLocaleString('ko-KR')).waitFor()
+})
+
+await step('카드별 내역: 내용 자동완성은 최근 3개월 안, 같은 내용이라도 항목이 다르면 따로', async () => {
+  const ref = await gql(`{ ledgers { id isDefault } categories { id name ledgerId kind } }`)
+  const home = ref.data.ledgers.find((l) => l.isDefault) ?? ref.data.ledgers[0]
+  const cats = ref.data.categories.filter((c) => c.ledgerId === home.id && c.kind === 'EXPENSE')
+  assert.ok(cats.length >= 3, '기본 장부에 지출 항목이 3개 이상 필요합니다')
+  const name = `E2E가맹점${STAMP}`
+  const ids = []
+  // 8월에 넣으면 기준일은 8/1 → 5/1 이후 내역만. 2월 것(세 번째 항목)은 나오지 않아야 한다
+  for (const [date, category] of [
+    ['2026-07-10', cats[0]],
+    ['2026-07-20', cats[1]],
+    ['2026-02-10', cats[2]],
+  ]) {
+    const r = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id } }`, {
+      input: { ledgerId: home.id, date, amount: 1000, categoryId: category.id, paymentMethodId: 3, description: name },
+    })
+    ids.push(r.data.createTransaction.id)
+  }
+  try {
+    await page.goto(`${BASE}/card-transactions?month=2026-08&card=3`)
+    const newRow = page.locator('tr.new-row')
+    await newRow.getByLabel('내용').fill(name)
+    const options = page.getByRole('option', { name: new RegExp(name) })
+    await options.first().waitFor()
+    assert.equal(await options.count(), 2)
+    // 횟수가 같으면 최근 것부터, 항목 이름을 붙여 따로 보인다
+    assert.match(await options.nth(0).locator('.badge').innerText(), new RegExp(`${cats[1].name}$`))
+    assert.match(await options.nth(1).locator('.badge').innerText(), new RegExp(`${cats[0].name}$`))
+    await options.nth(1).click()
+    assert.equal(await newRow.getByLabel('항목').inputValue(), String(cats[0].id))
+  } finally {
+    for (const id of ids) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id })
+  }
 })
 
 await step('카드 혜택: 중복 적용·한도 없는 혜택·혜택 종류', async () => {
@@ -329,6 +375,64 @@ await step('카드 혜택: 중복 적용·한도 없는 혜택·혜택 종류', 
   assert.equal(del.data.deletePaymentMethod.deleted, true)
 })
 
+await step('가계부: 확정 거래의 상태 칸 혜택 버튼으로 카드 혜택 고르기', async () => {
+  const created = await gql(
+    `mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id name } } }`,
+    {
+      input: {
+        name: `E2E상태칸카드${STAMP}`,
+        kind: 'CREDIT_CARD',
+        benefits: [
+          { name: '백화점', rate: 0.01 },
+          { name: '간편결제', rate: 0.03, stackable: true },
+        ],
+      },
+    },
+  )
+  const card = created.data.createPaymentMethod
+  const id = Object.fromEntries(card.benefits.map((b) => [b.name, b.id]))
+  const ids = []
+  for (const status of ['CONFIRMED', 'PLANNED']) {
+    const r = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id } }`, {
+      input: { date: '2026-08-12', amount: 20000, paymentMethodId: card.id, description: `E2E상태칸${status}${STAMP}`, status },
+    })
+    ids.push(r.data.createTransaction.id)
+  }
+  try {
+    await page.goto(`${BASE}/transactions?month=2026-08&pm=${card.id}`)
+    const confirmed = page.locator('table.sheet tbody tr', { hasText: `E2E상태칸CONFIRMED${STAMP}` })
+    const planned = page.locator('table.sheet tbody tr', { hasText: `E2E상태칸PLANNED${STAMP}` })
+    await planned.waitFor()
+    // 예정 거래에는 혜택 버튼이 없다
+    assert.equal(await planned.getByRole('button', { name: /혜택/ }).count(), 0)
+    await confirmed.getByRole('button', { name: /혜택 고르기/ }).click()
+    // 창은 표 스크롤 영역에 잘리지 않게 body에 띄운다
+    const dialog = page.getByRole('dialog', { name: '혜택 고르기' })
+    await dialog.getByRole('checkbox', { name: /백화점/ }).check()
+    await dialog.getByRole('checkbox', { name: /간편결제/ }).check()
+    await dialog.getByRole('button', { name: '적용' }).click()
+    await confirmed.getByRole('button', { name: /혜택: 백화점, 간편결제/ }).waitFor()
+    const saved = await gql(`query($id: Int!) { transaction(id: $id) { benefitIds } }`, { id: ids[0] })
+    assert.deepEqual([...saved.data.transaction.benefitIds].sort(), [id['백화점'], id['간편결제']].sort())
+    // 다시 열어 하나를 풀고 Esc로 닫으면 저장하지 않고 버튼으로 포커스가 돌아온다
+    const button = confirmed.getByRole('button', { name: /혜택:/ })
+    await button.click()
+    await dialog.getByRole('checkbox', { name: /백화점/ }).uncheck()
+    await page.keyboard.press('Escape')
+    await dialog.waitFor({ state: 'detached' })
+    assert.equal(await button.evaluate((el) => el === document.activeElement), true)
+    // 바깥을 눌러도 저장하지 않고 닫는다
+    await button.click()
+    await dialog.getByRole('checkbox', { name: /백화점/ }).uncheck()
+    await page.getByRole('heading', { name: '가계부' }).click()
+    await dialog.waitFor({ state: 'detached' })
+    await confirmed.getByRole('button', { name: /혜택: 백화점, 간편결제/ }).waitFor()
+  } finally {
+    for (const txId of ids) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: txId })
+    await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: card.id })
+  }
+})
+
 await step('은행 잔고: 계좌 추가 → 잔고 기록 → 이력', async () => {
   await page.goto(`${BASE}/accounts`)
   await page.getByRole('button', { name: '+ 계좌 추가' }).click()
@@ -364,19 +468,86 @@ await step('은행 잔고: 기준일 없는 계좌는 편집해도 잔고 기록
 
 await step('지출 계획: 반복 지출 추가 → 예정 거래 생성 → 삭제', async () => {
   await page.goto(`${BASE}/plan`)
-  await page.getByRole('button', { name: '+ 반복 지출 추가' }).click()
+  await page.getByRole('button', { name: '+ 반복 항목 추가' }).click()
   const modal = page.getByRole('dialog')
   await modal.getByLabel('내용 *').fill(`E2E구독${STAMP}`)
   await modal.getByLabel('금액 *').fill('9900')
   await modal.getByLabel('날짜').selectOption('31')
+  // 자동입력 금액 범위: '이 금액만'은 시작·끝을 예정 금액으로 채운다
+  await modal.getByRole('button', { name: '이 금액만' }).click()
+  assert.equal(await modal.getByLabel('금액 범위 시작').inputValue(), '9900')
+  assert.equal(await modal.getByLabel('금액 범위 끝').inputValue(), '9900')
   await modal.getByRole('button', { name: '저장' }).click()
-  await page.locator('tbody tr', { hasText: `E2E구독${STAMP}` }).waitFor()
+  await page.locator('tbody tr', { hasText: `E2E구독${STAMP}` }).getByText('매칭: 9,900원만').waitFor()
   const r = await gql(`{ transactions(filter: {search: "E2E구독${STAMP}", statuses: [PLANNED]}) { totalCount items { date } } }`)
   assert.ok(r.data.transactions.totalCount >= 3, `planned=${r.data.transactions.totalCount}`)
+  const rules = await gql(`{ recurringRules { description matchAmountMin matchAmountMax } }`)
+  const saved = rules.data.recurringRules.find((x) => x.description === `E2E구독${STAMP}`)
+  assert.deepEqual([saved.matchAmountMin, saved.matchAmountMax], [9900, 9900])
   acceptNextDialog()
   await page.locator('tbody tr', { hasText: `E2E구독${STAMP}` }).getByRole('button', { name: '삭제' }).click()
   await page.locator('tbody tr', { hasText: `E2E구독${STAMP}` }).waitFor({ state: 'detached' })
   const left = await gql(`{ transactions(filter: {search: "E2E구독${STAMP}", statuses: [PLANNED]}) { totalCount } }`)
+  assert.equal(left.data.transactions.totalCount, 0)
+})
+
+await step('지출 계획: 반복 항목에 카드 혜택 → 예정 거래에 붙고, 결제수단을 바꾸면 비워진다', async () => {
+  const { data } = await gql(`{ paymentMethods { id name benefits { id name } } }`)
+  const card = data.paymentMethods.find((p) => p.benefits.length > 0)
+  const other = data.paymentMethods.find((p) => p.id !== card?.id)
+  assert.ok(card && other, '혜택 있는 카드와 다른 결제수단이 있어야 합니다')
+  const benefit = card.benefits[0]
+  await page.goto(`${BASE}/plan`)
+  await page.getByRole('button', { name: '+ 반복 항목 추가' }).click()
+  const modal = page.getByRole('dialog')
+  await modal.getByLabel('내용 *').fill(`E2E혜택${STAMP}`)
+  await modal.getByLabel('금액 *').fill('15000')
+  // label로 감싼 select의 이름에는 고른 옵션 글자도 붙는다 ("결제수단 선택 안 함")
+  const pmSelect = modal.getByRole('combobox', { name: /^결제수단/ })
+  await pmSelect.selectOption(String(card.id))
+  const check = modal.getByRole('group', { name: `${card.name} 혜택` }).getByRole('checkbox').first()
+  await check.check()
+  await pmSelect.selectOption(String(other.id))
+  await pmSelect.selectOption(String(card.id))
+  assert.equal(await check.isChecked(), false, '결제수단을 바꾸면 고른 혜택이 비워져야 합니다')
+  await check.check()
+  await modal.getByRole('button', { name: '저장' }).click()
+  const row = page.locator('tbody tr', { hasText: `E2E혜택${STAMP}` })
+  await row.getByText(`혜택: ${benefit.name}`).waitFor()
+  const r = await gql(`{ transactions(filter: {search: "E2E혜택${STAMP}", statuses: [PLANNED]}) { totalCount items { benefitIds } } }`)
+  assert.ok(r.data.transactions.totalCount >= 1, `planned=${r.data.transactions.totalCount}`)
+  for (const t of r.data.transactions.items) assert.deepEqual(t.benefitIds, [benefit.id])
+  acceptNextDialog()
+  await row.getByRole('button', { name: '삭제' }).click()
+  await row.waitFor({ state: 'detached' })
+})
+
+await step('지출 계획: 반복 장부 이체 추가 → 받는 장부에 예정 이체 → 삭제', async () => {
+  const { data } = await gql(`{ ledgers { id name isDefault } }`)
+  const from = data.ledgers.find((l) => l.isDefault) ?? data.ledgers[0]
+  const to = data.ledgers.find((l) => l.id !== from.id)
+  assert.ok(to, '장부가 둘 이상 있어야 합니다')
+  await page.goto(`${BASE}/plan?ledger=${from.id}`)
+  await page.getByRole('button', { name: '+ 반복 항목 추가' }).click()
+  const modal = page.getByRole('dialog')
+  await modal.getByRole('button', { name: '장부 이체' }).click()
+  await modal.getByLabel('내용 *').fill(`E2E이체${STAMP}`)
+  await modal.getByLabel('금액 *').fill('123000')
+  await modal.getByLabel('받는 장부').selectOption(String(to.id))
+  await modal.getByRole('button', { name: '저장' }).click()
+  const ruleRow = page.locator('tbody tr', { hasText: `E2E이체${STAMP}` })
+  await ruleRow.getByText(`→ ${to.name}`).waitFor()
+  const r = await gql(`{ transactions(filter: {search: "E2E이체${STAMP}", statuses: [PLANNED], ledgerId: ${to.id}}) { totalCount items { ledgerId transferLedgerId categoryId } } }`)
+  assert.ok(r.data.transactions.totalCount >= 3, `planned=${r.data.transactions.totalCount}`)
+  assert.deepEqual(r.data.transactions.items[0], { ledgerId: from.id, transferLedgerId: to.id, categoryId: null })
+  // 받는 장부의 가계부에서는 '← 보낸 장부'로 보이고 항목은 바꿀 수 없다
+  await page.goto(`${BASE}/transactions?ledger=${to.id}&status=PLANNED`)
+  await page.locator('table.sheet tbody tr', { hasText: `E2E이체${STAMP}` }).first().getByText(`← ${from.name}`).waitFor()
+  await page.goto(`${BASE}/plan?ledger=${from.id}`)
+  acceptNextDialog()
+  await page.locator('tbody tr', { hasText: `E2E이체${STAMP}` }).getByRole('button', { name: '삭제' }).click()
+  await page.locator('tbody tr', { hasText: `E2E이체${STAMP}` }).waitFor({ state: 'detached' })
+  const left = await gql(`{ transactions(filter: {search: "E2E이체${STAMP}", statuses: [PLANNED]}) { totalCount } }`)
   assert.equal(left.data.transactions.totalCount, 0)
 })
 

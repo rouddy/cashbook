@@ -5,11 +5,11 @@ import { useGql, useMutate, useRefData } from '../api/hooks'
 import { CARD_LIST_QUERY, CARDS_MONTHLY_QUERY, DELETE_PM, RESTORE_PM } from '../api/queries'
 import type { CardMonthReport, PaymentMethod, StatementInfo } from '../api/types'
 import CardForm from '../components/CardForm'
-import { ErrorBox, Loading, PerformanceMeter } from '../components/Common'
+import { ErrorBox, Loading, PerformanceMeter, PlannedSwatch } from '../components/Common'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
-import { benefitTotalsText, hasBenefit } from '../lib/benefits'
-import { PAYMENT_KIND_LABEL, shortDate, won } from '../lib/format'
+import { benefitTotalsText, hasBenefit, plannedPerformance } from '../lib/benefits'
+import { PAYMENT_KIND_LABEL, shortDate, signedWon, won } from '../lib/format'
 import { currentMonth } from '../lib/month'
 
 type CardRow = PaymentMethod & {
@@ -114,6 +114,15 @@ export default function Cards() {
                         {r.target ? <span className="muted"> / {won(r.target)}</span> : null}
                       </span>
                     </div>
+                    {plannedPerformance(r) !== 0 && (
+                      <div className="row small" style={{ marginBottom: 4 }}>
+                        <span className="spacer" />
+                        <span className="muted">
+                          {plannedPerformance(r) > 0 && <PlannedSwatch />}
+                          예정 {signedWon(plannedPerformance(r))} · 포함 {won(r.projectedPerformance)}
+                        </span>
+                      </div>
+                    )}
                     {r.target ? (
                       <PerformanceMeter report={r} label={`${c.name} 전월실적 목표 대비`} />
                     ) : null}

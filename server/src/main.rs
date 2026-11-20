@@ -90,7 +90,7 @@ async fn import(config: AppConfig, args: &[String]) -> Result<(), Box<dyn Error>
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let data: domain::import::ImportData = serde_json::from_str(&raw).map_err(|e| format!("{path}: JSON 형식 오류: {e}"))?;
     let db = db::connect(&config.database_url).await?;
-    let stats = domain::import::run(&db, data, replace).await?;
+    let stats = domain::import::run(&db, data, replace, config.today()).await?;
     let planned = recurring::ensure_planned(&db, config.today(), config.plan_months_ahead, None).await?;
     println!(
         "가져오기 완료: 장부 {}, 카테고리 {}, 결제수단 {}, 계좌 {}, 계획항목 {}, 반복규칙 {}, 거래 {} (혜택 표시 {}), 새 예정 거래 {}",

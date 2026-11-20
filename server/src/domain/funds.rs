@@ -5,6 +5,7 @@
 //!   결제 계좌가 연결되어 있으면 그 계좌의 기준일, 아니면 포함된 계좌 중 가장 최근 기준일을 쓴다.
 //! - 체크카드/계좌이체/현금(연결 계좌가 있는 경우): 계좌 기준일 이후의 확정 거래를 뺀다.
 //! - 이번 달까지의 예정 거래는 "예정 반영 후" 금액에만 반영한다.
+//! - 장부 이체는 장부 사이에서 몫을 옮기는 기록이라 계좌 잔고에 반영하지 않는다.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -270,7 +271,7 @@ pub fn compute(input: &FundsInput) -> AvailableFunds {
     }
 
     let (mut unreflected, mut planned_out, mut planned_in) = (0i64, 0i64, 0i64);
-    for t in input.transactions {
+    for t in input.transactions.iter().filter(|t| t.transfer_ledger_id.is_none()) {
         let pm = t.payment_method_id.and_then(|id| pms.get(&id));
         let is_credit = pm.is_some_and(|p| p.kind == PaymentKind::CreditCard);
         match t.status {
@@ -386,9 +387,18 @@ mod tests {
             external_id: None,
             raw_text: None,
             split_parent_id: None,
+            transfer_ledger_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn transfer(id: i32, date: NaiveDate, amount: i64) -> transaction::Model {
+        let mut t = tx(id, 0, date, amount, TxStatus::Planned);
+        t.category_id = None;
+        t.payment_method_id = None;
+        t.transfer_ledger_id = Some(2);
+        t
     }
 
     #[test]
@@ -402,7 +412,6 @@ mod tests {
                 kind: CategoryKind::Expense,
                 monthly_budget: None,
                 is_fixed: false,
-                excluded_from_spending: false,
                 color: None,
                 sort_order: 0,
                 archived: false,
@@ -427,6 +436,7 @@ mod tests {
             tx(6, 11, d(10, 21), 10_000, TxStatus::Confirmed), // 기준일 이후 체크카드
             tx(7, 11, d(10, 19), 20_000, TxStatus::Confirmed), // 기준일 이전 → 반영됨
             tx(8, 12, d(10, 1), 40_000, TxStatus::Confirmed),  // 정산일정 없는 카드
+            transfer(9, d(10, 25), 250_000),                   // 장부 이체 예정 → 잔고와 무관
         ];
         let f = compute(&FundsInput {
             today: d(10, 23),
@@ -441,6 +451,7 @@ mod tests {
         assert_eq!(f.unreflected_outflow, 10_000);
         assert_eq!(f.available, 5_000_000 - 150_000 - 10_000);
         assert_eq!(f.available_after_planned, f.available - 30_000);
+        assert_eq!((f.planned_outflow, f.planned_inflow), (0, 0));
         assert_eq!(f.unconfigured_card_ids, vec![12]);
         let card = f.cards.iter().find(|c| c.payment_method_id == 10).unwrap();
         assert!(card.counted);

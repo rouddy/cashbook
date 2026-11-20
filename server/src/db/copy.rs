@@ -13,7 +13,7 @@ use sea_orm::{
 use super::connect;
 use crate::entity::{
     account, account_balance, api_token, card_benefit, card_tier, category, ledger, payment_method, plan_item,
-    recurring_rule, transaction, transaction_benefit,
+    recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
 };
 
 /// 한 번에 넣는 행 수 (열 20개 × 500 = 1만 개 파라미터: SQLite 32766, MySQL 65535 한도 아래)
@@ -51,6 +51,7 @@ macro_rules! for_each_table {
         $m!(card_benefit, "card_benefits");
         $m!(card_tier, "card_tiers");
         $m!(recurring_rule, "recurring_rules");
+        $m!(recurring_rule_benefit, "recurring_rule_benefits");
         $m!(transaction, "transactions");
         $m!(transaction_benefit, "transaction_benefits");
         $m!(plan_item, "plan_items");

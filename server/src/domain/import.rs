@@ -1,5 +1,8 @@
 //! 스프레드시트에서 변환한 정규화 JSON(`tools/export_sheets.py` 출력)을 DB에 넣는다.
 //! `cashbook import <file.json> [--replace]`
+//!
+//! 시트의 '합계 제외' 카테고리와 월 수입·배분 계획은 DB 마이그레이션과 같은 규칙(`legacy_plan`)으로
+//! 장부·정기수익 반복 수입·장부 이체 반복으로 바꿔 넣는다.
 
 use std::collections::HashMap;
 
@@ -9,10 +12,12 @@ use sea_orm::{
 };
 use serde::Deserialize;
 
+use super::dates::YearMonth;
+use super::legacy_plan::{self, Conversion, LedgerInfo, LegacyItem, LegacyKind};
 use crate::entity::{
     account, account_balance, card_benefit, card_tier, category,
     enums::{AccountKind, BenefitKind, CategoryKind, PaymentKind, PlanItemKind, TxSource, TxStatus},
-    ledger, payment_method, plan_item, recurring_rule, transaction, transaction_benefit,
+    ledger, payment_method, plan_item, recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
 };
 
 #[derive(Deserialize, Debug)]
@@ -49,6 +54,7 @@ pub struct ImportCategory {
     pub monthly_budget: Option<i64>,
     #[serde(default)]
     pub is_fixed: bool,
+    /// 시트에서 소비 합계에서 뺀 항목(경조사비·여행). 같은 이름의 장부로 옮긴다
     #[serde(default)]
     pub excluded_from_spending: bool,
     #[serde(default)]
@@ -122,11 +128,22 @@ pub struct ImportAccount {
     pub memo: Option<String>,
 }
 
+/// 시트의 월 계획 항목 종류
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ImportPlanKind {
+    /// 월 수입 (월급) → 정기수익 반복 수입
+    Income,
+    /// 배분 (용돈·적립) → 맞는 장부가 있으면 장부 이체 반복
+    Allocation,
+    MemberAllowance,
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPlanItem {
     pub ledger: String,
-    pub kind: PlanItemKind,
+    pub kind: ImportPlanKind,
     pub name: String,
     pub amount: i64,
     pub member: Option<String>,
@@ -180,6 +197,37 @@ pub struct ImportStats {
     pub transaction_benefits: usize,
 }
 
+/// '합계 제외' 카테고리를 같은 이름의 장부로 옮긴다 (없으면 장부를 만든다). 그 항목의 거래·반복 규칙도 함께.
+fn split_excluded_categories(data: &mut ImportData) {
+    let excluded: Vec<(String, String)> =
+        data.categories.iter().filter(|c| c.excluded_from_spending).map(|c| (c.ledger.clone(), c.name.clone())).collect();
+    for (from, name) in excluded {
+        let to = match data.ledgers.iter().find(|l| l.name == name) {
+            Some(l) => l.key.clone(),
+            None => {
+                let key = format!("{from}/{name}");
+                data.ledgers.push(ImportLedger { key: key.clone(), name: name.clone(), description: None, is_default: false });
+                key
+            }
+        };
+        if to == from {
+            continue;
+        }
+        if data.categories.iter().any(|c| c.ledger == to && c.name == name) {
+            data.categories.retain(|c| !(c.ledger == from && c.name == name));
+        } else if let Some(c) = data.categories.iter_mut().find(|c| c.ledger == from && c.name == name) {
+            c.ledger = to.clone();
+        }
+        let moves = |ledger: &String, category: &Option<String>| *ledger == from && category.as_deref() == Some(name.as_str());
+        for t in data.transactions.iter_mut().filter(|t| moves(&t.ledger, &t.category)) {
+            t.ledger = to.clone();
+        }
+        for r in data.recurring_rules.iter_mut().filter(|r| moves(&r.ledger, &r.category)) {
+            r.ledger = to.clone();
+        }
+    }
+}
+
 fn missing(kind: &str, name: &str) -> DbErr {
     DbErr::Custom(format!("가져오기 데이터 오류: {kind} '{name}'를 찾을 수 없습니다"))
 }
@@ -188,6 +236,7 @@ async fn clear_all<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     // FK 순서대로 지운다. API 토큰은 남긴다.
     transaction_benefit::Entity::delete_many().exec(db).await?;
     transaction::Entity::delete_many().exec(db).await?;
+    recurring_rule_benefit::Entity::delete_many().exec(db).await?;
     recurring_rule::Entity::delete_many().exec(db).await?;
     plan_item::Entity::delete_many().exec(db).await?;
     card_tier::Entity::delete_many().exec(db).await?;
@@ -200,13 +249,20 @@ async fn clear_all<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
     Ok(())
 }
 
-pub async fn run<C: ConnectionTrait + TransactionTrait>(db: &C, data: ImportData, replace: bool) -> Result<ImportStats, DbErr> {
+/// `today`: 시트의 월 수입·배분을 옮긴 반복 규칙의 시작 월
+pub async fn run<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
+    mut data: ImportData,
+    replace: bool,
+    today: NaiveDate,
+) -> Result<ImportStats, DbErr> {
     let existing = transaction::Entity::find().count(db).await? + ledger::Entity::find().count(db).await?;
     if existing > 0 && !replace {
         return Err(DbErr::Custom(
             "DB에 이미 데이터가 있습니다. 기존 데이터를 지우고 가져오려면 --replace 를 붙이세요".into(),
         ));
     }
+    split_excluded_categories(&mut data);
     let txn = db.begin().await?;
     if replace {
         clear_all(&txn).await?;
@@ -240,7 +296,6 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(db: &C, data: ImportData
             kind: Set(c.kind),
             monthly_budget: Set(c.monthly_budget),
             is_fixed: Set(c.is_fixed),
-            excluded_from_spending: Set(c.excluded_from_spending),
             color: Set(None),
             sort_order: Set(c.sort_order),
             archived: Set(false),
@@ -249,6 +304,55 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(db: &C, data: ImportData
         .insert(&txn)
         .await?;
         category_ids.insert((lid, c.name.clone()), saved.id);
+        stats.categories += 1;
+    }
+
+    // 시트의 월 수입·배분을 어떻게 옮길지 정하고, 정기수익 항목이 필요한 장부에는 만들어 둔다
+    let ledger_infos: Vec<LedgerInfo> = data
+        .ledgers
+        .iter()
+        .map(|l| Ok(LedgerInfo { id: ledger_id(&l.key)?, name: l.name.clone(), description: l.description.clone() }))
+        .collect::<Result<_, DbErr>>()?;
+    let legacy_items: Vec<LegacyItem> = data
+        .plan_items
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            Ok(LegacyItem {
+                id: i as i32,
+                ledger_id: ledger_id(&p.ledger)?,
+                kind: match p.kind {
+                    ImportPlanKind::Income => LegacyKind::Income,
+                    ImportPlanKind::Allocation => LegacyKind::Allocation,
+                    ImportPlanKind::MemberAllowance => LegacyKind::Other,
+                },
+                name: p.name.clone(),
+                amount: p.amount,
+            })
+        })
+        .collect::<Result<_, DbErr>>()?;
+    let conversions = legacy_plan::convert(&ledger_infos, &legacy_items);
+    for (i, conversion) in &conversions {
+        let lid = legacy_items[*i as usize].ledger_id;
+        let key = (lid, legacy_plan::REGULAR_INCOME_CATEGORY.to_string());
+        if *conversion != Conversion::RegularIncome || category_ids.contains_key(&key) {
+            continue;
+        }
+        let order = data.categories.iter().filter(|c| ledger_ids.get(&c.ledger) == Some(&lid)).count();
+        let saved = category::ActiveModel {
+            ledger_id: Set(lid),
+            name: Set(key.1.clone()),
+            kind: Set(CategoryKind::Income),
+            monthly_budget: Set(None),
+            is_fixed: Set(false),
+            color: Set(None),
+            sort_order: Set(order as i32),
+            archived: Set(false),
+            ..Default::default()
+        }
+        .insert(&txn)
+        .await?;
+        category_ids.insert(key, saved.id);
         stats.categories += 1;
     }
     let category_id = |lid: i32, name: &Option<String>| -> Result<Option<i32>, DbErr> {
@@ -359,19 +463,62 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(db: &C, data: ImportData
         stats.accounts += 1;
     }
 
-    for p in &data.plan_items {
-        plan_item::ActiveModel {
-            ledger_id: Set(ledger_id(&p.ledger)?),
-            kind: Set(p.kind),
-            name: Set(p.name.clone()),
+    let start_month = YearMonth::of(today).to_string();
+    for (i, conversion) in conversions {
+        let p = &data.plan_items[i as usize];
+        let lid = legacy_items[i as usize].ledger_id;
+        let (category, transfer, day) = match conversion {
+            Conversion::ReplacedByTransfer => continue,
+            Conversion::Keep => {
+                let kind = match p.kind {
+                    ImportPlanKind::MemberAllowance => PlanItemKind::MemberAllowance,
+                    _ => PlanItemKind::Allocation,
+                };
+                plan_item::ActiveModel {
+                    ledger_id: Set(lid),
+                    kind: Set(kind),
+                    name: Set(p.name.clone()),
+                    amount: Set(p.amount),
+                    member: Set(p.member.clone()),
+                    sort_order: Set(p.sort_order),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?;
+                stats.plan_items += 1;
+                continue;
+            }
+            Conversion::Transfer { to } => (None, Some(to), legacy_plan::TRANSFER_DAY),
+            Conversion::RegularIncome => {
+                let cid = category_id(lid, &Some(legacy_plan::REGULAR_INCOME_CATEGORY.to_string()))?;
+                (cid, None, legacy_plan::INCOME_DAY)
+            }
+        };
+        recurring_rule::ActiveModel {
+            ledger_id: Set(lid),
+            description: Set(p.name.clone()),
             amount: Set(p.amount),
-            member: Set(p.member.clone()),
-            sort_order: Set(p.sort_order),
+            category_id: Set(category),
+            payment_method_id: Set(None),
+            day_of_month: Set(day),
+            interval_months: Set(1),
+            start_month: Set(start_month.clone()),
+            end_month: Set(None),
+            member: Set(None),
+            memo: Set(None),
+            match_keyword: Set(None),
+            match_amount_min: Set(None),
+            match_amount_max: Set(None),
+            exclude_from_performance: Set(false),
+            transfer_ledger_id: Set(transfer),
+            active: Set(true),
+            created_at: Set(now),
+            updated_at: Set(now),
             ..Default::default()
         }
         .insert(&txn)
         .await?;
-        stats.plan_items += 1;
+        stats.recurring_rules += 1;
     }
 
     let mut rule_ids: HashMap<String, i32> = HashMap::new();
@@ -390,6 +537,8 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(db: &C, data: ImportData
             member: Set(None),
             memo: Set(None),
             match_keyword: Set(None),
+            match_amount_min: Set(None),
+            match_amount_max: Set(None),
             exclude_from_performance: Set(false),
             active: Set(true),
             created_at: Set(now),
@@ -443,4 +592,69 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(db: &C, data: ImportData
 
     txn.commit().await?;
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::{ColumnTrait, QueryFilter, QueryOrder};
+
+    #[tokio::test]
+    async fn sheet_plan_becomes_ledgers_and_recurring_rules() {
+        let db = crate::db::connect_in_memory().await;
+        let data: ImportData = serde_json::from_value(serde_json::json!({
+            "ledgers": [
+                {"key": "household", "name": "가계부", "description": "월급사용내역 (생활비)", "isDefault": true},
+                {"key": "allowance", "name": "용돈", "description": "재홍 용돈"}
+            ],
+            "categories": [
+                {"ledger": "household", "name": "외식", "kind": "EXPENSE", "sortOrder": 0},
+                {"ledger": "household", "name": "경조사비", "kind": "EXPENSE", "monthlyBudget": 250000, "excludedFromSpending": true, "sortOrder": 1},
+                {"ledger": "allowance", "name": "점심", "kind": "EXPENSE", "sortOrder": 0}
+            ],
+            "paymentMethods": [],
+            "planItems": [
+                {"ledger": "household", "kind": "INCOME", "name": "월급", "amount": 4500000, "sortOrder": 0},
+                {"ledger": "household", "kind": "ALLOCATION", "name": "재홍 용돈", "amount": 200000, "sortOrder": 1},
+                {"ledger": "household", "kind": "MEMBER_ALLOWANCE", "name": "송화 용돈", "amount": 500000, "member": "송화", "sortOrder": 2},
+                {"ledger": "household", "kind": "ALLOCATION", "name": "경조사비", "amount": 250000, "sortOrder": 3},
+                {"ledger": "household", "kind": "ALLOCATION", "name": "저축", "amount": 100000, "sortOrder": 4},
+                {"ledger": "allowance", "kind": "INCOME", "name": "용돈", "amount": 200000, "sortOrder": 0}
+            ],
+            "transactions": [
+                {"ledger": "household", "date": "2026-02-18", "amount": 100000, "category": "경조사비", "description": "결혼식", "status": "CONFIRMED"}
+            ]
+        }))
+        .unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        run(&db, data, false, today).await.unwrap();
+
+        let ledgers = ledger::Entity::find().order_by_asc(ledger::Column::SortOrder).all(&db).await.unwrap();
+        assert_eq!(ledgers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["가계부", "용돈", "경조사비"]);
+        let gyeongjo = ledgers[2].id;
+        let wedding = transaction::Entity::find().one(&db).await.unwrap().unwrap();
+        let category = category::Entity::find_by_id(wedding.category_id.unwrap()).one(&db).await.unwrap().unwrap();
+        assert_eq!((wedding.ledger_id, category.ledger_id, category.name.as_str()), (gyeongjo, gyeongjo, "경조사비"));
+
+        let income = category::Entity::find().filter(category::Column::Name.eq("정기수익")).one(&db).await.unwrap().unwrap();
+        assert_eq!((income.ledger_id, income.kind), (ledgers[0].id, CategoryKind::Income));
+        let rules: Vec<(String, Option<i32>, Option<i32>, i32, String)> = recurring_rule::Entity::find()
+            .order_by_asc(recurring_rule::Column::Id)
+            .all(&db)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.description, r.category_id, r.transfer_ledger_id, r.day_of_month, r.start_month))
+            .collect();
+        assert_eq!(
+            rules,
+            vec![
+                ("월급".into(), Some(income.id), None, 10, "2026-11".into()),
+                ("재홍 용돈".into(), None, Some(ledgers[1].id), 1, "2026-11".into()),
+                ("경조사비".into(), None, Some(gyeongjo), 1, "2026-11".into()),
+            ]
+        );
+        let items: Vec<String> = plan_item::Entity::find().all(&db).await.unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(items, vec!["송화 용돈", "저축"]);
+    }
 }

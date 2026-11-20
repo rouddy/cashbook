@@ -28,6 +28,13 @@ export function addMonths(month: string, n: number): string {
   return `${ny}-${String(nm).padStart(2, '0')}`
 }
 
+/** 날짜(YYYY-MM-DD)에서 n개월 전 같은 날 (그 달에 없는 날이면 말일) */
+export function monthsBefore(date: string, n: number): string {
+  const month = addMonths(monthOf(date), -n)
+  const day = Math.min(Number(date.slice(8, 10)), daysInMonth(month))
+  return `${month}-${String(day).padStart(2, '0')}`
+}
+
 export function monthLabel(month: string): string {
   const [y, m] = month.split('-').map(Number)
   return `${y}년 ${m}월`
