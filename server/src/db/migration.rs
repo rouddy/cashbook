@@ -17,6 +17,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261120_000006_ledger_transfers::Migration),
             Box::new(m20261120_000007_convert_legacy_plan::Migration),
             Box::new(m20261120_000008_drop_excluded_from_spending::Migration),
+            Box::new(m20261120_000009_recurring_match_amount::Migration),
         ]
     }
 }
@@ -1290,6 +1291,39 @@ mod m20261120_000008_drop_excluded_from_spending {
             manager
                 .alter_table(Table::alter().table(Categories::Table).drop_column(Categories::ExcludedFromSpending).to_owned())
                 .await
+        }
+    }
+}
+
+/// 반복 규칙의 자동 입력 매칭 금액 범위 (양끝 포함, 둘 다 비우면 범위 없음).
+/// SQLite는 ALTER TABLE 한 번에 컬럼 하나만 더할 수 있어 나눠 추가한다.
+mod m20261120_000009_recurring_match_amount {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261120_000009_recurring_match_amount"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum RecurringRules {
+        Table,
+        MatchAmountMin,
+        MatchAmountMax,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            for col in [RecurringRules::MatchAmountMin, RecurringRules::MatchAmountMax] {
+                manager
+                    .alter_table(Table::alter().table(RecurringRules::Table).add_column(big_integer_null(col)).to_owned())
+                    .await?;
+            }
+            Ok(())
         }
     }
 }

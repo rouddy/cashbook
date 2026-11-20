@@ -138,6 +138,8 @@ mod tests {
             member: None,
             memo: None,
             match_keyword: None,
+            match_amount_min: None,
+            match_amount_max: None,
             exclude_from_performance: false,
             transfer_ledger_id: None,
             active: true,

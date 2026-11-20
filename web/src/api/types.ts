@@ -376,7 +376,11 @@ export interface RecurringRule {
   endMonth: string | null
   member: string | null
   memo: string | null
+  /** 자동 입력 매칭 키워드 (쉼표로 여러 개). 정했으면 가맹점에 하나는 있어야 확정 */
   matchKeyword: string | null
+  /** 자동 입력 매칭 금액 범위 (양끝 포함, 한쪽만 정해도 됨). 정했으면 실제 금액이 이 안이어야 확정 */
+  matchAmountMin: number | null
+  matchAmountMax: number | null
   excludeFromPerformance: boolean
   /** 장부 이체 규칙이면 받는 장부 */
   transferLedgerId: number | null

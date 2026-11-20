@@ -72,8 +72,11 @@ pub struct RecurringRuleInput {
     pub end_month: Option<YearMonth>,
     pub member: Option<String>,
     pub memo: Option<String>,
-    /// 자동 입력 매칭 키워드 (쉼표로 여러 개)
+    /// 자동 입력 매칭 키워드 (쉼표로 여러 개). 정했으면 가맹점에 하나는 있어야 확정한다
     pub match_keyword: Option<String>,
+    /// 자동 입력 매칭 금액 범위 (양끝 포함, 한쪽만 정해도 된다). 둘을 같게 하면 그 금액일 때만 확정한다
+    pub match_amount_min: Option<i64>,
+    pub match_amount_max: Option<i64>,
     #[graphql(default = false)]
     pub exclude_from_performance: bool,
     /// 장부 이체 규칙이면 받는 장부 (항목·결제수단은 비운다)
@@ -95,6 +98,15 @@ async fn validate(ctx: &Context<'_>, input: &RecurringRuleInput) -> Result<()> {
     }
     if input.end_month.is_some_and(|e| e < input.start_month) {
         return Err(user_error("종료 월이 시작 월보다 빠릅니다"));
+    }
+    if let (Some(min), Some(max)) = (input.match_amount_min, input.match_amount_max)
+        && min > max {
+            return Err(user_error("매칭 금액 범위의 시작이 끝보다 큽니다"));
+        }
+    if input.transfer_ledger_id.is_none()
+        && (input.match_amount_min.is_some_and(|m| input.amount < m) || input.match_amount_max.is_some_and(|m| input.amount > m))
+    {
+        return Err(user_error("금액이 매칭 금액 범위 밖입니다"));
     }
     ledger::Entity::find_by_id(input.ledger_id).one(db).await?.ok_or_else(|| user_error("장부가 없습니다"))?;
     if let Some(to) = input.transfer_ledger_id {
@@ -130,8 +142,12 @@ fn apply(active: &mut recurring_rule::ActiveModel, input: RecurringRuleInput) {
     active.end_month = Set(input.end_month.map(|m| m.to_string()));
     active.member = Set(trim_opt(input.member));
     active.memo = Set(trim_opt(input.memo));
-    active.match_keyword = Set(trim_opt(input.match_keyword));
-    active.exclude_from_performance = Set(input.exclude_from_performance && input.transfer_ledger_id.is_none());
+    // 장부 이체는 자동 입력으로 확정하지 않으므로 매칭 조건을 두지 않는다
+    let is_transfer = input.transfer_ledger_id.is_some();
+    active.match_keyword = Set(trim_opt(input.match_keyword).filter(|_| !is_transfer));
+    active.match_amount_min = Set(input.match_amount_min.filter(|_| !is_transfer));
+    active.match_amount_max = Set(input.match_amount_max.filter(|_| !is_transfer));
+    active.exclude_from_performance = Set(input.exclude_from_performance && !is_transfer);
     active.transfer_ledger_id = Set(input.transfer_ledger_id);
     active.active = Set(input.active);
     active.updated_at = Set(Utc::now());

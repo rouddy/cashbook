@@ -405,7 +405,7 @@ function RecurringRules({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefM
                   </td>
                   <td>
                     {r.description}
-                    {r.matchKeyword && <div className="small muted">매칭: {r.matchKeyword}</div>}
+                    {matchLabel(r) && <div className="small muted">매칭: {matchLabel(r)}</div>}
                   </td>
                   <td className={`num ${isIncome(r) || r.transferLedgerId === ledgerId ? 'good' : ''}`}>{won(r.amount)}</td>
                   <td>{transferLabel(r, refMaps, ledgerId) ?? refMaps.categoryById.get(r.categoryId ?? -1)?.name ?? '-'}</td>
@@ -453,6 +453,22 @@ function RecurringRules({ ledgerId, refMaps }: { ledgerId: number; refMaps: RefM
   )
 }
 
+/** 자동 입력 매칭 조건 요약 (키워드 · 금액 범위) */
+function matchLabel(r: RecurringRule): string | null {
+  const { matchAmountMin: min, matchAmountMax: max } = r
+  const range =
+    min != null && max != null
+      ? min === max
+        ? `${won(min)}원만`
+        : `${won(min)}~${won(max)}원`
+      : min != null
+        ? `${won(min)}원 이상`
+        : max != null
+          ? `${won(max)}원 이하`
+          : null
+  return [r.matchKeyword, range].filter(Boolean).join(' · ') || null
+}
+
 function ruleInput(r: RecurringRule, patch: Partial<RecurringRule> = {}) {
   const x = { ...r, ...patch }
   return {
@@ -468,6 +484,8 @@ function ruleInput(r: RecurringRule, patch: Partial<RecurringRule> = {}) {
     member: x.member,
     memo: x.memo,
     matchKeyword: x.matchKeyword,
+    matchAmountMin: x.matchAmountMin,
+    matchAmountMax: x.matchAmountMax,
     excludeFromPerformance: x.excludeFromPerformance,
     transferLedgerId: x.transferLedgerId,
     active: x.active,
@@ -488,6 +506,8 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
   const [member, setMember] = useState(rule?.member ?? '')
   const [memo, setMemo] = useState(rule?.memo ?? '')
   const [matchKeyword, setMatchKeyword] = useState(rule?.matchKeyword ?? '')
+  const [matchMin, setMatchMin] = useState(rule?.matchAmountMin != null ? String(rule.matchAmountMin) : '')
+  const [matchMax, setMatchMax] = useState(rule?.matchAmountMax != null ? String(rule.matchAmountMax) : '')
   const [excludePerf, setExcludePerf] = useState(rule?.excludeFromPerformance ?? false)
   const fromLedger = rule?.ledgerId ?? ledgerId
   const otherLedgers = refMaps.ledgers.filter((l) => l.id !== fromLedger)
@@ -506,6 +526,13 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
       toast('받는 장부를 고르세요', 'error')
       return
     }
+    // 금액 범위는 칸마다 비워 둘 수 있다 (비우면 그쪽 끝 없음)
+    const matchMinValue = matchMin.trim() ? parseAmount(matchMin) : null
+    const matchMaxValue = matchMax.trim() ? parseAmount(matchMax) : null
+    if (!isTransfer && ((matchMin.trim() && matchMinValue == null) || (matchMax.trim() && matchMaxValue == null))) {
+      toast('자동입력 금액 범위는 숫자로 입력하세요', 'error')
+      return
+    }
     const input = {
       ledgerId: fromLedger,
       description: description.trim(),
@@ -520,6 +547,8 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
       member: (!isTransfer && member) || null,
       memo: memo || null,
       matchKeyword: (!isTransfer && matchKeyword) || null,
+      matchAmountMin: isTransfer ? null : matchMinValue,
+      matchAmountMax: isTransfer ? null : matchMaxValue,
       excludeFromPerformance: excludePerf && !isTransfer,
       active: rule?.active ?? true,
     }
@@ -657,8 +686,47 @@ function RuleModal({ rule, ledgerId, refMaps, onClose }: { rule?: RecurringRule;
             <label className="field">
               자동입력 매칭 키워드
               <input className="input" value={matchKeyword} onChange={(e) => setMatchKeyword(e.target.value)} placeholder="예: 관리비" />
-              <span className="hint">승인 문자 가맹점에 이 말이 있으면 금액이 달라도 이 예정 항목을 확정</span>
+              <span className="hint">정하면 승인 문자 가맹점에 이 말이 있을 때만 확정 (쉼표로 여러 개). 금액 범위가 없으면 금액이 달라도 확정</span>
             </label>
+            <div className="field-group" role="group" aria-label="자동입력 금액 범위" style={{ gridColumn: '1 / -1' }}>
+              자동입력 금액 범위
+              <div className="row">
+                <input
+                  className="input num"
+                  inputMode="numeric"
+                  aria-label="금액 범위 시작"
+                  placeholder="시작"
+                  value={matchMin}
+                  onChange={(e) => setMatchMin(e.target.value)}
+                  style={{ width: 130 }}
+                />
+                <span className="muted">~</span>
+                <input
+                  className="input num"
+                  inputMode="numeric"
+                  aria-label="금액 범위 끝"
+                  placeholder="끝"
+                  value={matchMax}
+                  onChange={(e) => setMatchMax(e.target.value)}
+                  style={{ width: 130 }}
+                />
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  disabled={parseAmount(amount) == null}
+                  onClick={() => {
+                    setMatchMin(amount)
+                    setMatchMax(amount)
+                  }}
+                >
+                  이 금액만
+                </button>
+              </div>
+              <span className="hint">
+                정하면 실제 금액이 이 범위 안(양끝 포함)일 때만 확정. 시작과 끝을 같게 하면 그 금액일 때만, 한쪽만 써도 됩니다. 비우면 금액이 예정과 같거나
+                내용·키워드가 맞을 때 확정
+              </span>
+            </div>
           </>
         )}
         <label className="field" style={{ gridColumn: '1 / -1' }}>

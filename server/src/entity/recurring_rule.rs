@@ -22,8 +22,11 @@ pub struct Model {
     pub end_month: Option<String>,
     pub member: Option<String>,
     pub memo: Option<String>,
-    /// 자동 입력 시 이 키워드가 내용에 있으면 예정 항목과 매칭
+    /// 자동 입력 매칭 키워드 (쉼표로 여러 개). 정했으면 가맹점(내용)에 하나는 있어야 이 규칙의 예정 항목을 확정한다
     pub match_keyword: Option<String>,
+    /// 자동 입력 매칭 금액 범위 (양끝 포함, 한쪽만 정해도 된다). 정했으면 실제 금액이 이 안이어야 확정한다
+    pub match_amount_min: Option<i64>,
+    pub match_amount_max: Option<i64>,
     pub exclude_from_performance: bool,
     /// 장부 이체 규칙이면 받는 장부 (항목·결제수단 없음)
     pub transfer_ledger_id: Option<i32>,

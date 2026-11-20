@@ -400,7 +400,9 @@ textarea.input {
 .input.num {
   text-align: right;
 }
-label.field {
+/* .field-group: 입력이 여럿이라 label로 감쌀 수 없는 칸 */
+label.field,
+.field-group {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -409,7 +411,8 @@ label.field {
   font-weight: 550;
   min-width: 0;
 }
-label.field > .hint {
+label.field > .hint,
+.field-group > .hint {
   font-weight: 400;
   color: var(--muted);
 }
