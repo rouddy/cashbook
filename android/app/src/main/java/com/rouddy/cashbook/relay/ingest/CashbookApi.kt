@@ -9,6 +9,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -20,7 +22,10 @@ import java.net.URI
 import java.net.UnknownServiceException
 import javax.net.ssl.SSLException
 
-/** 가계부 서버 자동 입력 API (`POST /api/ingest`). README의 "자동 입력 API" 참고. */
+/**
+ * 가계부 서버 API. 자동 입력(`POST /api/ingest`)과 GraphQL(`POST /api/graphql`) — 같은 API 토큰을 쓴다.
+ * README의 "자동 입력 API" 참고.
+ */
 class CashbookApi(serverUrl: String, private val token: String) {
     constructor(settings: Settings) : this(settings.serverUrl, settings.token)
 
@@ -38,6 +43,13 @@ class CashbookApi(serverUrl: String, private val token: String) {
 
     suspend fun ingest(payload: String): Outcome = request("POST", "/api/ingest", payload)
 
+    /** GraphQL 요청. 응답 해석은 [com.rouddy.cashbook.relay.book.BookApi] */
+    suspend fun graphql(query: String, variables: JsonObject = JsonObject(emptyMap())): Outcome =
+        request("POST", "/api/graphql", buildJsonObject {
+            put("query", query)
+            put("variables", variables)
+        }.toString())
+
     /** 규칙에서 고를 장부·카테고리·결제수단. 실패하면 보여 줄 메시지 */
     suspend fun options(): Result<ServerOptions> = when (val out = request("GET", "/api/ingest/options", null)) {
         is Outcome.Ok -> parseOptions(out.body)?.let { Result.success(it.copy(serverUrl = base, fetchedAt = System.currentTimeMillis())) }
@@ -50,7 +62,7 @@ class CashbookApi(serverUrl: String, private val token: String) {
 
     /**
      * 연결과 토큰 확인. 빈 JSON을 자동 입력으로 보내면 인증을 통과한 뒤 "금액 없음"(422)으로 거절되므로
-     * 거래를 만들지 않고 토큰을 확인할 수 있다.
+     * 거래를 만들지 않고 토큰을 확인할 수 있다. 이어서 GraphQL 읽기도 되는지 확인한다 (토큰 권한을 합치기 전 서버는 예전 자동 입력 전용 토큰을 막는다).
      */
     suspend fun check(): Pair<Boolean, String> {
         if (base.isEmpty()) return false to "서버 주소를 입력하세요"
@@ -59,14 +71,20 @@ class CashbookApi(serverUrl: String, private val token: String) {
             is Outcome.Rejected -> return false to health.message
             is Outcome.Retry -> return false to health.message
         }
-        return when (val probe = request("POST", "/api/ingest", "{}")) {
-            is Outcome.Rejected -> if (probe.status == 422) {
-                true to "연결됨 · 인증 확인됨" + (version?.let { " (서버 $it)" } ?: "")
+        when (val probe = request("POST", "/api/ingest", "{}")) {
+            is Outcome.Rejected -> if (probe.status != 422) return false to probe.message
+            is Outcome.Ok -> return false to "서버 응답이 예상과 다릅니다"
+            is Outcome.Retry -> return false to probe.message
+        }
+        val server = version?.let { " (서버 $it)" } ?: ""
+        return when (val full = graphql(com.rouddy.cashbook.relay.book.Queries.PROBE)) {
+            is Outcome.Ok -> true to "연결됨 · 인증 확인됨$server — 자동 입력과 대시보드·수동 입력·최근 내역을 쓸 수 있습니다"
+            is Outcome.Rejected -> if (full.status == 403) {
+                true to "연결됨 · 자동 입력 인증 확인됨$server — 이 서버는 이 토큰으로 대시보드·수동 입력·최근 내역을 허용하지 않습니다. 가계부 서버를 업데이트하세요"
             } else {
-                false to probe.message
+                true to "연결됨 · 자동 입력 인증 확인됨$server (GraphQL 확인 실패: ${full.message})"
             }
-            is Outcome.Ok -> false to "서버 응답이 예상과 다릅니다"
-            is Outcome.Retry -> false to probe.message
+            is Outcome.Retry -> true to "연결됨 · 자동 입력 인증 확인됨$server (GraphQL 확인 실패: ${full.message})"
         }
     }
 

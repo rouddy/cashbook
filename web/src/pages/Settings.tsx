@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react'
 
 import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { CREATE_LEDGER, CREATE_TOKEN, DELETE_LEDGER, DELETE_PM, DELETE_TOKEN, RESTORE_PM, TOKENS_QUERY, UPDATE_LEDGER } from '../api/queries'
-import type { ApiToken, Ledger, PaymentMethod, TokenScope } from '../api/types'
+import type { ApiToken, Ledger, PaymentMethod } from '../api/types'
 import CardForm from '../components/CardForm'
 import { ErrorBox, Loading, Panel } from '../components/Common'
 import Modal from '../components/Modal'
@@ -147,13 +147,12 @@ function ApiTokens() {
   const { run, pending } = useMutate()
   const [name, setName] = useState('')
   const [created, setCreated] = useState<string | null>(null)
-  const [scope, setScope] = useState<TokenScope>('INGEST')
   const toast = useToast()
 
   const create = async (e: FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
-    const r = await run<{ createApiToken: { token: string } }>(CREATE_TOKEN, { name: name.trim(), scope })
+    const r = await run<{ createApiToken: { token: string } }>(CREATE_TOKEN, { name: name.trim() })
     if (!r) return
     setCreated(r.createApiToken.token)
     setName('')
@@ -161,8 +160,8 @@ function ApiTokens() {
 
   return (
     <Panel
-      title="자동 입력 API 토큰"
-      sub="휴대폰 자동화 앱·스크립트가 결제 내역을 보낼 때 쓰는 키. 원문은 발급할 때 한 번만 보여줍니다. 휴대폰에는 '자동 입력 전용'을 쓰세요 (유출돼도 내역을 읽거나 토큰을 만들 수 없음)."
+      title="API 토큰"
+      sub="휴대폰 자동화 앱·가계부 앱·스크립트가 쓰는 키. 자동 입력과 GraphQL(내역 읽기·쓰기)을 모두 쓸 수 있으니 기기·용도마다 따로 발급하고, 잃어버리거나 유출되면 바로 폐기하세요. 원문은 발급할 때 한 번만 보여줍니다."
       flush
     >
       {q.error ? (
@@ -172,7 +171,6 @@ function ApiTokens() {
           <thead>
             <tr>
               <th>이름</th>
-              <th>권한</th>
               <th>앞자리</th>
               <th>발급</th>
               <th>마지막 사용</th>
@@ -183,9 +181,6 @@ function ApiTokens() {
             {(q.data?.apiTokens ?? []).map((t) => (
               <tr key={t.id}>
                 <td>{t.name}</td>
-                <td>
-                  <span className={`badge ${t.scope === 'FULL' ? 'warn' : ''}`}>{t.scope === 'FULL' ? '전체 API' : '자동 입력 전용'}</span>
-                </td>
                 <td>
                   <code>{t.tokenPrefix}…</code>
                 </td>
@@ -200,7 +195,7 @@ function ApiTokens() {
             ))}
             {q.data?.apiTokens.length === 0 && (
               <tr>
-                <td colSpan={6} className="empty">
+                <td colSpan={5} className="empty">
                   발급한 토큰이 없습니다
                 </td>
               </tr>
@@ -210,10 +205,6 @@ function ApiTokens() {
       )}
       <form className="row" style={{ padding: 12 }} onSubmit={create}>
         <input className="input" placeholder="토큰 이름 (예: 아이폰 단축어)" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 240 }} />
-        <select className="input" value={scope} onChange={(e) => setScope(e.target.value as TokenScope)} aria-label="토큰 권한">
-          <option value="INGEST">자동 입력 전용 (/api/ingest)</option>
-          <option value="FULL">전체 API (GraphQL 읽기·쓰기)</option>
-        </select>
         <button className="btn primary" disabled={!name.trim() || pending}>
           발급
         </button>
@@ -308,6 +299,7 @@ function ApiGuide({ authEnabled }: { authEnabled: boolean }) {
             <b>가계부 자동 입력 앱</b>(저장소의 <code>android/</code>): 서버 주소에 <code>{base}</code>
             {authEnabled ? ', API 토큰에 발급한 토큰' : ''}을 넣고, 카드사 문자 번호나 결제 앱 알림을 규칙으로 등록하면 받는 즉시 올립니다
             (문자 형식 템플릿, 장문 LMS, 재시도·기록).
+            {' '}같은 연결로 앱의 대시보드·수동 입력·최근 내역도 씁니다.
           </p>
           <p className="small text-2" style={{ margin: 0 }}>
             다른 앱을 쓸 때: 카드사 번호에서 온 문자를 받으면 HTTP POST로 <code>{base}/api/ingest</code>에 문자 내용(본문)을 보내도록 설정합니다. Content-Type은 <code>text/plain</code>
@@ -318,7 +310,7 @@ function ApiGuide({ authEnabled }: { authEnabled: boolean }) {
           <h3>5. GraphQL</h3>
           <pre>{`mutation { ingestTransaction(input: {text: "..."}) { created duplicate matchedPlanned warnings transaction { id amount description } } }`}</pre>
           <p className="small text-2" style={{ margin: 0 }}>
-            모든 기능은 <code>{base}/api/graphql</code>에서 쓸 수 있습니다 (로그인 세션 또는 &lsquo;전체 API&rsquo; 토큰). <a href="/api/graphiql">GraphiQL 탐색기</a>
+            모든 기능은 <code>{base}/api/graphql</code>에서 쓸 수 있습니다 (로그인 세션 또는 API 토큰). <a href="/api/graphiql">GraphiQL 탐색기</a>
           </p>
         </div>
       </div>

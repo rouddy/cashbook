@@ -652,6 +652,11 @@ table.table {
 .sub-cell .badge {
   height: 18px;
 }
+/* 내용·메모(flex 열) 칸: 글 길이가 열 폭을 늘리지 않고 칸을 채운다 (열 폭은 TransactionGrid의 HEADERS) */
+.cell-fill {
+  width: 0;
+  min-width: 100%;
+}
 /* 칸 전체를 눌러도 체크되게 */
 .row-check {
   display: flex;

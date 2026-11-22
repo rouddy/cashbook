@@ -413,13 +413,10 @@ export interface ParsedMessage {
   last4: string | null
 }
 
-export type TokenScope = 'INGEST' | 'FULL'
-
 export interface ApiToken {
   id: number
   name: string
   tokenPrefix: string
-  scope: TokenScope
   createdAt: string
   lastUsedAt: string | null
 }

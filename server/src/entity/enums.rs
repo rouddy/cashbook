@@ -149,18 +149,3 @@ pub enum BenefitKind {
     #[sea_orm(string_value = "MILEAGE")]
     Mileage,
 }
-
-/// API 토큰 권한.
-#[derive(
-    Copy, Clone, Debug, PartialEq, Eq, Hash, EnumIter, DeriveActiveEnum, async_graphql::Enum, Serialize, Deserialize,
-)]
-#[sea_orm(rs_type = "String", db_type = "String(StringLen::N(16))")]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum TokenScope {
-    /// 자동 입력(`/api/ingest`)과 규칙용 이름 목록(`/api/ingest/options`)만
-    #[sea_orm(string_value = "INGEST")]
-    Ingest,
-    /// GraphQL 전체 (읽기/쓰기)
-    #[sea_orm(string_value = "FULL")]
-    Full,
-}

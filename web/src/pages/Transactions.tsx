@@ -73,6 +73,7 @@ export default function Transactions() {
 
   const columns: GridColumn[] = ['date', 'amount', 'category', 'paymentMethod', 'description', 'member', 'memo']
   if (ledgerId == null) columns.push('ledger')
+  columns.push('excludePerformance')
   const page = tx.data?.transactions
   const filtered = !!(category || pm || member || debouncedSearch || status !== 'active')
 

@@ -54,6 +54,16 @@ async function gql(query, variables) {
   )
 }
 
+/** 조건이 참이 될 때까지 기다린다 (저장 뒤 서버 값 확인용) */
+async function waitUntil(fn, label, timeout = 5000) {
+  const until = Date.now() + timeout
+  for (;;) {
+    if (await fn()) return
+    if (Date.now() > until) throw new Error(`시간 초과: ${label}`)
+    await new Promise((r) => setTimeout(r, 100))
+  }
+}
+
 function acceptNextDialog() {
   page.once('dialog', (d) => d.accept())
 }
@@ -123,7 +133,7 @@ await step('가계부: 새 행으로 입력 (가맹점 자동완성) 후 선택 
   // 행마다 삭제 버튼은 없고, 선택 모드에서 체크한 뒤 확인 창을 거쳐야 지운다
   assert.equal(await created.getByRole('button', { name: '삭제' }).count(), 0)
   await page.getByRole('button', { name: '선택', exact: true }).click()
-  await created.getByRole('checkbox').check()
+  await created.getByRole('checkbox', { name: /선택$/ }).check()
   await page.getByRole('button', { name: '삭제', exact: true }).click()
   const confirm = page.getByRole('dialog')
   await confirm.getByText(`E2E 커피 ${STAMP}`).waitFor()
@@ -433,6 +443,60 @@ await step('가계부: 확정 거래의 상태 칸 혜택 버튼으로 카드 �
   }
 })
 
+await step('가계부·카드별 내역: 실적제외 체크박스로 전월실적에서 빼기', async () => {
+  const created = await gql(`mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id } }`, {
+    input: { name: `E2E실적카드${STAMP}`, kind: 'CHECK_CARD' },
+  })
+  const card = created.data.createPaymentMethod
+  const performance = async () =>
+    (await gql(`query($id: Int!) { paymentMethod(id: $id) { monthReport(month: "2026-08") { performance } } }`, { id: card.id })).data.paymentMethod
+      .monthReport.performance
+  await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id } }`, {
+    input: { date: '2026-08-12', amount: 30000, paymentMethodId: card.id, description: `E2E실적기존${STAMP}` },
+  })
+  try {
+    assert.equal(await performance(), 30000)
+    // 가계부: 기존 행을 체크하면 바로 저장되어 실적에서 빠진다
+    await page.goto(`${BASE}/transactions?month=2026-08&pm=${card.id}`)
+    const listed = page.locator('table.sheet tbody tr', { hasText: `E2E실적기존${STAMP}` })
+    await listed.getByRole('checkbox', { name: /전월실적 제외/ }).check()
+    await waitUntil(async () => (await performance()) === 0, '실적 제외 반영')
+    await page.reload()
+    assert.equal(await listed.getByRole('checkbox', { name: /전월실적 제외/ }).isChecked(), true)
+
+    // 카드별 내역: 새 행에서 체크하고 추가하면 실적 제외로 저장되고, 새 행 체크는 풀린다
+    await page.goto(`${BASE}/card-transactions?month=2026-08&card=${card.id}`)
+    const newRow = page.locator('tr.new-row')
+    const newCheck = newRow.getByRole('checkbox', { name: '전월실적 제외' })
+    await newRow.getByLabel('금액').fill('12000')
+    await newRow.getByLabel('내용').fill(`E2E실적새행${STAMP}`)
+    await newCheck.check()
+    await newRow.getByRole('button', { name: '추가' }).click()
+    const added = page.locator('table.sheet tbody tr', { hasText: `E2E실적새행${STAMP}` })
+    await added.waitFor()
+    assert.equal(await added.getByRole('checkbox', { name: /전월실적 제외/ }).isChecked(), true)
+    // 새 행은 저장 결과를 다시 읽은 뒤에 비운다
+    await waitUntil(async () => !(await newCheck.isChecked()), '새 행 체크 초기화')
+    assert.equal(await performance(), 0)
+    // 기존 행을 풀면 실적에 다시 들어간다
+    await page.locator('table.sheet tbody tr', { hasText: `E2E실적기존${STAMP}` }).getByRole('checkbox', { name: /전월실적 제외/ }).uncheck()
+    await waitUntil(async () => (await performance()) === 30000, '실적 제외 해제 반영')
+
+    // 가계부 새 행: 카드 결제수단을 골라야 체크할 수 있다
+    await page.goto(`${BASE}/transactions?month=2026-08`)
+    const ledgerRow = page.locator('tr.new-row')
+    assert.equal(await ledgerRow.getByRole('checkbox', { name: '전월실적 제외' }).isDisabled(), true)
+    await ledgerRow.getByLabel('결제수단').selectOption({ label: `E2E실적카드${STAMP}` })
+    assert.equal(await ledgerRow.getByRole('checkbox', { name: '전월실적 제외' }).isEnabled(), true)
+  } finally {
+    const left = await gql(`query($f: TransactionFilter!) { transactions(filter: $f) { items { id } } }`, {
+      f: { month: '2026-08', paymentMethodId: card.id },
+    })
+    for (const t of left.data.transactions.items) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: t.id })
+    await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: card.id })
+  }
+})
+
 await step('은행 잔고: 계좌 추가 → 잔고 기록 → 이력', async () => {
   await page.goto(`${BASE}/accounts`)
   await page.getByRole('button', { name: '+ 계좌 추가' }).click()
@@ -574,17 +638,14 @@ await step('설정: API 토큰 발급 → 토큰으로 자동 입력 → 폐기 
   // 다른 사이트에서 보낸 요청(Origin 불일치)은 토큰이 있어도 거부
   const evil = await post({ Authorization: `Bearer ${token}`, Origin: 'https://evil.example' })
   assert.equal(evil.status, 403)
-  // 자동 입력 전용 토큰으로는 GraphQL을 쓸 수 없다
+  // 같은 토큰으로 GraphQL도 쓴다 (토큰 권한은 하나)
   const gqlWith = (t) =>
     fetch(`${BASE}/api/graphql`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
       body: JSON.stringify({ query: '{ appInfo { version } }' }),
     })
-  assert.equal((await gqlWith(token)).status, 403)
-  const full = await gql(`mutation { createApiToken(name: "e2e-full-${STAMP}", scope: FULL) { token apiToken { id } } }`)
-  assert.equal((await gqlWith(full.data.createApiToken.token)).status, 200)
-  await gql(`mutation($id: Int!) { deleteApiToken(id: $id) }`, { id: full.data.createApiToken.apiToken.id })
+  assert.equal((await gqlWith(token)).status, 200)
 
   await page.reload()
   const row = page.locator('tbody tr', { hasText: `e2e-${STAMP}` })
@@ -593,6 +654,7 @@ await step('설정: API 토큰 발급 → 토큰으로 자동 입력 → 폐기 
   await row.getByRole('button', { name: '폐기' }).click()
   await row.waitFor({ state: 'detached' })
   assert.equal((await post({ Authorization: `Bearer ${token}` })).status, 401)
+  assert.equal((await gqlWith(token)).status, 401)
   await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: body.transaction.id })
 })
 

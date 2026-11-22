@@ -120,7 +120,7 @@ export const PARSE_MESSAGE_QUERY = `query Parse($text: String!) {
   parseMessage(text: $text) { amount merchant date time installmentMonths cancel issuer last4 }
 }`
 
-export const TOKENS_QUERY = `query Tokens { apiTokens { id name tokenPrefix scope createdAt lastUsedAt } }`
+export const TOKENS_QUERY = `query Tokens { apiTokens { id name tokenPrefix createdAt lastUsedAt } }`
 
 // ---------- 뮤테이션 ----------
 
@@ -167,8 +167,8 @@ export const CREATE_LEDGER = `mutation CreateLedger($input: LedgerInput!) { crea
 export const UPDATE_LEDGER = `mutation UpdateLedger($id: Int!, $input: LedgerInput!) { updateLedger(id: $id, input: $input) { id } }`
 export const DELETE_LEDGER = `mutation DeleteLedger($id: Int!) { deleteLedger(id: $id) }`
 
-export const CREATE_TOKEN = `mutation CreateToken($name: String!, $scope: TokenScope! = INGEST) {
-  createApiToken(name: $name, scope: $scope) { token apiToken { id name tokenPrefix scope createdAt lastUsedAt } }
+export const CREATE_TOKEN = `mutation CreateToken($name: String!) {
+  createApiToken(name: $name) { token apiToken { id name tokenPrefix createdAt lastUsedAt } }
 }`
 export const DELETE_TOKEN = `mutation DeleteToken($id: Int!) { deleteApiToken(id: $id) }`
 

@@ -39,6 +39,8 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
                         result = result,
                     )
                 }
+                // 열려 있는 대시보드·최근 내역이 새 거래를 다시 읽는다
+                if (!duplicate) Graph.book.notifyChanged()
                 return Result.success()
             }
             is CashbookApi.Outcome.Rejected -> {

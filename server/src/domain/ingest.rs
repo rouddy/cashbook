@@ -469,7 +469,7 @@ fn hash_text(text: &str) -> String {
 }
 
 /// 자동 입력 규칙을 만들 때 고를 수 있는 값 (`GET /api/ingest/options`).
-/// 자동 입력 전용 토큰으로도 읽을 수 있으므로 이름처럼 규칙에 필요한 것만 담고 거래·금액은 넣지 않는다.
+/// 규칙 화면의 선택 목록이라 이름처럼 규칙에 필요한 것만 담고 거래·금액은 넣지 않는다.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestOptions {

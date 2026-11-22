@@ -1,4 +1,4 @@
-//! 인증: 비밀번호 로그인(암호화 쿠키 세션)과 자동 입력용 API 토큰(Bearer).
+//! 인증: 비밀번호 로그인(암호화 쿠키 세션)과 API 토큰(Bearer). 토큰은 자동 입력과 GraphQL을 모두 쓴다.
 //!
 //! `CASHBOOK_PASSWORD`가 없으면 인증을 끈다 (로컬 전용 실행). 이때는 루프백 주소로만 띄우도록 main에서 막는다.
 
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::config::AppConfig;
-use crate::entity::{api_token, enums::TokenScope};
+use crate::entity::api_token;
 
 pub const SESSION_COOKIE: &str = "cashbook_session";
 pub const SESSION_DAYS: i64 = 30;
@@ -110,12 +110,12 @@ impl LoginLimiter {
     }
 }
 
-/// 인증된 요청. 인증이 꺼져 있으면 항상 `Disabled`.
+/// 인증된 요청 (로그인 세션 또는 API 토큰). 인증이 꺼져 있으면 항상 `Disabled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Auth {
     Disabled,
     Session,
-    Token { id: i32, scope: TokenScope },
+    Token,
 }
 
 /// 403 응답에 보여줄 이유 (요청 로컬 캐시에 남긴다)
@@ -125,10 +125,6 @@ fn forbid<T>(req: &Request<'_>, reason: &'static str) -> Outcome<T, &'static str
     req.local_cache(|| ForbiddenReason(reason));
     Outcome::Error((Status::Forbidden, reason))
 }
-
-/// GraphQL처럼 전체 데이터에 접근하는 요청: 로그인 세션 또는 FULL 토큰만.
-#[derive(Debug, Clone, Copy)]
-pub struct FullAccess;
 
 fn bearer_token<'a>(req: &'a Request<'_>) -> Option<&'a str> {
     req.headers()
@@ -199,7 +195,7 @@ impl<'r> FromRequest<'r> for Auth {
         };
         if let Some(token) = bearer_token(req) {
             return match verify_token(&state.db, token).await {
-                Ok(Some(t)) => Outcome::Success(Auth::Token { id: t.id, scope: t.scope }),
+                Ok(Some(_)) => Outcome::Success(Auth::Token),
                 Ok(None) => Outcome::Error((Status::Unauthorized, "invalid api token")),
                 Err(_) => Outcome::Error((Status::InternalServerError, "database error")),
             };
@@ -210,22 +206,6 @@ impl<'r> FromRequest<'r> for Auth {
             return Outcome::Success(Auth::Session);
         }
         Outcome::Error((Status::Unauthorized, "login required"))
-    }
-}
-
-#[rocket::async_trait]
-impl<'r> FromRequest<'r> for FullAccess {
-    type Error = &'static str;
-
-    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match Auth::from_request(req).await {
-            Outcome::Success(Auth::Token { scope: TokenScope::Ingest, .. }) => {
-                forbid(req, "자동 입력 전용 토큰은 /api/ingest 에만 쓸 수 있습니다")
-            }
-            Outcome::Success(_) => Outcome::Success(FullAccess),
-            Outcome::Error(e) => Outcome::Error(e),
-            Outcome::Forward(f) => Outcome::Forward(f),
-        }
     }
 }
 

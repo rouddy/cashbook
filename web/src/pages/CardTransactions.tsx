@@ -136,7 +136,7 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
         <TransactionGrid
           rows={page.items}
           refMaps={refMaps}
-          columns={['date', 'amount', 'description', 'ledger', 'category', 'benefits', 'benefitAmount', 'memo']}
+          columns={['date', 'amount', 'description', 'ledger', 'category', 'benefits', 'benefitAmount', 'memo', 'excludePerformance']}
           benefitAmounts={txBenefitTexts(report)}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
           selection={sel.grid}

@@ -542,7 +542,8 @@ function MemberPanel({ s, refMaps }: { s: MonthlySummary; refMaps: RefMaps }) {
 /** 카드 소비 계획: 카드별 이번 달 실적이 목표(전월실적 기준)까지 얼마나 남았는지와 혜택 사용 */
 function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) {
   const q = useGql<{ cardsMonthly: CardMonthReport[] }>(['cardsMonthly', month], CARDS_MONTHLY_QUERY, { month })
-  const rows = (q.data?.cardsMonthly ?? []).filter((r) => r.target || r.currentLimit != null || r.spending !== 0 || r.plannedSpending !== 0)
+  // 전월실적(목표·구간)이 있는 카드만. 서버는 실적 단계가 있을 때만 target을 채운다
+  const rows = (q.data?.cardsMonthly ?? []).filter((r): r is CardMonthReport & { target: number } => r.target != null)
   return (
     <Panel title="카드 실적 현황" sub={`${monthLabel(month)} · 실적이 목표(전월실적 기준)에 닿아야 다음 달 혜택을 받습니다`} flush>
       {q.error ? (
@@ -550,7 +551,7 @@ function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) 
       ) : !q.data ? (
         <Loading />
       ) : rows.length === 0 ? (
-        <div className="empty">카드 사용 내역이 없습니다</div>
+        <div className="empty">전월실적 조건이 있는 카드가 없습니다</div>
       ) : (
         <div className="table-wrap">
           <table className="table">
@@ -575,11 +576,11 @@ function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) 
                       <Link to={`/cards/${r.paymentMethodId}?month=${month}`}>{pm?.name}</Link>
                     </td>
                     <td className="hide-sm">
-                      {r.target ? <PerformanceMeter report={r} label={`${pm?.name} 실적`} /> : <span className="muted small">목표 없음</span>}
+                      <PerformanceMeter report={r} label={`${pm?.name} 실적`} />
                     </td>
                     <td className="num">
                       {won(r.performance)}
-                      {r.target ? <span className="muted"> / {won(r.target)}</span> : null}
+                      <span className="muted"> / {won(r.target)}</span>
                       {plannedPerformance(r) !== 0 && (
                         <div className="small muted">
                           {plannedPerformance(r) > 0 && <PlannedSwatch />}
@@ -588,7 +589,7 @@ function CardPlanPanel({ month, refMaps }: { month: string; refMaps: RefMaps }) 
                       )}
                     </td>
                     <td className="num">
-                      {r.target == null ? '-' : r.remainingToTarget ? <b>{won(r.remainingToTarget)}</b> : <span className="good">✓ 달성</span>}
+                      {r.remainingToTarget ? <b>{won(r.remainingToTarget)}</b> : <span className="good">✓ 달성</span>}
                     </td>
                     <td className="num text-2">
                       {r.achievedTier ? won(r.achievedTier.benefitLimit) : r.nextTier ? '구간 미달' : '-'}

@@ -6,13 +6,13 @@
 - **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite 또는 MySQL
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
 - **가져오기 도구**: Python + openpyxl (스프레드시트 xlsx → 정규화 JSON)
-- **안드로이드 자동 입력 앱**: Kotlin · Jetpack Compose (카드 승인 문자·결제 앱 알림 → 자동 입력 API)
+- **안드로이드 앱**: Kotlin · Jetpack Compose (카드 승인 문자·결제 앱 알림 → 자동 입력 API, 대시보드·수동 입력·최근 내역)
 
 | 문서 | 내용 |
 |---|---|
 | [server/README.md](server/README.md) | 서버 코드 구조, GraphQL 리졸버 위치, 데이터베이스 ERD |
 | [web/README.md](web/README.md) | 프론트엔드 코드 구조, 화면 명세 |
-| [android/README.md](android/README.md) | 안드로이드 자동 입력 앱: 문자·앱 알림 규칙, 형식 템플릿, 빌드·시험 |
+| [android/README.md](android/README.md) | 안드로이드 앱: 화면(대시보드·수동 입력·최근 내역·설정), 문자·앱 알림 규칙, 형식 템플릿, 빌드·시험 |
 | [k8s/README.md](k8s/README.md) | Kubernetes 배포: 서버 이미지, 웹 빌드 PVC, DB(SQLite PVC 또는 MySQL), 백업·복원 |
 
 ## 화면
@@ -27,7 +27,7 @@
 | 카드별 내역 `/card-transactions` | 카드별 월 이용 내역과 혜택액 (이용월/결제월 기준). 내용 자동완성은 최근 3개월 내역에서 찾고, 같은 내용이라도 항목이 다르면 따로 보여 줌 |
 | 은행 잔고 `/accounts` | 계좌, 잔고 기록과 이력, 여유자금 포함 여부 |
 | 지출 계획 `/plan` | 카테고리 예산, 배분·구성원 용돈, 반복 지출·수입(정기수익)·장부 이체 규칙 |
-| 설정 `/settings` | 장부, 카드 외 결제수단, 자동 입력 API 토큰과 사용법 |
+| 설정 `/settings` | 장부, 카드 외 결제수단, API 토큰과 자동 입력 사용법 |
 
 화면별 구성, URL 파라미터, 쓰는 API는 [web/README.md](web/README.md#화면-명세)에 있습니다.
 
@@ -132,7 +132,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 - 보호된 API(`/api/graphql`, `/api/ingest`)는 브라우저가 다른 사이트에서 보낸 요청(Origin이 Host와 다름)을 403으로 거부합니다. 자동화 앱처럼 Origin을 보내지 않는 요청은 영향이 없습니다. 프록시가 Host를 바꾸면 `X-Forwarded-Host`를 넘기거나 `CASHBOOK_ALLOWED_ORIGINS`를 설정하세요.
 - 비밀번호 없이(로컬) 실행할 때는 `localhost`/`127.0.0.1` 주소로 온 요청만 받습니다(DNS 리바인딩 방지).
 - 로그인 실패는 IP당 10분에 10번, 전체 10분에 100번까지.
-- API 토큰은 SHA-256 해시만 저장하고, 기본 권한은 **자동 입력 전용**입니다(`/api/ingest`와 규칙용 이름 목록 `/api/ingest/options`만 — 거래 내역·금액은 읽을 수 없음). GraphQL 전체를 스크립트로 쓰려면 설정에서 "전체 API" 토큰을 따로 발급하세요.
+- API 토큰은 SHA-256 해시만 저장하고, 자동 입력(`/api/ingest`)과 GraphQL 전체(내역 읽기·쓰기)를 모두 쓸 수 있습니다(권한 구분 없음). 기기·용도마다 따로 발급하고, 잃어버리거나 유출되면 설정에서 바로 폐기하세요.
 
 ## 핵심 계산 규칙
 
@@ -188,7 +188,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 정산 일정이 없는 신용카드는 카드대금에서 빠지고 경고로 표시됩니다.
 
 ### 카드 실적·혜택 (카드 소비 계획)
-- 실적 = 해당 달(이용일 기준) 카드 이용금액 합계. `실적 제외` 표시 거래와 "혜택받은 금액은 실적 제외" 혜택이 붙은 거래는 뺍니다.
+- 실적 = 해당 달(이용일 기준) 카드 이용금액 합계. `실적 제외` 표시 거래와 "혜택받은 금액은 실적 제외" 혜택이 붙은 거래는 뺍니다. 거래의 `실적 제외`는 결제 입력 폼, 가계부·카드별 내역·카드 상세 그리드의 `실적제외` 체크박스(카드 결제 행, 새 행 포함)에서 켭니다.
 - 이번 달 통합 혜택 한도 = 지난달 실적이 도달한 구간의 한도. 다음 구간까지 남은 금액도 보여줍니다.
 - 실적 표시는 단계식입니다: 전월실적 목표와 구간 기준 금액(예: 30만·60만·100만)을 단계로 삼아 아직 못 넘은 가장 낮은 단계를 목표로 보여주고(`35만 / 60만`), 막대는 마지막 단계를 끝으로 중간 단계마다 구분선을 긋습니다.
 - 건별 혜택 = 이용금액 × 혜택률 (건당 최소 결제금액 미만이면 0, 건당 최대로 제한) → 항목별 월 한도 → 통합 한도를 날짜순으로 누적 적용. 환불은 그 달에 받은 혜택까지만 되돌립니다.
@@ -199,7 +199,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 
 ## 자동 입력 API
 
-여러 플랫폼에서 결제 내역을 자동으로 넣기 위한 REST 엔드포인트입니다. 인증이 켜져 있으면 설정 화면에서 발급한 토큰(기본: 자동 입력 전용)을 `Authorization: Bearer <토큰>`(또는 `X-Api-Key`)으로 보냅니다.
+여러 플랫폼에서 결제 내역을 자동으로 넣기 위한 REST 엔드포인트입니다. 인증이 켜져 있으면 설정 화면에서 발급한 토큰을 `Authorization: Bearer <토큰>`(또는 `X-Api-Key`)으로 보냅니다.
 
 ```bash
 # 카드 승인 문자 원문 그대로 (금액·가맹점·일시·할부·취소·카드사·끝자리를 서버가 해석)
@@ -240,11 +240,11 @@ curl -X POST https://<서버>/api/ingest -H 'Authorization: Bearer cb_...' \
 
 플랫폼별 연결: 아이폰은 단축어 자동화(메시지 수신 → "URL의 콘텐츠 가져오기"로 POST), 안드로이드는 이 저장소의 **자동 입력 앱**([android/](android/README.md) — 보내는 번호·앱별 규칙과 문자 형식 템플릿, 장문 LMS, 재시도)이나 문자 전달 앱·MacroDroid·Tasker의 HTTP 요청으로 같은 엔드포인트를 호출합니다 (설정 화면에 단계별 안내).
 
-GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 "전체 API" 토큰): `mutation { ingestTransaction(input: {text: "..."}) { created duplicate transaction { id } } }`
+GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 API 토큰): `mutation { ingestTransaction(input: {text: "..."}) { created duplicate transaction { id } } }`
 
 ## GraphQL API
 
-엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 "전체 API" 토큰).
+엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 API 토큰).
 전체 스키마는 `/api/graphiql`에서 확인하세요. Query·Mutation 목록과 리졸버 위치는 [server/README.md](server/README.md#graphql-요청)에 있습니다.
 
 그 밖의 REST: `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/health`.
@@ -273,7 +273,7 @@ cd server && cargo test        # 정산 일정·할부·혜택·여유자금·�
 sqlite3 server/data/cashbook.db ".backup /tmp/cashbook-e2e.db"
 (cd server && DATABASE_URL="sqlite:///tmp/cashbook-e2e.db?mode=rwc" CASHBOOK_PASSWORD=e2e-pass \
    CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 cargo run) &
-cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙·장부 이체, 토큰 권한·교차 사이트 차단 (21단계)
+cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙·장부 이체, 토큰·교차 사이트 차단, 실적 제외 체크 (24단계)
 ```
 
 E2E 환경 변수: `E2E_BASE_URL`(기본 `http://127.0.0.1:8001`), `E2E_PASSWORD`(기본 `e2e-pass`), `CHROME_PATH`(기본 macOS Google Chrome 경로).
