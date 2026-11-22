@@ -436,7 +436,7 @@ function CardMonthTransactions({ card, month, refMaps, report }: { card: Payment
         <TransactionGrid
           rows={page.items}
           refMaps={refMaps}
-          columns={['date', 'amount', 'category', 'description', 'benefits', 'benefitAmount', 'member', 'memo']}
+          columns={['date', 'amount', 'category', 'description', 'benefits', 'benefitAmount', 'member', 'memo', 'excludePerformance']}
           benefitAmounts={benefitAmounts}
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
           selection={sel.grid}

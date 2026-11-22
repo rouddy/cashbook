@@ -115,7 +115,7 @@ function EntryForm({ refMaps }: { refMaps: RefMaps }) {
           member: f.member || null,
           status: f.status,
           installmentMonths: f.installmentMonths,
-          excludeFromPerformance: f.excludeFromPerformance,
+          excludeFromPerformance: f.excludeFromPerformance && !!pm?.isCard,
           benefitIds: f.benefitIds,
         },
       })
@@ -280,11 +280,11 @@ function EntryForm({ refMaps }: { refMaps: RefMaps }) {
                 </select>
               </label>
             </div>
-            {pm && pm.benefits.length > 0 && (
+            {pm?.isCard && (
               <div className="field">
-                {pm.name} 혜택
+                {pm.name} {pm.benefits.length > 0 ? '혜택' : '실적'}
                 <div className="row wrap" style={{ gap: 10 }}>
-                  <BenefitChecks benefits={pm.benefits} selected={f.benefitIds} onChange={(ids) => set({ benefitIds: ids })} />
+                  {pm.benefits.length > 0 && <BenefitChecks benefits={pm.benefits} selected={f.benefitIds} onChange={(ids) => set({ benefitIds: ids })} />}
                   <label className="check">
                     <input type="checkbox" checked={f.excludeFromPerformance} onChange={(e) => set({ excludeFromPerformance: e.target.checked })} />
                     전월실적 제외

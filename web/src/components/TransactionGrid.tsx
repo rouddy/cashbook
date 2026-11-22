@@ -23,22 +23,35 @@ export type GridColumn =
   | 'ledger'
   | 'benefits'
   | 'benefitAmount'
+  | 'excludePerformance'
 
-const HEADERS: Record<GridColumn, { label: string; width?: number; num?: boolean }> = {
+/**
+ * 열 폭. `flex` 열(내용·메모)은 남는 폭을 그 비율로 나눈다: 머리글 최소 폭을 비율대로 두고
+ * (자동 표 배치는 남는 폭을 폭 지정 없는 열의 최대 내용 폭에 비례해 나눈다) 칸 안의 글은 `cell-fill`로 열 폭에 넣지 않는다.
+ */
+const HEADERS: Record<GridColumn, { label: string; width?: number; flex?: number; num?: boolean; center?: boolean }> = {
   date: { label: '날짜', width: 84 },
   amount: { label: '금액', width: 96, num: true },
   category: { label: '항목', width: 88 },
   paymentMethod: { label: '결제수단', width: 108 },
-  // 내용은 남는 폭을 쓴다
-  description: { label: '내용' },
+  description: { label: '내용', flex: 3 },
   member: { label: '구성원', width: 60 },
-  memo: { label: '메모', width: 110 },
+  memo: { label: '메모', flex: 2 },
   ledger: { label: '장부', width: 64 },
   benefits: { label: '혜택', width: 120 },
   benefitAmount: { label: '혜택액', width: 72, num: true },
+  excludePerformance: { label: '실적제외', width: 64, center: true },
 }
 
-/** 편집 가능한 열 (혜택액은 계산값) */
+/** flex 1당 최소 폭 (내용 120px · 메모 80px) */
+const FLEX_MIN = 40
+
+/** flex 열 칸의 내용은 열 폭 계산에서 빼고 칸을 채운다 */
+function fill(col: GridColumn, node: ReactNode): ReactNode {
+  return HEADERS[col].flex ? <div className="cell-fill">{node}</div> : node
+}
+
+/** 편집 가능한 열 (혜택액은 계산값, 실적제외는 편집 모드 없이 체크박스로 바로 바꾼다) */
 const EDITABLE: GridColumn[] = ['date', 'amount', 'category', 'paymentMethod', 'description', 'member', 'memo', 'ledger', 'benefits']
 
 /**
@@ -51,6 +64,16 @@ function canEdit(tx: Transaction, col: GridColumn, viewLedgerId: number | null |
   if (dir && (col === 'paymentMethod' || col === 'benefits')) return false
   if (dir === 'in' && col === 'category') return false
   return true
+}
+
+/** 전월실적은 카드 결제에만 있다 (장부 이체는 결제수단이 없고 서버가 실적 제외를 늘 끈다) */
+function isCardPayment(refMaps: RefMaps, paymentMethodId: number | null): boolean {
+  return !!refMaps.paymentMethodById.get(paymentMethodId ?? -1)?.isCard
+}
+
+/** 실적제외 체크박스를 보일 행: 카드 결제, 또는 카드가 아닌데 켜져 있는 행(끌 수 있게) */
+function showsPerfCheck(tx: Transaction, refMaps: RefMaps): boolean {
+  return tx.transferLedgerId == null && (tx.excludeFromPerformance || isCardPayment(refMaps, tx.paymentMethodId))
 }
 
 interface Props {
@@ -236,10 +259,12 @@ export default function TransactionGrid({
         const v = benefitAmounts?.get(tx.id)
         return v || <span className="muted">-</span>
       }
+      case 'excludePerformance':
+        return null
     }
   }
 
-  const onCellKey = (e: KeyboardEvent<HTMLButtonElement>, r: number, c: number, tx: Transaction, col: GridColumn) => {
+  const onCellKey = (e: KeyboardEvent<HTMLElement>, r: number, c: number, tx: Transaction, col: GridColumn) => {
     const moves: Record<string, [number, number]> = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }
     if (moves[e.key]) {
       e.preventDefault()
@@ -283,7 +308,14 @@ export default function TransactionGrid({
           <tr>
             <th className="rownum">{selection ? <SelectAll rows={view} selection={selection} /> : '#'}</th>
             {columns.map((c) => (
-              <th key={c} style={{ width: HEADERS[c].width, textAlign: HEADERS[c].num ? 'right' : 'left' }}>
+              <th
+                key={c}
+                style={{
+                  width: HEADERS[c].width,
+                  minWidth: HEADERS[c].flex ? HEADERS[c].flex * FLEX_MIN : undefined,
+                  textAlign: HEADERS[c].num ? 'right' : HEADERS[c].center ? 'center' : 'left',
+                }}
+              >
                 {HEADERS[c].label}
               </th>
             ))}
@@ -324,34 +356,51 @@ export default function TransactionGrid({
                     )}
                   </td>
                   {columns.map((col, c) => {
+                    if (col === 'excludePerformance' && showsPerfCheck(tx, refMaps)) {
+                      return (
+                        <td key={col}>
+                          <label className="row-check" title="이 거래를 카드 전월실적에서 뺍니다">
+                            <input
+                              type="checkbox"
+                              data-cell={`${gridId}:${r}:${c}`}
+                              aria-label={`${tx.description} ${won(tx.amount)}원 전월실적 제외`}
+                              checked={tx.excludeFromPerformance}
+                              onChange={(e) => save(tx, { excludeFromPerformance: e.target.checked }, { excludeFromPerformance: e.target.checked })}
+                              onKeyDown={(e) => onCellKey(e, r, c, tx, col)}
+                            />
+                          </label>
+                        </td>
+                      )
+                    }
                     const isEditing = editing?.id === tx.id && editing.col === col
+                    const content = isEditing ? (
+                      <CellEditor
+                        tx={tx}
+                        col={col}
+                        refMaps={refMaps}
+                        suggestScope={suggestScope}
+                        onCommit={(v, move) => {
+                          commit(tx, col, v)
+                          stopEditing(tx, col, r, c, move)
+                        }}
+                        onCancel={() => stopEditing(tx, col, r, c, 'stay')}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className={`cell-btn ${HEADERS[col].num ? 'num' : ''}`}
+                        data-cell={`${gridId}:${r}:${c}`}
+                        onClick={() => canEdit(tx, col, viewLedgerId) && setEditing({ id: tx.id, col })}
+                        onKeyDown={(e) => onCellKey(e, r, c, tx, col)}
+                        title={col === 'description' || col === 'memo' ? String(display(tx, col) ?? '') : undefined}
+                        style={{ cursor: canEdit(tx, col, viewLedgerId) ? 'text' : 'default' }}
+                      >
+                        {display(tx, col, view[r - 1])}
+                      </button>
+                    )
                     return (
                       <td key={col} style={{ position: 'relative' }}>
-                        {isEditing ? (
-                          <CellEditor
-                            tx={tx}
-                            col={col}
-                            refMaps={refMaps}
-                            suggestScope={suggestScope}
-                            onCommit={(v, move) => {
-                              commit(tx, col, v)
-                              stopEditing(tx, col, r, c, move)
-                            }}
-                            onCancel={() => stopEditing(tx, col, r, c, 'stay')}
-                          />
-                        ) : (
-                          <button
-                            type="button"
-                            className={`cell-btn ${HEADERS[col].num ? 'num' : ''}`}
-                            data-cell={`${gridId}:${r}:${c}`}
-                            onClick={() => canEdit(tx, col, viewLedgerId) && setEditing({ id: tx.id, col })}
-                            onKeyDown={(e) => onCellKey(e, r, c, tx, col)}
-                            title={col === 'description' || col === 'memo' ? String(display(tx, col) ?? '') : undefined}
-                            style={{ cursor: canEdit(tx, col, viewLedgerId) ? 'text' : 'default' }}
-                          >
-                            {display(tx, col, view[r - 1])}
-                          </button>
-                        )}
+                        {fill(col, content)}
                       </td>
                     )
                   })}
@@ -516,9 +565,7 @@ function SplitSubRow({ part, tx, columns, refMaps }: { part: SplitPart; tx: Tran
     <tr className="split-sub" aria-label={`${ledger}에 나눈 몫 ${won(part.amount)}원`}>
       <td className="rownum">↳</td>
       {columns.map((col) => (
-        <td key={col}>
-          <div className={`sub-cell ${HEADERS[col].num ? 'num' : ''}`}>{cell(col)}</div>
-        </td>
+        <td key={col}>{fill(col, <div className={`sub-cell ${HEADERS[col].num ? 'num' : ''}`}>{cell(col)}</div>)}</td>
       ))}
       <td />
     </tr>
@@ -544,11 +591,6 @@ function StatusBadges({ tx, overdue, refMaps }: { tx: Transaction; overdue: bool
         </span>
       )}
       {tx.installmentMonths > 1 && <span className="badge">{tx.installmentMonths}개월</span>}
-      {tx.excludeFromPerformance && (
-        <span className="badge" title="카드 전월실적 제외">
-          실적제외
-        </span>
-      )}
     </>
   )
 }
@@ -849,6 +891,7 @@ interface NewRowState {
   memo: string
   ledgerId: string
   status: TxStatus
+  excludeFromPerformance: boolean
 }
 
 function NewRow({
@@ -876,12 +919,14 @@ function NewRow({
     memo: '',
     ledgerId: initialLedger ? String(initialLedger) : '',
     status: 'CONFIRMED',
+    excludeFromPerformance: false,
     ...keep,
   })
   const [s, setS] = useState<NewRowState>(() => blank())
   const set = (patch: Partial<NewRowState>) => setS((prev) => ({ ...prev, ...patch }))
 
   const ledgerForCategories = s.ledgerId ? Number(s.ledgerId) : null
+  const perfApplies = parseTransferOption(s.categoryId) == null && isCardPayment(refMaps, s.paymentMethodId ? Number(s.paymentMethodId) : null)
 
   const pick = (sug: Suggestion) => {
     const ledgerColumn = columns.includes('ledger')
@@ -927,6 +972,7 @@ function NewRow({
           memo: s.memo || null,
           member: s.member || null,
           status: s.status,
+          excludeFromPerformance: perfApplies && s.excludeFromPerformance,
         },
       })
       if (!created) return
@@ -1031,6 +1077,19 @@ function NewRow({
             ))}
           </select>
         )
+      case 'excludePerformance':
+        return (
+          <label className="row-check" title={perfApplies ? '이 거래를 카드 전월실적에서 뺍니다' : '카드 결제만 전월실적이 있습니다'}>
+            <input
+              type="checkbox"
+              aria-label="전월실적 제외"
+              checked={perfApplies && s.excludeFromPerformance}
+              disabled={!perfApplies}
+              onChange={(e) => set({ excludeFromPerformance: e.target.checked })}
+              onKeyDown={enter}
+            />
+          </label>
+        )
       default:
         return null
     }
@@ -1041,7 +1100,7 @@ function NewRow({
       <td className="rownum">＋</td>
       {columns.map((col) => (
         <Fragment key={col}>
-          <td>{cell(col)}</td>
+          <td>{fill(col, cell(col))}</td>
         </Fragment>
       ))}
       <td>
