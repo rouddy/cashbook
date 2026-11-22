@@ -101,6 +101,9 @@ private data class SuggestionsData(val descriptionSuggestions: List<Suggestion>)
 private data class CreateData(val createTransaction: SavedTx)
 
 @Serializable
+private data class UpdateData(val updateTransaction: Tx)
+
+@Serializable
 private data class ConfirmData(val confirmTransaction: SavedTx)
 
 @Serializable
@@ -173,6 +176,15 @@ class BookRepository(private val store: Store) {
     suspend fun create(input: JsonObject): SavedTx =
         query(Queries.CREATE_TX, buildJsonObject { put("input", input) }, CreateData.serializer()).createTransaction
             .also { notifyChanged() }
+
+    /** [patch]는 [TxEditRules.toPatch]가 만든 바뀐 값만 */
+    suspend fun update(id: Int, patch: JsonObject): Tx {
+        val variables = buildJsonObject {
+            put("id", id)
+            put("input", patch)
+        }
+        return query(Queries.UPDATE_TX, variables, UpdateData.serializer()).updateTransaction.also { notifyChanged() }
+    }
 
     suspend fun confirm(id: Int): SavedTx =
         query(Queries.CONFIRM_TX, buildJsonObject { put("id", id) }, ConfirmData.serializer()).confirmTransaction
