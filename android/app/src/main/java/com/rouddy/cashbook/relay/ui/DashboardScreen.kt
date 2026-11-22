@@ -397,7 +397,7 @@ private fun CardsPanel(cards: List<CardReport>, ref: RefData, month: YearMonth, 
     val rows = cards.filter { it.worthShowing }
     Panel(modifier = modifier, title = "카드 실적 현황", sub = "${monthTitle(month)} · 실적이 목표에 닿아야 다음 달 혜택을 받습니다") {
         if (rows.isEmpty()) {
-            EmptyText("카드 사용 내역이 없습니다")
+            EmptyText("전월실적 조건이 있는 카드가 없습니다")
             return@Panel
         }
         rows.forEachIndexed { i, r ->
@@ -415,9 +415,7 @@ private fun CardRow(r: CardReport, name: String) {
     Column(Modifier.padding(vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(name, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-            val target = r.target
             when {
-                target == null -> Text("목표 없음", style = MaterialTheme.typography.bodySmall, color = muted)
                 (r.remainingToTarget ?: 0) > 0 -> Text("목표까지 ${amountText(r.remainingToTarget ?: 0)}원", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
                 else -> Text("✓ 달성", style = MaterialTheme.typography.bodyMedium, color = colors.goodText, fontWeight = FontWeight.SemiBold)
             }

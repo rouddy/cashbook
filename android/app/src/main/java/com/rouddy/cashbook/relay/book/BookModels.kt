@@ -171,8 +171,8 @@ data class CardReport(
     /** 예정 거래가 이번 달 실적에 더하는 금액 (웹 `plannedPerformance`) */
     val plannedPerformance: Long get() = projectedPerformance - performance
 
-    /** 웹 대시보드와 같은 기준: 목표·한도가 있거나 이번 달 사용이 있는 카드만 */
-    val worthShowing: Boolean get() = target != null || currentLimit != null || spending != 0L || plannedSpending != 0L
+    /** 웹 대시보드와 같은 기준: 전월실적(목표·구간)이 있는 카드만. 서버는 실적 단계가 있을 때만 target을 채운다 */
+    val worthShowing: Boolean get() = target != null
 }
 
 @Serializable
