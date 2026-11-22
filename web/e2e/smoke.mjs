@@ -497,6 +497,122 @@ await step('가계부·카드별 내역: 실적제외 체크박스로 전월실�
   }
 })
 
+await step('가족카드: 카드 상세·카드 추가에서 추가 → 실적·혜택·결제 예정 금액은 본인 카드에 합산, 대시보드 실적엔 본인 카드만', async () => {
+  const created = await gql(`mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id } } }`, {
+    input: {
+      name: `E2E본인${STAMP}`,
+      kind: 'CREDIT_CARD',
+      issuer: '현대',
+      paymentDay: 25,
+      closingDay: 11,
+      closingMonthOffset: 0,
+      monthlyTarget: 300000,
+      benefits: [{ name: '할인10', rate: 0.1, sharesCardLimit: false }],
+    },
+  })
+  const parent = created.data.createPaymentMethod
+  const benefitId = parent.benefits[0].id
+  const familyIds = []
+  const txIds = []
+  try {
+    // 카드 상세의 가족카드 추가: 가족카드 체크·본인 카드가 골라진 채로 열리고, 정산 일정·실적 목표·혜택 입력은 없다
+    await page.goto(`${BASE}/cards/${parent.id}?month=2026-08`)
+    await page.getByRole('button', { name: '+ 가족카드 추가' }).click()
+    const modal = page.getByRole('dialog')
+    assert.equal(await modal.getByRole('checkbox', { name: '가족카드' }).isChecked(), true)
+    assert.equal(await modal.getByLabel('본인 카드 *').inputValue(), String(parent.id))
+    assert.equal(await modal.getByLabel('이름 *').inputValue(), `E2E본인${STAMP} 가족`)
+    assert.equal(await modal.getByLabel('카드사').inputValue(), '현대')
+    assert.equal(await modal.getByLabel('결제일').count(), 0)
+    assert.equal(await modal.getByLabel('전월실적 목표').count(), 0)
+    assert.equal(await modal.getByRole('button', { name: '+ 혜택 추가' }).count(), 0)
+    await modal.getByLabel('카드번호 끝 4자리').fill('4321')
+    await modal.getByLabel('연회비').fill('5000')
+    await modal.getByRole('button', { name: '추가', exact: true }).click()
+    await page.getByRole('heading', { name: `E2E본인${STAMP} 가족`, exact: true }).waitFor()
+    const familyId = Number(page.url().match(/cards\/(\d+)/)[1])
+    familyIds.push(familyId)
+    const info = page.locator('dl.kv')
+    await info.getByText('매월 25일 결제 · 전월 12일 ~ 당월 11일 이용').waitFor()
+    await info.getByText('5,000원').waitFor()
+    await info.getByRole('link', { name: `E2E본인${STAMP}`, exact: true }).waitFor()
+    assert.equal(await page.getByRole('button', { name: '+ 가족카드 추가' }).count(), 0, '가족카드 아래에는 가족카드를 두지 않는다')
+
+    // 가족카드 거래에 본인 카드 혜택을 고르고, 실적·혜택은 본인 카드와 합친다
+    for (const [pm, amount, benefitIds] of [
+      [familyId, 200000, [benefitId]],
+      [parent.id, 150000, []],
+    ]) {
+      const tx = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id benefitIds } }`, {
+        input: { date: '2026-08-10', amount, paymentMethodId: pm, description: `E2E가족결제${STAMP}`, benefitIds },
+      })
+      txIds.push(tx.data.createTransaction.id)
+      assert.deepEqual(tx.data.createTransaction.benefitIds, benefitIds)
+    }
+    const monthly = await gql(`{ cardsMonthly(month: "2026-08") { paymentMethodId spending performance discountTotal } }`)
+    const ids = monthly.data.cardsMonthly.map((r) => r.paymentMethodId)
+    assert.ok(!ids.includes(familyId), '전월실적 목록에 가족카드는 없다')
+    assert.deepEqual(
+      monthly.data.cardsMonthly.find((r) => r.paymentMethodId === parent.id),
+      { paymentMethodId: parent.id, spending: 150000, performance: 350000, discountTotal: 20000 },
+    )
+    await page.goto(`${BASE}/cards/${parent.id}?month=2026-08`)
+    // 실적·혜택과 결제 예정 금액 둘 다 가족카드 이용을 합친다
+    const included = page.getByText(`가족카드 E2E본인${STAMP} 가족 이용 포함`)
+    await included.first().waitFor()
+    assert.equal(await included.count(), 2)
+    await page.locator('.stat-value', { hasText: '350,000원' }).waitFor()
+    await page.locator('dl.kv').getByRole('link', { name: `E2E본인${STAMP} 가족` }).waitFor()
+
+    // 대시보드 카드 실적 현황: 본인 카드는 있고 가족카드는 없다
+    await page.goto(`${BASE}/?month=2026-08`)
+    const plan = page.locator('section.panel', { has: page.getByRole('heading', { name: '카드 실적 현황' }) })
+    await plan.getByRole('link', { name: `E2E본인${STAMP}`, exact: true }).waitFor()
+    assert.equal(await plan.getByRole('link', { name: `E2E본인${STAMP} 가족` }).count(), 0)
+
+    // 카드별 내역: 가족카드는 본인 카드 바로 아래, 이용금액은 따로이고 리포트는 본인 카드 것
+    await page.goto(`${BASE}/card-transactions?month=2026-08&card=${familyId}`)
+    const side = page.locator('.side-list button')
+    await side.filter({ hasText: `E2E본인${STAMP} 가족` }).waitFor()
+    const names = await side.locator('b').allTextContents()
+    assert.equal(names[names.indexOf(`E2E본인${STAMP}`) + 1], `E2E본인${STAMP} 가족`)
+    await side.filter({ hasText: `E2E본인${STAMP} 가족` }).getByText('200,000').waitFor()
+    await page.getByText(`본인 카드 E2E본인${STAMP}의 실적·혜택을 함께 씁니다`).waitFor()
+    await page.locator('table.sheet tbody tr', { hasText: `E2E가족결제${STAMP}` }).getByText('할인10').waitFor()
+
+    // 결제 예정 금액: 가족카드 이용은 본인 카드 청구서에 합쳐진다 (가족카드 청구서는 그 카드 이용분)
+    const bill = () => `statements(from: "2026-08", to: "2026-08") { confirmedAmount }`
+    const bills = await gql(`{ p: paymentMethod(id: ${parent.id}) { ${bill()} } f: paymentMethod(id: ${familyId}) { ${bill()} } }`)
+    assert.equal(bills.data.p.statements[0].confirmedAmount, 350000)
+    assert.equal(bills.data.f.statements[0].confirmedAmount, 200000)
+    await page.goto(`${BASE}/card-transactions?month=2026-08&card=${parent.id}&mode=statement`)
+    await page.getByText(`가족카드 E2E본인${STAMP} 가족 이용 포함`).waitFor()
+    const familyLine = page.locator('table tbody tr', { hasText: `E2E본인${STAMP} 가족` })
+    await familyLine.getByText('200,000').waitFor()
+    await page.getByText('결제 금액 (2건)').waitFor()
+
+    // 카드 추가 화면: 가족카드를 체크하고 본인 카드를 고른다
+    await page.goto(`${BASE}/cards`)
+    await page.getByRole('button', { name: '+ 카드 추가' }).click()
+    const add = page.getByRole('dialog')
+    await add.getByLabel('결제일').waitFor()
+    await add.getByRole('checkbox', { name: '가족카드' }).check()
+    assert.equal(await add.getByLabel('결제일').count(), 0)
+    await add.getByLabel('본인 카드 *').selectOption(String(parent.id))
+    await add.getByLabel('이름 *').fill(`E2E가족둘${STAMP}`)
+    await add.getByRole('button', { name: '추가', exact: true }).click()
+    await page.getByRole('heading', { name: `E2E가족둘${STAMP}`, exact: true }).waitFor()
+    familyIds.push(Number(page.url().match(/cards\/(\d+)/)[1]))
+    const second = await gql(`query($id: Int!) { paymentMethod(id: $id) { parentId kind paymentDay issuer benefits { id } } }`, { id: familyIds[1] })
+    assert.deepEqual(second.data.paymentMethod, { parentId: parent.id, kind: 'CREDIT_CARD', paymentDay: 25, issuer: '현대', benefits: [{ id: benefitId }] })
+  } finally {
+    for (const id of txIds) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id })
+    for (const id of familyIds) await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id })
+    const del = await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: parent.id })
+    assert.equal(del.data.deletePaymentMethod.deleted, true, '가족카드를 먼저 지우면 본인 카드도 지워진다')
+  }
+})
+
 await step('은행 잔고: 계좌 추가 → 잔고 기록 → 이력', async () => {
   await page.goto(`${BASE}/accounts`)
   await page.getByRole('button', { name: '+ 계좌 추가' }).click()

@@ -4,6 +4,7 @@ use super::enums::PaymentKind;
 
 /// 결제수단. 카드(신용/체크)와 현금·계좌이체 등을 함께 관리한다.
 /// 신용카드는 `payment_day`/`closing_day`/`closing_month_offset`으로 정산 일정을 정의한다.
+/// 가족카드(`parent_id`)는 본인 카드와 전월실적·혜택을 함께 쓰고, 종류·결제 계좌·정산 일정은 본인 카드 것을 복사해 둔다.
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, async_graphql::SimpleObject)]
 #[sea_orm(table_name = "payment_methods")]
 #[graphql(name = "PaymentMethod", complex)]
@@ -39,9 +40,16 @@ pub struct Model {
     pub sort_order: i32,
     pub archived: bool,
     pub created_at: DateTimeUtc,
+    /// 가족카드면 본인 카드 id. 본인 카드의 혜택·전월실적 구간·목표를 쓰고 실적도 본인 카드에 합산한다.
+    pub parent_id: Option<i32>,
 }
 
 impl Model {
+    /// 혜택·전월실적 구간·실적 목표를 가진 카드: 가족카드면 본인 카드, 아니면 자기 자신.
+    pub fn benefit_card_id(&self) -> i32 {
+        self.parent_id.unwrap_or(self.id)
+    }
+
     pub fn alias_list(&self) -> Vec<String> {
         self.aliases
             .as_deref()

@@ -438,7 +438,7 @@ async fn check_payment_method<C: ConnectionTrait>(db: &C, id: Option<i32>) -> Re
 }
 
 /// 고른 혜택 id 중 결제수단 카드의 혜택만 돌려준다 (다른 카드의 id는 버린다, 결제수단이 없으면 빈 목록).
-/// 중복 적용 혜택이 아닌 것을 둘 이상 고르면 거절한다. 거래와 반복 규칙이 같이 쓴다.
+/// 가족카드는 본인 카드의 혜택을 쓴다. 중복 적용 혜택이 아닌 것을 둘 이상 고르면 거절한다. 거래와 반복 규칙이 같이 쓴다.
 pub(super) async fn card_benefits_of<C: ConnectionTrait>(
     db: &C,
     payment_method_id: Option<i32>,
@@ -448,8 +448,9 @@ pub(super) async fn card_benefits_of<C: ConnectionTrait>(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
+    let card = payment_method::Entity::find_by_id(pid).one(db).await?.map_or(pid, |p| p.benefit_card_id());
     let valid = card_benefit::Entity::find()
-        .filter(card_benefit::Column::PaymentMethodId.eq(pid))
+        .filter(card_benefit::Column::PaymentMethodId.eq(card))
         .filter(card_benefit::Column::Id.is_in(ids.to_vec()))
         .all(db)
         .await?;

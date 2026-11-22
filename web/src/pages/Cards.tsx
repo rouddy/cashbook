@@ -9,6 +9,7 @@ import { ErrorBox, Loading, PerformanceMeter, PlannedSwatch } from '../component
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
 import { benefitTotalsText, hasBenefit, plannedPerformance } from '../lib/benefits'
+import { familyCardsOf, withFamilyOrder } from '../lib/cards'
 import { PAYMENT_KIND_LABEL, shortDate, signedWon, won } from '../lib/format'
 import { currentMonth } from '../lib/month'
 
@@ -33,14 +34,19 @@ export default function Cards() {
   if (error) return <ErrorBox error={error} />
   if (!ref) return <Loading />
 
+  // 가족카드는 실적이 본인 카드 리포트에 합쳐져 따로 오지 않는다
   const reportOf = new Map((reports.data?.cardsMonthly ?? []).map((r) => [r.paymentMethodId, r]))
-  const list = cards.data?.paymentMethods ?? []
+  const list = withFamilyOrder(cards.data?.paymentMethods ?? [], (c) => c)
 
   const remove = async (c: CardRow) => {
+    const family = familyCardsOf(ref, c.id).filter((f) => !f.archived)
+    const familyNote = family.length ? ` 가족카드 ${family.map((f) => f.name).join(', ')}도 함께 보관합니다.` : ''
     const msg =
       c.transactionCount > 0
-        ? `'${c.name}'에 거래 ${c.transactionCount}건이 있어 삭제 대신 보관합니다. 내역은 그대로 남고 목록과 입력 선택지에서 빠집니다. 계속할까요?`
-        : `'${c.name}'을(를) 삭제할까요?`
+        ? `'${c.name}'에 거래 ${c.transactionCount}건이 있어 삭제 대신 보관합니다. 내역은 그대로 남고 목록과 입력 선택지에서 빠집니다.${familyNote} 계속할까요?`
+        : family.length
+          ? `'${c.name}'에 가족카드가 있어 삭제 대신 보관합니다.${familyNote} 계속할까요?`
+          : `'${c.name}'을(를) 삭제할까요?`
     if (!window.confirm(msg)) return
     const r = await run<{ deletePaymentMethod: { deleted: boolean; archived: boolean } }>(DELETE_PM, { id: c.id })
     if (!r) return
@@ -70,6 +76,8 @@ export default function Cards() {
           {list.map((c) => {
             const r = reportOf.get(c.id)
             const next = c.nextPayment
+            const parent = c.parentId != null ? ref.paymentMethodById.get(c.parentId) : undefined
+            const familyCount = familyCardsOf(ref, c.id).filter((f) => !f.archived).length
             return (
               <article key={c.id} className="panel card-tile" style={c.archived ? { opacity: 0.65 } : undefined}>
                 <div className="row">
@@ -84,6 +92,7 @@ export default function Cards() {
                   </div>
                   <span className="spacer" />
                   <span className="badge">{PAYMENT_KIND_LABEL[c.kind]}</span>
+                  {parent && <span className="badge">가족카드</span>}
                   {c.archived && <span className="badge">보관</span>}
                 </div>
                 {c.kind === 'CREDIT_CARD' &&
@@ -93,21 +102,37 @@ export default function Cards() {
                     </div>
                   ) : (
                     <div className="small">
-                      <span className="badge warn">! 정산 일정 미설정</span> <Link to={`/cards/${c.id}?edit=1`}>입력하기</Link>
+                      <span className="badge warn">! 정산 일정 미설정</span>{' '}
+                      <Link to={`/cards/${parent?.id ?? c.id}?edit=1`}>{parent ? '본인 카드에서 입력' : '입력하기'}</Link>
                     </div>
                   ))}
                 {next && (
                   <div className="row" style={{ alignItems: 'baseline' }}>
-                    <span className="text-2 small">다음 결제 {shortDate(next.paymentDate)}</span>
+                    <span className="text-2 small">
+                      다음 결제 {shortDate(next.paymentDate)}
+                      {parent ? ' · 본인 카드에 합산' : familyCount > 0 ? ' · 가족카드 포함' : ''}
+                    </span>
                     <span className="spacer" />
-                    <span style={{ fontWeight: 650 }}>{won(next.confirmedAmount)}원</span>
+                    {/* 가족카드는 본인 카드 청구서에 들어가는 이용분이라 굵게 강조하지 않는다 */}
+                    <span style={parent ? undefined : { fontWeight: 650 }}>{won(next.confirmedAmount)}원</span>
                     {next.plannedAmount !== 0 && <span className="small muted">+예정 {won(next.plannedAmount)}</span>}
+                  </div>
+                )}
+                {parent && (
+                  <div className="row small">
+                    <span className="text-2">
+                      본인 카드 <Link to={`/cards/${parent.id}`}>{parent.name}</Link>의 실적·혜택을 함께 씀
+                    </span>
+                    <span className="spacer" />
+                    {c.annualFee ? <span className="muted">연회비 {won(c.annualFee)}원</span> : null}
                   </div>
                 )}
                 {r && (
                   <div>
                     <div className="row small" style={{ marginBottom: 4 }}>
-                      <span className="text-2">이번 달 실적</span>
+                      <span className="text-2">
+                        이번 달 실적{familyCount > 0 && <span className="muted"> · 가족카드 {familyCount}장 포함</span>}
+                      </span>
                       <span className="spacer" />
                       <span>
                         {won(r.performance)}

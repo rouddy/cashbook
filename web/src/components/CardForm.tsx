@@ -5,7 +5,8 @@ import { type RefMaps, useMutate } from '../api/hooks'
 import { CREATE_PM, SUGGEST_BILLING, UPDATE_PM } from '../api/queries'
 import type { BenefitKind, PaymentKind, PaymentMethod } from '../api/types'
 import { BENEFIT_KIND_LABEL, BENEFIT_KINDS, BENEFIT_UNIT, rateToWonPerMile, wonPerMileToRate } from '../lib/benefits'
-import { parseAmount, percentToRate, rateToPercent, won } from '../lib/format'
+import { familyCardsOf } from '../lib/cards'
+import { PAYMENT_KIND_LABEL, parseAmount, percentToRate, rateToPercent, won } from '../lib/format'
 import { useToast } from './Toast'
 
 const ISSUERS = ['KB국민', '신한', '현대', '삼성', '롯데', '하나', '우리', 'BC', 'NH농협', 'IBK기업', '씨티', '카카오뱅크', '토스']
@@ -45,21 +46,34 @@ export default function CardForm({
   card,
   refMaps,
   kinds = ['CREDIT_CARD', 'CHECK_CARD'],
+  familyOf,
   onDone,
   onCancel,
 }: {
   card?: PaymentMethod
   refMaps: RefMaps
   kinds?: PaymentKind[]
+  /** 새 카드를 이 카드의 가족카드로 추가한다 (가족카드 체크·본인 카드 선택이 된 채로 연다) */
+  familyOf?: number
   onDone: (id: number) => void
   onCancel?: () => void
 }) {
   const toast = useToast()
   const { run, pending } = useMutate()
-  const [name, setName] = useState(card?.name ?? '')
+  const preset = card ? undefined : refMaps.paymentMethodById.get(familyOf ?? -1)
+  // 가족카드는 본인 카드와 실적·혜택을 함께 쓴다. 본인 카드는 가족카드가 아닌 카드이고, 가족카드가 있는 카드는 가족카드가 될 수 없다
+  const canBeFamily = kinds.some((k) => k === 'CREDIT_CARD' || k === 'CHECK_CARD')
+  const familyCount = card ? familyCardsOf(refMaps, card.id).length : 0
+  const parentChoices = refMaps.paymentMethods.filter(
+    (p) => p.isCard && p.parentId == null && p.id !== card?.id && (!p.archived || p.id === card?.parentId),
+  )
+  const [family, setFamily] = useState(card ? card.parentId != null : preset != null)
+  const [parentId, setParentId] = useState(numStr(card ? card.parentId : preset?.id))
+  const parent = family ? refMaps.paymentMethodById.get(Number(parentId) || -1) : undefined
+  const [name, setName] = useState(card?.name ?? (preset ? `${preset.name} 가족` : ''))
   const [kind, setKind] = useState<PaymentKind>(card?.kind ?? kinds[0])
-  const [issuer, setIssuer] = useState(card?.issuer ?? '')
-  const [productName, setProductName] = useState(card?.productName ?? '')
+  const [issuer, setIssuer] = useState(card?.issuer ?? preset?.issuer ?? '')
+  const [productName, setProductName] = useState(card?.productName ?? preset?.productName ?? '')
   const [last4, setLast4] = useState(card?.last4 ?? '')
   const [aliases, setAliases] = useState((card?.aliases ?? []).join(', '))
   const [accountId, setAccountId] = useState(numStr(card?.accountId))
@@ -70,9 +84,11 @@ export default function CardForm({
   const [annualFee, setAnnualFee] = useState(numStr(card?.annualFee))
   const [expiresOn, setExpiresOn] = useState(card?.expiresOn ?? '')
   const [memo, setMemo] = useState(card?.memo ?? '')
+  // 가족카드의 혜택·구간은 본인 카드 것이라 id 없이 담는다 (가족카드에서 풀면 이 카드 설정으로 복사)
+  const ownBenefits = card?.parentId == null
   const [benefits, setBenefits] = useState<BenefitRow[]>(
     (card?.benefits ?? []).map((b) => ({
-      id: b.id,
+      id: ownBenefits ? b.id : undefined,
       name: b.name,
       kind: b.kind,
       rateInput: rateToInput(b.kind, b.rate),
@@ -86,9 +102,26 @@ export default function CardForm({
   )
   const [tiers, setTiers] = useState<TierRow[]>((card?.tiers ?? []).map((t) => ({ minSpending: String(t.minSpending), benefitLimit: String(t.benefitLimit) })))
 
-  const isCredit = kind === 'CREDIT_CARD'
-  const isCard = kind === 'CREDIT_CARD' || kind === 'CHECK_CARD'
+  // 가족카드는 종류·결제 계좌·정산 일정이 본인 카드를 따르고 실적 목표·혜택·구간을 따로 두지 않는다
+  const effectiveKind = family && parent ? parent.kind : kind
+  const isCredit = !family && effectiveKind === 'CREDIT_CARD'
+  const isCard = effectiveKind === 'CREDIT_CARD' || effectiveKind === 'CHECK_CARD'
+  const ownSettings = isCard && !family
   const billingFilled = paymentDay !== '' && closingDay !== ''
+
+  const chooseParent = (value: string) => {
+    setParentId(value)
+    const p = refMaps.paymentMethodById.get(Number(value) || -1)
+    if (!p) return
+    if (!issuer.trim()) setIssuer(p.issuer ?? '')
+    if (!productName.trim()) setProductName(p.productName ?? '')
+    if (!name.trim()) setName(`${p.name} 가족`)
+  }
+
+  const toggleFamily = (on: boolean) => {
+    setFamily(on)
+    if (on && !parentId && parentChoices.length === 1) chooseParent(String(parentChoices[0].id))
+  }
 
   const suggest = async () => {
     if (!paymentDay) {
@@ -103,22 +136,27 @@ export default function CardForm({
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     const amountOrNull = (s: string) => (s.trim() === '' ? null : parseAmount(s))
+    if (family && !parent) {
+      toast('가족카드의 본인 카드를 고르세요', 'error')
+      return
+    }
     const input = {
+      parentId: family && parent ? parent.id : null,
       name: name.trim(),
-      kind,
+      kind: effectiveKind,
       issuer: issuer || null,
       productName: productName || null,
       last4: last4 || null,
       aliases: aliases.split(',').map((a) => a.trim()).filter(Boolean),
-      accountId: accountId ? Number(accountId) : null,
+      accountId: !family && accountId ? Number(accountId) : null,
       paymentDay: isCredit && billingFilled ? Number(paymentDay) : null,
       closingDay: isCredit && billingFilled ? Number(closingDay) : null,
       closingMonthOffset: isCredit && billingFilled ? Number(closingOffset) : null,
-      monthlyTarget: amountOrNull(monthlyTarget),
+      monthlyTarget: family ? null : amountOrNull(monthlyTarget),
       annualFee: amountOrNull(annualFee),
       expiresOn: expiresOn || null,
       memo: memo || null,
-      benefits: isCard
+      benefits: ownSettings
         ? benefits
             .filter((b) => b.name.trim())
             .map((b) => ({
@@ -134,7 +172,7 @@ export default function CardForm({
               stackable: b.stackable,
             }))
         : [],
-      tiers: isCard
+      tiers: ownSettings
         ? tiers
             .filter((t) => t.minSpending.trim() && t.benefitLimit.trim())
             .map((t) => ({ minSpending: parseAmount(t.minSpending) ?? 0, benefitLimit: parseAmount(t.benefitLimit) ?? 0 }))
@@ -145,13 +183,20 @@ export default function CardForm({
       return
     }
     // 이름만 지운 기존 혜택이 조용히 삭제되지 않게 막는다 (지우려면 행의 삭제 버튼)
-    if (isCard && benefits.some((b) => !b.name.trim() && (b.id != null || b.rateInput.trim() !== ''))) {
+    if (ownSettings && benefits.some((b) => !b.name.trim() && (b.id != null || b.rateInput.trim() !== ''))) {
       toast('혜택 이름을 입력하세요. 혜택을 없애려면 그 행의 삭제를 누르세요', 'error')
       return
     }
     if (isCredit && (paymentDay === '') !== (closingDay === '')) {
       toast('정산 일정은 결제일과 마감일을 모두 입력하세요', 'error')
       return
+    }
+    if (card && card.parentId == null && family && (card.benefits.length > 0 || card.tiers.length > 0)) {
+      const msg = '가족카드로 바꾸면 이 카드의 혜택·전월실적 구간 설정과 거래에 고른 혜택이 지워지고, 본인 카드의 실적·혜택을 함께 씁니다. 계속할까요?'
+      if (!window.confirm(msg)) return
+    }
+    if (card && card.parentId != null && !family) {
+      if (!window.confirm('가족카드에서 풀면 이 카드 거래에 고른 본인 카드 혜택이 지워집니다. 계속할까요?')) return
     }
     if (card) {
       if (!(await run(UPDATE_PM, { id: card.id, input }))) return
@@ -167,21 +212,52 @@ export default function CardForm({
 
   return (
     <form className="stack" onSubmit={submit}>
+      {canBeFamily && (
+        <div className="row" style={{ flexWrap: 'wrap' }}>
+          <label className="check">
+            <input type="checkbox" checked={family} disabled={familyCount > 0} onChange={(e) => toggleFamily(e.target.checked)} />
+            가족카드
+          </label>
+          <span className="small text-2">
+            {familyCount > 0
+              ? `가족카드 ${familyCount}장이 있는 본인 카드라 가족카드로 바꿀 수 없습니다`
+              : family
+                ? '결제 계좌·정산 일정은 본인 카드를 따르고, 전월실적·혜택은 본인 카드와 함께 계산합니다'
+                : '본인 카드와 전월실적·혜택을 함께 쓰는 카드면 체크하세요'}
+          </span>
+        </div>
+      )}
       <div className="form-grid">
         <label className="field">
           이름 *
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="예: MG+S" required />
         </label>
-        <label className="field">
-          종류
-          <select className="input" value={kind} onChange={(e) => setKind(e.target.value as PaymentKind)}>
-            {kinds.map((k) => (
-              <option key={k} value={k}>
-                {{ CREDIT_CARD: '신용카드', CHECK_CARD: '체크카드', CASH: '현금', BANK_TRANSFER: '계좌이체', OTHER: '기타' }[k]}
-              </option>
-            ))}
-          </select>
-        </label>
+        {family ? (
+          <label className="field">
+            본인 카드 *
+            <select className="input" value={parentId} onChange={(e) => chooseParent(e.target.value)} required>
+              <option value="">선택</option>
+              {parentChoices.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {p.archived ? ' (보관)' : ''}
+                </option>
+              ))}
+            </select>
+            <span className="hint">{parent ? PAYMENT_KIND_LABEL[parent.kind] : parentChoices.length === 0 ? '고를 수 있는 카드가 없습니다' : '실적·혜택을 함께 쓸 카드'}</span>
+          </label>
+        ) : (
+          <label className="field">
+            종류
+            <select className="input" value={kind} onChange={(e) => setKind(e.target.value as PaymentKind)}>
+              {kinds.map((k) => (
+                <option key={k} value={k}>
+                  {PAYMENT_KIND_LABEL[k]}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="field">
           {isCard ? '카드사' : '은행/기관'}
           <input className="input" list="issuer-list" value={issuer} onChange={(e) => setIssuer(e.target.value)} />
@@ -204,20 +280,22 @@ export default function CardForm({
             <span className="hint">승인 문자 자동 입력 시 카드 구분에 씀</span>
           </label>
         )}
-        <label className="field">
-          {isCard ? '결제 계좌' : '연결 계좌'}
-          <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-            <option value="">선택 안 함</option>
-            {refMaps.accounts
-              .filter((a) => !a.archived || String(a.id) === accountId)
-              .map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name}
-                </option>
-              ))}
-          </select>
-          <span className="hint">여유자금 계산 시 이 계좌의 잔고 기준일을 씀</span>
-        </label>
+        {!family && (
+          <label className="field">
+            {isCard ? '결제 계좌' : '연결 계좌'}
+            <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+              <option value="">선택 안 함</option>
+              {refMaps.accounts
+                .filter((a) => !a.archived || String(a.id) === accountId)
+                .map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.name}
+                  </option>
+                ))}
+            </select>
+            <span className="hint">여유자금 계산 시 이 계좌의 잔고 기준일을 씀</span>
+          </label>
+        )}
       </div>
 
       {isCredit && (
@@ -268,7 +346,7 @@ export default function CardForm({
       )}
 
       <div className="form-grid">
-        {isCard && (
+        {ownSettings && (
           <label className="field">
             전월실적 목표
             <input className="input num" inputMode="numeric" value={monthlyTarget} onChange={(e) => setMonthlyTarget(e.target.value)} placeholder="예: 300000" />
@@ -278,6 +356,7 @@ export default function CardForm({
           <label className="field">
             연회비
             <input className="input num" inputMode="numeric" value={annualFee} onChange={(e) => setAnnualFee(e.target.value)} />
+            {family && <span className="hint">가족카드 발급·갱신 때 청구되는 연회비</span>}
           </label>
         )}
         {isCard && (
@@ -296,7 +375,17 @@ export default function CardForm({
         <input className="input" value={memo} onChange={(e) => setMemo(e.target.value)} />
       </label>
 
-      {isCard && (
+      {family && parent && (
+        <div className="notice info">
+          <span className="notice-icon">i</span>
+          <span>
+            {parent.name}의 결제 계좌·정산 일정({parent.billingConfigured ? `매월 ${parent.paymentDay}일 결제` : '미설정'})을 따르고, 전월실적은 {parent.name} 이용과
+            합쳐 계산합니다. 거래에는 {parent.name}의 혜택{parent.benefits.length ? `(${parent.benefits.map((b) => b.name).join(', ')})` : ''}을 고릅니다.
+          </span>
+        </div>
+      )}
+
+      {ownSettings && (
         <>
           <div>
             <div className="row" style={{ marginBottom: 6 }}>

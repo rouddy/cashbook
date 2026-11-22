@@ -1,4 +1,6 @@
 //! 카드 소비 계획: 이번 달 실적(전월실적 목표 대비), 혜택 사용/잔여, 다음 구간까지 남은 금액.
+//! 가족카드는 본인 카드와 실적·혜택을 함께 쓰므로 실적·혜택은 본인 카드와 가족카드 거래를 합쳐 계산하고,
+//! 이용금액·건수만 리포트를 만든 카드 것으로 센다.
 
 use std::collections::HashMap;
 
@@ -59,12 +61,12 @@ pub struct TxBenefitAmount {
 pub struct CardMonthReport {
     pub payment_method_id: i32,
     pub month: YearMonth,
-    /// 이번 달 확정 이용금액
+    /// 이번 달 확정 이용금액 (이 카드만, 가족카드 이용은 각 가족카드 리포트에)
     pub spending: i64,
-    /// 이번 달 남은 예정 이용금액
+    /// 이번 달 남은 예정 이용금액 (이 카드만)
     pub planned_spending: i64,
     pub transaction_count: i32,
-    /// 이번 달 실적 (다음 달 혜택 구간 판정 기준)
+    /// 이번 달 실적 (다음 달 혜택 구간 판정 기준). 본인 카드와 가족카드 이용을 합친다.
     pub performance: i64,
     /// 예정 거래까지 포함한 실적 전망
     pub projected_performance: i64,
@@ -97,22 +99,29 @@ pub struct CardMonthReport {
 }
 
 pub struct CardReportInput<'a> {
+    /// 리포트를 만드는 카드 (가족카드면 그 가족카드)
     pub payment_method: &'a payment_method::Model,
+    /// 실적 목표 (가족카드면 본인 카드의 목표)
+    pub monthly_target: Option<i64>,
+    /// 실적·혜택을 함께 쌓는 카드: 본인 카드와 그 가족카드들 (`payment_method` 포함)
+    pub group_ids: &'a [i32],
+    /// 본인 카드의 혜택
     pub benefits: &'a [card_benefit::Model],
+    /// 본인 카드의 전월실적 구간
     pub tiers: &'a [card_tier::Model],
     pub categories: &'a HashMap<i32, category::Model>,
-    /// 이 카드의 지난 달 ~ 이번 달 거래
+    /// `group_ids` 카드들의 지난 달 ~ 이번 달 거래
     pub transactions: &'a [transaction::Model],
     pub tx_benefits: &'a HashMap<i32, Vec<i32>>,
 }
 
-/// 이 카드의 그 달 거래. 여러 장부에 나눈 결제(`split_parent_id`)는 카드에서는 한 건이므로
+/// `card_ids` 카드들의 그 달 거래. 여러 장부에 나눈 결제(`split_parent_id`)는 카드에서는 한 건이므로
 /// 자식 금액을 부모에 더해 건별 최소 금액·최대 혜택과 건수를 실제 결제 기준으로 계산한다.
-fn card_txs(input: &CardReportInput, month: YearMonth, status: TxStatus) -> Vec<CardTx> {
+fn card_txs(input: &CardReportInput, card_ids: &[i32], month: YearMonth, status: TxStatus) -> Vec<CardTx> {
     let selected: Vec<&transaction::Model> = input
         .transactions
         .iter()
-        .filter(|t| t.payment_method_id == Some(input.payment_method.id))
+        .filter(|t| t.payment_method_id.is_some_and(|id| card_ids.contains(&id)))
         .filter(|t| t.status == status && month.contains(t.date))
         .collect();
     let mut out: Vec<CardTx> = Vec::with_capacity(selected.len());
@@ -158,9 +167,17 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
     let rule_map: HashMap<i32, BenefitRule> = rules.iter().map(|r| (r.id, r.clone())).collect();
     let tiers: Vec<Tier> = input.tiers.iter().map(Tier::from).collect();
 
-    let current = card_txs(input, month, TxStatus::Confirmed);
-    let planned = card_txs(input, month, TxStatus::Planned);
-    let previous = card_txs(input, month.prev(), TxStatus::Confirmed);
+    let own = [input.payment_method.id];
+    let group: &[i32] = if input.group_ids.is_empty() { &own } else { input.group_ids };
+    let current = card_txs(input, group, month, TxStatus::Confirmed);
+    let planned = card_txs(input, group, month, TxStatus::Planned);
+    let previous = card_txs(input, group, month.prev(), TxStatus::Confirmed);
+    // 이용금액·건수는 이 카드 것만 (가족카드 묶음이 아니면 위와 같다)
+    let (own_current, own_planned) = if group == own.as_slice() {
+        (current.clone(), planned.clone())
+    } else {
+        (card_txs(input, &own, month, TxStatus::Confirmed), card_txs(input, &own, month, TxStatus::Planned))
+    };
 
     let performance = benefits::performance(&current, &rule_map);
     let projected_performance = performance + benefits::performance(&planned, &rule_map);
@@ -202,15 +219,15 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
 
     let discount_total = outcome.total_of(BenefitKind::Discount);
     let point_total = outcome.total_of(BenefitKind::Point);
-    let performance_steps = performance_steps(input.payment_method.monthly_target, &tiers);
+    let performance_steps = performance_steps(input.monthly_target, &tiers);
     let target = step_target(&performance_steps, performance);
     let next_tier = benefits::next_tier(&tiers, performance);
     CardMonthReport {
         payment_method_id: input.payment_method.id,
         month,
-        spending: current.iter().map(|t| t.amount).sum(),
-        planned_spending: planned.iter().map(|t| t.amount).sum(),
-        transaction_count: current.len() as i32,
+        spending: own_current.iter().map(|t| t.amount).sum(),
+        planned_spending: own_planned.iter().map(|t| t.amount).sum(),
+        transaction_count: own_current.len() as i32,
         performance,
         projected_performance,
         previous_performance,

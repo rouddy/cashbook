@@ -85,6 +85,8 @@ export interface PaymentMethod {
   isCard: boolean
   billingConfigured: boolean
   usagePeriodLabel: string | null
+  /** 가족카드면 본인 카드 id. `benefits`·`tiers`는 본인 카드 것이 온다 */
+  parentId: number | null
   benefits: CardBenefit[]
   tiers: CardTier[]
 }

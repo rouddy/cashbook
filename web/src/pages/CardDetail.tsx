@@ -12,6 +12,7 @@ import { useToast } from '../components/Toast'
 import { SelectionActions } from '../components/DeleteTransactions'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
 import { benefitRateText, benefitTotalsText, benefitValueText, plannedPerformance, separateLimitLabel, txBenefitTexts } from '../lib/benefits'
+import { familyCardsOf, familyReportNote, familyStatementNote } from '../lib/cards'
 import { longDate, PAYMENT_KIND_LABEL, shortDate, signedWon, won } from '../lib/format'
 import { defaultDateFor, localToday, monthLabel, useMonthParam } from '../lib/month'
 import { useTxSelection } from '../lib/selection'
@@ -45,6 +46,7 @@ export default function CardDetail() {
   const navigate = useNavigate()
   const toast = useToast()
   const { run, pending } = useMutate()
+  const [addingFamily, setAddingFamily] = useState(false)
   const detail = useGql<{ paymentMethod: Detail | null }>(['card', cardId, month], CARD_DETAIL_QUERY, { id: cardId, month })
 
   if (refError) return <ErrorBox error={refError} />
@@ -52,12 +54,20 @@ export default function CardDetail() {
   if (detail.error) return <ErrorBox error={detail.error} />
   const c = detail.data?.paymentMethod
   if (!c) return <div className="panel empty">카드를 찾을 수 없습니다. <Link to="/cards">카드 목록</Link></div>
+  const parent = c.parentId != null ? ref.paymentMethodById.get(c.parentId) : undefined
+  const family = familyCardsOf(ref, c.id)
+  const activeFamily = family.filter((f) => !f.archived)
+  // 가족카드 아래에는 가족카드를 두지 않는다
+  const canAddFamily = c.isCard && c.parentId == null && !c.archived
 
   const remove = async () => {
+    const familyNote = activeFamily.length ? ` 가족카드 ${activeFamily.map((f) => f.name).join(', ')}도 함께 보관합니다.` : ''
     const msg =
       c.transactionCount > 0
-        ? `거래 ${c.transactionCount}건이 있어 삭제 대신 보관합니다 (내역은 유지). 계속할까요?`
-        : `'${c.name}'을(를) 삭제할까요?`
+        ? `거래 ${c.transactionCount}건이 있어 삭제 대신 보관합니다 (내역은 유지).${familyNote} 계속할까요?`
+        : family.length
+          ? `가족카드가 있어 삭제 대신 보관합니다.${familyNote} 계속할까요?`
+          : `'${c.name}'을(를) 삭제할까요?`
     if (!window.confirm(msg)) return
     const r = await run<{ deletePaymentMethod: { deleted: boolean } }>(DELETE_PM, { id: c.id })
     if (!r) return
@@ -74,8 +84,14 @@ export default function CardDetail() {
         <span className="card-chip" aria-hidden />
         <h1>{c.name}</h1>
         <span className="badge">{PAYMENT_KIND_LABEL[c.kind]}</span>
+        {parent && <span className="badge">가족카드</span>}
         {c.archived && <span className="badge">보관</span>}
         <span className="spacer" />
+        {canAddFamily && (
+          <button className="btn" onClick={() => setAddingFamily(true)}>
+            + 가족카드 추가
+          </button>
+        )}
         <button className="btn" onClick={() => setEditing(!editing)}>
           {editing ? '편집 닫기' : '편집'}
         </button>
@@ -95,6 +111,19 @@ export default function CardDetail() {
           <CardForm card={c} refMaps={ref} onDone={() => setEditing(false)} onCancel={() => setEditing(false)} />
         </Panel>
       )}
+      {addingFamily && (
+        <Modal title={`${c.name} 가족카드 추가`} onClose={() => setAddingFamily(false)} width={860}>
+          <CardForm
+            refMaps={ref}
+            familyOf={c.id}
+            onDone={(newId) => {
+              setAddingFamily(false)
+              navigate(`/cards/${newId}`)
+            }}
+            onCancel={() => setAddingFamily(false)}
+          />
+        </Modal>
+      )}
 
       <div className="grid-2">
         <Panel title="카드 정보">
@@ -105,6 +134,28 @@ export default function CardDetail() {
             <dd>{c.productName ?? '-'}</dd>
             <dt>카드번호</dt>
             <dd>{c.last4 ? `•••• ${c.last4}` : '-'}</dd>
+            {parent && (
+              <>
+                <dt>본인 카드</dt>
+                <dd>
+                  <Link to={`/cards/${parent.id}`}>{parent.name}</Link> · 실적·혜택을 함께 씀
+                </dd>
+              </>
+            )}
+            {family.length > 0 && (
+              <>
+                <dt>가족카드</dt>
+                <dd>
+                  {family.map((f, i) => (
+                    <span key={f.id}>
+                      {i > 0 && ', '}
+                      <Link to={`/cards/${f.id}`}>{f.name}</Link>
+                      {f.archived && <span className="muted"> (보관)</span>}
+                    </span>
+                  ))}
+                </dd>
+              </>
+            )}
             <dt>결제 계좌</dt>
             <dd>{c.account ? <Link to="/accounts">{c.account.name}</Link> : '-'}</dd>
             {c.kind === 'CREDIT_CARD' && (
@@ -113,8 +164,12 @@ export default function CardDetail() {
                 <dd>
                   {c.billingConfigured ? (
                     <>
-                      매월 {c.paymentDay}일 결제 · {c.usagePeriodLabel} 이용
+                      매월 {c.paymentDay}일 결제 · {c.usagePeriodLabel} 이용{parent && <span className="muted"> (본인 카드와 같음)</span>}
                     </>
+                  ) : parent ? (
+                    <span>
+                      <span className="badge warn">! 미설정</span> <Link to={`/cards/${parent.id}?edit=1`}>본인 카드에서 입력</Link>
+                    </span>
                   ) : (
                     <span>
                       <span className="badge warn">! 미설정</span>{' '}
@@ -127,7 +182,13 @@ export default function CardDetail() {
               </>
             )}
             <dt>전월실적 목표</dt>
-            <dd>{c.monthlyTarget ? `${won(c.monthlyTarget)}원` : '-'}</dd>
+            <dd>
+              {parent
+                ? `본인 카드 실적에 합산${parent.monthlyTarget ? ` (목표 ${won(parent.monthlyTarget)}원)` : ''}`
+                : c.monthlyTarget
+                  ? `${won(c.monthlyTarget)}원`
+                  : '-'}
+            </dd>
             <dt>연회비</dt>
             <dd>{c.annualFee ? `${won(c.annualFee)}원` : '-'}</dd>
             <dt>유효기간</dt>
@@ -146,7 +207,7 @@ export default function CardDetail() {
             )}
           </dl>
         </Panel>
-        <StatementsPanel card={c} />
+        <StatementsPanel card={c} refMaps={ref} />
       </div>
 
       <div className="filters">
@@ -155,14 +216,15 @@ export default function CardDetail() {
           카드별 내역에서 보기
         </Link>
       </div>
-      <ReportPanel report={c.monthReport} card={c} />
+      <ReportPanel report={c.monthReport} card={c} note={familyReportNote(c, ref)} />
       <CardMonthTransactions card={c} month={month} refMaps={ref} report={c.monthReport} />
     </div>
   )
 }
 
-function StatementsPanel({ card }: { card: Detail }) {
+function StatementsPanel({ card, refMaps }: { card: Detail; refMaps: RefMaps }) {
   const [open, setOpen] = useState<StatementInfo | null>(null)
+  const note = familyStatementNote(card, refMaps)
   if (card.kind !== 'CREDIT_CARD') {
     return (
       <Panel title="결제">
@@ -182,10 +244,22 @@ function StatementsPanel({ card }: { card: Detail }) {
   }
   const next = card.nextPayment
   return (
-    <Panel title="결제 예정 금액" sub="청구서(결제월)별 · 할부는 회차 금액으로 나눠 계산" flush>
+    <Panel
+      title="결제 예정 금액"
+      sub={
+        <>
+          청구서(결제월)별 · 할부는 회차 금액으로 나눠 계산
+          {note && <div>{note}</div>}
+        </>
+      }
+      flush
+    >
       {next && (
         <div style={{ padding: '0 16px 12px' }}>
-          <div className="text-2 small">다음 결제 {longDate(next.paymentDate)}</div>
+          <div className="text-2 small">
+            다음 결제 {longDate(next.paymentDate)}
+            {card.parentId != null && ' (본인 카드에 합산)'}
+          </div>
           <div className="hero" style={{ fontSize: 32 }}>
             {won(next.confirmedAmount)}
             <span style={{ fontSize: 16 }}>원</span>
@@ -223,7 +297,7 @@ function StatementsPanel({ card }: { card: Detail }) {
           ))}
         </tbody>
       </table>
-      {open && <StatementModal card={card} statement={open} onClose={() => setOpen(null)} />}
+      {open && <StatementModal card={card} refMaps={refMaps} statement={open} onClose={() => setOpen(null)} />}
     </Panel>
   )
 }
@@ -235,7 +309,7 @@ function StatementBadge({ s }: { s: StatementInfo }) {
   return <span className="badge warn">이용 중</span>
 }
 
-function StatementModal({ card, statement, onClose }: { card: Detail; statement: StatementInfo; onClose: () => void }) {
+function StatementModal({ card, refMaps, statement, onClose }: { card: Detail; refMaps: RefMaps; statement: StatementInfo; onClose: () => void }) {
   const q = useGql<{ statementLines: StatementLine[] }>(['statementLines', card.id, statement.month], STATEMENT_LINES_QUERY, {
     id: card.id,
     month: statement.month,
@@ -265,6 +339,11 @@ function StatementModal({ card, statement, onClose }: { card: Detail; statement:
                 <td className="nowrap">{shortDate(l.transaction.date)}</td>
                 <td>
                   {l.transaction.description}
+                  {l.transaction.paymentMethodId !== card.id && (
+                    <span className="badge" style={{ marginLeft: 6 }} title="가족카드 이용">
+                      {refMaps.paymentMethodById.get(l.transaction.paymentMethodId ?? -1)?.name}
+                    </span>
+                  )}
                   {l.installmentMonths > 1 && (
                     <span className="badge" style={{ marginLeft: 6 }}>
                       할부 {l.installmentNo}/{l.installmentMonths}
@@ -299,10 +378,19 @@ function StatementModal({ card, statement, onClose }: { card: Detail; statement:
   )
 }
 
-export function ReportPanel({ report: r, card }: { report: CardMonthReport; card: PaymentMethod }) {
+/** `note`: 가족카드 묶음 설명 (`familyReportNote`) */
+export function ReportPanel({ report: r, card, note }: { report: CardMonthReport; card: PaymentMethod; note?: string | null }) {
   const tiers = [...card.tiers].sort((a, b) => a.minSpending - b.minSpending)
   return (
-    <Panel title={`${monthLabel(r.month)} 실적 · 혜택`} sub="실적은 이용일 기준 달력월 합계 (실적 제외 표시·실적 제외 혜택 거래는 빠짐)">
+    <Panel
+      title={`${monthLabel(r.month)} 실적 · 혜택`}
+      sub={
+        <>
+          실적은 이용일 기준 달력월 합계 (실적 제외 표시·실적 제외 혜택 거래는 빠짐)
+          {note && <div>{note}</div>}
+        </>
+      }
+    >
       <div className="kpis">
         <div>
           <div className="stat-label">이번 달 실적</div>

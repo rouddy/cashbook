@@ -3,7 +3,7 @@
 export const BENEFIT_FIELDS = `id paymentMethodId name kind rate minAmount perTxMax monthlyCap sharesCardLimit excludesPerformance stackable sortOrder`
 
 export const PAYMENT_METHOD_FIELDS = `id name kind issuer productName last4 aliases accountId paymentDay closingDay closingMonthOffset
-  monthlyTarget annualFee expiresOn color memo sortOrder archived isCard billingConfigured usagePeriodLabel
+  monthlyTarget annualFee expiresOn color memo sortOrder archived isCard billingConfigured usagePeriodLabel parentId
   benefits { ${BENEFIT_FIELDS} } tiers { id paymentMethodId minSpending benefitLimit }`
 
 export const CATEGORY_FIELDS = `id ledgerId name kind monthlyBudget isFixed color sortOrder archived`
@@ -64,8 +64,9 @@ export const CARD_REPORT_FIELDS = `paymentMethodId month spending plannedSpendin
   benefits { cardBenefitId name kind rate monthlyCap sharesCardLimit stackable spending count raw amount remaining spendToMax }
   transactionBenefits { transactionId kind amount }`
 
-export const CARDS_MONTHLY_QUERY = `query CardsMonthly($month: YearMonth!) {
-  cardsMonthly(month: $month) { ${CARD_REPORT_FIELDS} }
+/** 가족카드는 실적을 본인 카드 리포트에 합치므로 `includeFamily`일 때만 따로 온다 (이용금액은 카드별) */
+export const CARDS_MONTHLY_QUERY = `query CardsMonthly($month: YearMonth!, $includeFamily: Boolean = false) {
+  cardsMonthly(month: $month, includeFamily: $includeFamily) { ${CARD_REPORT_FIELDS} }
 }`
 
 export const CARD_DETAIL_QUERY = `query CardDetail($id: Int!, $month: YearMonth!) {

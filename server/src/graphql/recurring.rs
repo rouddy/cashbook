@@ -209,11 +209,19 @@ impl RecurringMutation {
         let mut active: recurring_rule::ActiveModel = found.into();
         apply(&mut active, input);
         let saved = active.update(&txn).await?;
-        // 혜택은 카드에 딸려 있으므로 결제수단을 바꾸면 고른 혜택을 비운다 (새로 고른 목록을 주면 그것으로)
+        // 혜택은 카드에 딸려 있으므로 결제수단을 바꾸면 새 카드에서 쓸 수 없는 혜택은 버린다
+        // (본인 카드 ↔ 가족카드는 혜택이 같아 그대로, 새로 고른 목록을 주면 그것으로)
         if let Some(ids) = benefit_ids {
             set_rule_benefits(&txn, &saved, &ids).await?;
         } else if saved.payment_method_id != old_payment_method {
-            set_rule_benefits(&txn, &saved, &[]).await?;
+            let keep: Vec<i32> = recurring_rule_benefit::Entity::find()
+                .filter(recurring_rule_benefit::Column::RecurringRuleId.eq(saved.id))
+                .all(&txn)
+                .await?
+                .into_iter()
+                .map(|b| b.card_benefit_id)
+                .collect();
+            set_rule_benefits(&txn, &saved, &keep).await?;
         }
         recurring::regenerate(&txn, saved.id, cfg.today(), cfg.plan_months_ahead).await?;
         txn.commit().await?;

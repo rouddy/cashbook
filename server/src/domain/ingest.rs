@@ -162,6 +162,13 @@ pub fn resolve_payment_method<'a>(
         if by_issuer.len() == 1 {
             return Some(by_issuer[0]);
         }
+        // 카드사만 맞으면 본인 카드와 그 가족카드 사이에서는 본인 카드 (끝자리 없는 문자)
+        let heads: Vec<_> = by_issuer.iter().filter(|p| p.parent_id.is_none()).collect();
+        if let [head] = heads[..]
+            && by_issuer.iter().all(|p| p.parent_id.is_none_or(|id| id == head.id))
+        {
+            return Some(head);
+        }
     }
     None
 }
@@ -709,9 +716,10 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
     .insert(db)
     .await?;
 
-    if let (Some(s), Some(pid)) = (&suggestion, pm_id) {
+    // 가족카드는 본인 카드의 혜택을 쓴다
+    if let (Some(s), Some(card)) = (&suggestion, pm.map(|p| p.benefit_card_id())) {
         let valid: Vec<i32> = crate::entity::card_benefit::Entity::find()
-            .filter(crate::entity::card_benefit::Column::PaymentMethodId.eq(pid))
+            .filter(crate::entity::card_benefit::Column::PaymentMethodId.eq(card))
             .filter(crate::entity::card_benefit::Column::Id.is_in(s.benefit_ids.clone()))
             .all(db)
             .await?
@@ -984,6 +992,31 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(by_last4.transaction.payment_method_id, Some(3));
+    }
+
+    #[tokio::test]
+    async fn issuer_only_prefers_parent_over_family_card() {
+        let db = setup().await;
+        // 신한은 카드 하나뿐이었는데 가족카드를 더해도 끝자리 없는 문자는 본인 카드로
+        let family = payment_method::ActiveModel {
+            name: Set("알뜰교통신한 가족".into()),
+            kind: Set(PaymentKind::CreditCard),
+            issuer: Set(Some("신한".into())),
+            last4: Set(Some("5555".into())),
+            sort_order: Set(0),
+            archived: Set(false),
+            created_at: Set(Utc::now()),
+            parent_id: Set(Some(1)),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let send = |text: &str| IngestInput { text: Some(text.into()), ..Default::default() };
+        let out = ingest(&db, send("신한카드 승인 홍*동님 9,000원 일시불 10/23 09:00 김밥천국"), today()).await.unwrap();
+        assert_eq!(out.transaction.payment_method_id, Some(1), "{:?}", out.warnings);
+        let by_last4 = ingest(&db, send("신한카드(5555)승인 홍*동님 9,000원 일시불 10/23 09:10 김밥천국"), today()).await.unwrap();
+        assert_eq!(by_last4.transaction.payment_method_id, Some(family.id), "{:?}", by_last4.warnings);
     }
 
     #[tokio::test]

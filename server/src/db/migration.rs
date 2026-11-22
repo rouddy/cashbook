@@ -20,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261120_000009_recurring_match_amount::Migration),
             Box::new(m20261120_000010_recurring_rule_benefits::Migration),
             Box::new(m20261122_000011_drop_api_token_scope::Migration),
+            Box::new(m20261122_000012_family_cards::Migration),
         ]
     }
 }
@@ -1546,6 +1547,46 @@ mod m20261122_000011_drop_api_token_scope {
     impl MigrationTrait for Migration {
         async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
             manager.alter_table(Table::alter().table(ApiTokens::Table).drop_column(ApiTokens::Scope).to_owned()).await
+        }
+    }
+}
+
+/// 가족카드: 본인 카드를 가리킨다. 실적·혜택은 본인 카드 것을 함께 쓴다.
+/// SQLite는 ALTER TABLE로 외래 키를 붙일 수 없어 인덱스만 둔다 (본인 카드는 가족카드가 있으면 지우지 않고 보관한다).
+mod m20261122_000012_family_cards {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261122_000012_family_cards"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum PaymentMethods {
+        Table,
+        ParentId,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager
+                .alter_table(
+                    Table::alter().table(PaymentMethods::Table).add_column(integer_null(PaymentMethods::ParentId)).to_owned(),
+                )
+                .await?;
+            manager
+                .create_index(
+                    Index::create()
+                        .name("ix_payment_methods_parent")
+                        .table(PaymentMethods::Table)
+                        .col(PaymentMethods::ParentId)
+                        .to_owned(),
+                )
+                .await
         }
     }
 }

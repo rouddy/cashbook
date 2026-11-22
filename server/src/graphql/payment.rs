@@ -1,12 +1,15 @@
 //! 결제수단(카드) API: 목록/상세, 정산 일정, 청구서, 실적·혜택 리포트, 추가/수정/삭제.
+//! 가족카드(`parent_id`)는 본인 카드의 혜택·구간·목표를 쓰고 실적을 본인 카드와 합쳐 계산한다.
+//! 종류·결제 계좌·정산 일정은 본인 카드 것을 복사해 두고 본인 카드를 고칠 때 같이 맞춘다.
+//! 가족카드 대금은 본인 카드 청구서에 합쳐 청구되므로 본인 카드 청구서는 가족카드 이용까지, 가족카드 청구서는 그 카드 이용분만 담는다.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_graphql::{ComplexObject, Context, InputObject, Object, Result, SimpleObject};
 use chrono::{Duration, NaiveDate, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Query,
 };
 
 use super::{DeleteResult, config, db, lookup, trim_opt, user_error};
@@ -17,7 +20,7 @@ use crate::domain::funds::{CardDue, StatementInfo, statement_parts, statement_ra
 use crate::entity::{
     account, card_benefit, card_tier,
     enums::{BenefitKind, PaymentKind, TxStatus},
-    payment_method, recurring_rule, transaction,
+    payment_method, recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
 };
 
 fn month_label(offset: i32) -> &'static str {
@@ -40,15 +43,25 @@ pub fn usage_period_label(cycle: &BillingCycle) -> String {
     }
 }
 
-/// 카드의 청구서 계산에 필요한 거래 (최대 60개월 할부를 고려해 5년 전부터)
+/// 청구서에 넣는 카드: 본인 카드는 가족카드까지(가족카드 대금은 본인 카드로 청구), 가족카드는 자기 자신만.
+async fn statement_card_ids(ctx: &Context<'_>, pm: &payment_method::Model) -> Result<Vec<i32>, DbErr> {
+    let mut ids = vec![pm.id];
+    if pm.parent_id.is_none() {
+        let pms = lookup(ctx).payment_methods().await?;
+        ids.extend(pms.values().filter(|p| p.parent_id == Some(pm.id)).map(|p| p.id));
+    }
+    Ok(ids)
+}
+
+/// 카드의 청구서 계산에 필요한 거래 (최대 60개월 할부를 고려해 5년 전부터). `card_ids`는 `statement_card_ids`.
 async fn card_transactions(
     db: &DatabaseConnection,
-    payment_method_id: i32,
+    card_ids: Vec<i32>,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<Vec<transaction::Model>, sea_orm::DbErr> {
     transaction::Entity::find()
-        .filter(transaction::Column::PaymentMethodId.eq(payment_method_id))
+        .filter(transaction::Column::PaymentMethodId.is_in(card_ids))
         .filter(transaction::Column::Status.ne(TxStatus::Skipped))
         .filter(transaction::Column::Date.gte(from - Duration::days(INSTALLMENT_LOOKBACK_DAYS)))
         .filter(transaction::Column::Date.lte(to))
@@ -58,24 +71,39 @@ async fn card_transactions(
         .await
 }
 
+/// 실적·혜택을 함께 쓰는 묶음: (본인 카드, 본인 카드와 그 가족카드들의 id). 가족카드가 없으면 자기 자신만.
+fn card_group(pms: &HashMap<i32, payment_method::Model>, pm: &payment_method::Model) -> (payment_method::Model, Vec<i32>) {
+    let head = pm.parent_id.and_then(|id| pms.get(&id)).unwrap_or(pm).clone();
+    let mut ids: Vec<i32> = pms.values().filter(|p| p.parent_id == Some(head.id)).map(|p| p.id).collect();
+    ids.push(head.id);
+    if !ids.contains(&pm.id) {
+        ids.push(pm.id);
+    }
+    ids.sort_unstable();
+    (head, ids)
+}
+
 async fn report_for(ctx: &Context<'_>, pm: &payment_method::Model, month: YearMonth) -> Result<CardMonthReport> {
     let db = db(ctx);
     let lookup = lookup(ctx);
+    let (head, group_ids) = card_group(&*lookup.payment_methods().await?, pm);
     let txs = transaction::Entity::find()
-        .filter(transaction::Column::PaymentMethodId.eq(pm.id))
+        .filter(transaction::Column::PaymentMethodId.is_in(group_ids.clone()))
         .filter(transaction::Column::Date.gte(month.prev().first_day()))
         .filter(transaction::Column::Date.lte(month.last_day()))
         .all(db)
         .await?;
     let categories = lookup.categories().await?;
-    let benefits = lookup.card_benefits_of(pm.id).await?;
+    let benefits = lookup.card_benefits_of(head.id).await?;
     let tiers = lookup.tiers().await?;
     let tx_benefits = lookup.tx_benefits().await?;
     Ok(month_report(
         &CardReportInput {
             payment_method: pm,
+            monthly_target: head.monthly_target,
+            group_ids: &group_ids,
             benefits: &benefits,
-            tiers: tiers.get(&pm.id).map(Vec::as_slice).unwrap_or(&[]),
+            tiers: tiers.get(&head.id).map(Vec::as_slice).unwrap_or(&[]),
             categories: &categories,
             transactions: &txs,
             tx_benefits: &tx_benefits,
@@ -111,13 +139,20 @@ impl payment_method::Model {
         Ok(lookup(ctx).accounts().await?.get(&id).cloned())
     }
 
+    /// 카드 혜택. 가족카드는 본인 카드의 혜택 (거래에 고르는 혜택도 이것)
     async fn benefits(&self, ctx: &Context<'_>) -> Result<Vec<card_benefit::Model>> {
-        Ok(lookup(ctx).card_benefits_of(self.id).await?)
+        Ok(lookup(ctx).card_benefits_of(self.benefit_card_id()).await?)
     }
 
-    /// 전월실적 구간
+    /// 전월실적 구간. 가족카드는 본인 카드의 구간
     async fn tiers(&self, ctx: &Context<'_>) -> Result<Vec<card_tier::Model>> {
-        Ok(lookup(ctx).tiers().await?.get(&self.id).cloned().unwrap_or_default())
+        Ok(lookup(ctx).tiers().await?.get(&self.benefit_card_id()).cloned().unwrap_or_default())
+    }
+
+    /// 가족카드의 본인 카드
+    async fn parent(&self, ctx: &Context<'_>) -> Result<Option<payment_method::Model>> {
+        let Some(id) = self.parent_id else { return Ok(None) };
+        Ok(lookup(ctx).payment_methods().await?.get(&id).cloned())
     }
 
     async fn transaction_count(&self, ctx: &Context<'_>) -> Result<i64> {
@@ -141,6 +176,7 @@ impl payment_method::Model {
     }
 
     /// 결제월 범위의 청구서. 기본은 다음 결제 기준 3개월 전 ~ 2개월 뒤.
+    /// 본인 카드는 가족카드 이용을 합친 금액, 가족카드는 그 카드 이용분(본인 카드 청구서에 합산됨).
     async fn statements(
         &self,
         ctx: &Context<'_>,
@@ -155,24 +191,26 @@ impl payment_method::Model {
         if from.months_until(to) > 60 {
             return Err(user_error("한 번에 60개월까지 조회할 수 있습니다"));
         }
-        let txs = card_transactions(db(ctx), self.id, cycle.period(from).0, cycle.period(to).1).await?;
+        let ids = statement_card_ids(ctx, self).await?;
+        let txs = card_transactions(db(ctx), ids, cycle.period(from).0, cycle.period(to).1).await?;
         let refs: Vec<&transaction::Model> = txs.iter().collect();
         let categories = lookup(ctx).categories().await?;
-        Ok(statement_range(self, &cycle, &refs, &categories, today, from, to))
+        Ok(statement_range(&cycle, &refs, &categories, today, from, to))
     }
 
-    /// 다음 결제 예정 청구서
+    /// 다음 결제 예정 청구서 (본인 카드는 가족카드 이용 포함)
     async fn next_payment(&self, ctx: &Context<'_>) -> Result<Option<StatementInfo>> {
         let Some(cycle) = BillingCycle::from_model(self) else { return Ok(None) };
         let today = config(ctx).today();
         let next = cycle.next_statement(today);
-        let txs = card_transactions(db(ctx), self.id, cycle.period(next).0, cycle.period(next).1).await?;
+        let ids = statement_card_ids(ctx, self).await?;
+        let txs = card_transactions(db(ctx), ids, cycle.period(next).0, cycle.period(next).1).await?;
         let refs: Vec<&transaction::Model> = txs.iter().collect();
         let categories = lookup(ctx).categories().await?;
-        Ok(statement_range(self, &cycle, &refs, &categories, today, next, next).pop())
+        Ok(statement_range(&cycle, &refs, &categories, today, next, next).pop())
     }
 
-    /// 월별 실적·혜택 리포트
+    /// 월별 실적·혜택 리포트 (가족카드 묶음은 실적·혜택을 합쳐서, 이용금액은 이 카드만)
     async fn month_report(&self, ctx: &Context<'_>, month: YearMonth) -> Result<CardMonthReport> {
         report_for(ctx, self, month).await
     }
@@ -235,7 +273,13 @@ impl PaymentQuery {
     }
 
     /// 카드별 월 실적·혜택 요약 (카드별 지출내역 화면). 보관된 카드는 그 달 거래가 있을 때만.
-    async fn cards_monthly(&self, ctx: &Context<'_>, month: YearMonth) -> Result<Vec<CardMonthReport>> {
+    /// 가족카드는 실적을 본인 카드 리포트에 합치므로 `includeFamily`일 때만 넣는다 (이용금액은 카드별).
+    async fn cards_monthly(
+        &self,
+        ctx: &Context<'_>,
+        month: YearMonth,
+        #[graphql(default = false)] include_family: bool,
+    ) -> Result<Vec<CardMonthReport>> {
         let db = db(ctx);
         let used: HashSet<i32> = transaction::Entity::find()
             .select_only()
@@ -256,6 +300,7 @@ impl PaymentQuery {
             .await?
             .into_iter()
             .filter(|p| !p.archived || used.contains(&p.id))
+            .filter(|p| include_family || p.parent_id.is_none())
             .collect();
         cards.sort_by_key(|p| (p.archived, p.sort_order, p.id));
         let mut out = Vec::with_capacity(cards.len());
@@ -265,7 +310,7 @@ impl PaymentQuery {
         Ok(out)
     }
 
-    /// 결제월 `month` 청구서에 들어가는 거래들
+    /// 결제월 `month` 청구서에 들어가는 거래들. 본인 카드는 가족카드 거래도 담는다 (거래의 `paymentMethodId`로 구분)
     async fn statement_lines(
         &self,
         ctx: &Context<'_>,
@@ -281,10 +326,11 @@ impl PaymentQuery {
             return Err(user_error("정산 일정이 입력되지 않은 카드입니다"));
         };
         let (start, end) = cycle.period(month);
-        let txs = card_transactions(db, pm.id, start, end).await?;
+        let ids = statement_card_ids(ctx, &pm).await?;
+        let txs = card_transactions(db, ids, start, end).await?;
         let refs: Vec<&transaction::Model> = txs.iter().collect();
         let categories = lookup(ctx).categories().await?;
-        let parts = statement_parts(&pm, &cycle, &refs, &categories, month);
+        let parts = statement_parts(&cycle, &refs, &categories, month);
         let mut lines: Vec<StatementLine> = parts
             .into_iter()
             .filter_map(|p| {
@@ -346,6 +392,9 @@ pub struct CardTierInput {
 
 #[derive(InputObject)]
 pub struct PaymentMethodInput {
+    /// 가족카드면 본인 카드 id. 종류·결제 계좌·정산 일정은 본인 카드를 따르고, 실적 목표·혜택·구간은 본인 카드 것을 쓴다
+    /// (이 카드의 값은 무시하고 비운다). 수정할 때 빼면 가족카드가 아니게 된다.
+    pub parent_id: Option<i32>,
     pub name: String,
     pub kind: PaymentKind,
     pub issuer: Option<String>,
@@ -424,7 +473,124 @@ fn validate(input: &PaymentMethodInput) -> Result<Validated> {
     Ok(Validated { name, last4, aliases: aliases.filter(|a| !a.is_empty()), billing, expires_on })
 }
 
-async fn save_children<C: sea_orm::ConnectionTrait>(
+async fn has_family<C: ConnectionTrait>(db: &C, id: i32) -> Result<bool, DbErr> {
+    Ok(payment_method::Entity::find().filter(payment_method::Column::ParentId.eq(id)).count(db).await? > 0)
+}
+
+/// 가족카드 입력을 본인 카드에 맞춘다: 종류·결제 계좌·정산 일정은 본인 카드 것, 실적 목표·혜택·구간은 비운다.
+/// `found`는 수정하는 카드(추가면 None).
+async fn apply_parent<C: ConnectionTrait>(
+    db: &C,
+    found: Option<&payment_method::Model>,
+    input: &mut PaymentMethodInput,
+) -> Result<()> {
+    let Some(pid) = input.parent_id else { return Ok(()) };
+    if found.is_some_and(|f| f.id == pid) {
+        return Err(user_error("자기 자신을 본인 카드로 고를 수 없습니다"));
+    }
+    let parent = payment_method::Entity::find_by_id(pid).one(db).await?.ok_or_else(|| user_error("본인 카드가 없습니다"))?;
+    if parent.parent_id.is_some() {
+        return Err(user_error(format!("'{}'은(는) 가족카드라 본인 카드로 고를 수 없습니다", parent.name)));
+    }
+    if !parent.kind.is_card() {
+        return Err(user_error("본인 카드는 신용카드나 체크카드여야 합니다"));
+    }
+    if parent.archived && found.is_none_or(|f| f.parent_id != Some(pid)) {
+        return Err(user_error(format!("보관된 카드 '{}'에는 가족카드를 추가할 수 없습니다", parent.name)));
+    }
+    if let Some(f) = found
+        && has_family(db, f.id).await?
+    {
+        return Err(user_error("가족카드가 있는 카드는 가족카드로 바꿀 수 없습니다"));
+    }
+    input.kind = parent.kind;
+    input.account_id = parent.account_id;
+    input.payment_day = parent.payment_day;
+    input.closing_day = parent.closing_day;
+    input.closing_month_offset = parent.closing_month_offset;
+    input.monthly_target = None;
+    input.benefits = Some(vec![]);
+    input.tiers = Some(vec![]);
+    if trim_opt(input.issuer.clone()).is_none() {
+        input.issuer = parent.issuer;
+    }
+    Ok(())
+}
+
+/// 본인 카드의 종류·결제 계좌·정산 일정을 가족카드에 복사한다.
+async fn sync_family<C: ConnectionTrait>(db: &C, parent: &payment_method::Model) -> Result<(), DbErr> {
+    let family = payment_method::Entity::find().filter(payment_method::Column::ParentId.eq(parent.id)).all(db).await?;
+    for f in family {
+        let mut active: payment_method::ActiveModel = f.into();
+        active.kind = Set(parent.kind);
+        active.account_id = Set(parent.account_id);
+        active.payment_day = Set(parent.payment_day);
+        active.closing_day = Set(parent.closing_day);
+        active.closing_month_offset = Set(parent.closing_month_offset);
+        active.update(db).await?;
+    }
+    Ok(())
+}
+
+/// 카드의 거래·반복 규칙에 붙은 혜택 중 지금 혜택 카드(가족카드면 본인 카드)의 것이 아닌 것을 지운다.
+/// 가족카드로 바꾸거나 본인 카드를 바꾸거나 가족카드에서 풀 때 쓴다.
+async fn prune_foreign_benefits<C: ConnectionTrait>(db: &C, pm: &payment_method::Model) -> Result<(), DbErr> {
+    let valid: Vec<i32> = card_benefit::Entity::find()
+        .select_only()
+        .column(card_benefit::Column::Id)
+        .filter(card_benefit::Column::PaymentMethodId.eq(pm.benefit_card_id()))
+        .into_tuple()
+        .all(db)
+        .await?;
+    let txs = Query::select()
+        .column(transaction::Column::Id)
+        .from(transaction::Entity)
+        .and_where(transaction::Column::PaymentMethodId.eq(pm.id))
+        .to_owned();
+    let mut q = transaction_benefit::Entity::delete_many().filter(transaction_benefit::Column::TransactionId.in_subquery(txs));
+    if !valid.is_empty() {
+        q = q.filter(transaction_benefit::Column::CardBenefitId.is_not_in(valid.clone()));
+    }
+    q.exec(db).await?;
+    let rules = Query::select()
+        .column(recurring_rule::Column::Id)
+        .from(recurring_rule::Entity)
+        .and_where(recurring_rule::Column::PaymentMethodId.eq(pm.id))
+        .to_owned();
+    let mut q = recurring_rule_benefit::Entity::delete_many()
+        .filter(recurring_rule_benefit::Column::RecurringRuleId.in_subquery(rules));
+    if !valid.is_empty() {
+        q = q.filter(recurring_rule_benefit::Column::CardBenefitId.is_not_in(valid));
+    }
+    q.exec(db).await?;
+    Ok(())
+}
+
+/// 결제수단을 보관한다. 앞으로 생길 예정 항목이 보관된 카드로 잡히지 않게 반복 규칙은 끄고, 이미 만든 예정분도 지운다.
+async fn archive<C: ConnectionTrait>(db: &C, pm: payment_method::Model, today: NaiveDate) -> Result<(), DbErr> {
+    let id = pm.id;
+    let mut active: payment_method::ActiveModel = pm.into();
+    active.archived = Set(true);
+    active.update(db).await?;
+    let rule_ids: Vec<i32> = recurring_rule::Entity::find()
+        .filter(recurring_rule::Column::PaymentMethodId.eq(id))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    recurring_rule::Entity::update_many()
+        .col_expr(recurring_rule::Column::Active, false.into())
+        .filter(recurring_rule::Column::PaymentMethodId.eq(id))
+        .exec(db)
+        .await?;
+    for rule_id in rule_ids {
+        crate::domain::recurring::remove_future_planned(db, rule_id, today).await?;
+    }
+    Ok(())
+}
+
+async fn save_children<C: ConnectionTrait>(
     db: &C,
     pm_id: i32,
     benefits: Option<Vec<CardBenefitInput>>,
@@ -482,6 +648,8 @@ impl PaymentMutation {
     /// 카드/결제수단 추가
     async fn create_payment_method(&self, ctx: &Context<'_>, input: PaymentMethodInput) -> Result<payment_method::Model> {
         let db = db(ctx);
+        let mut input = input;
+        apply_parent(db, None, &mut input).await?;
         let v = validate(&input)?;
         if payment_method::Entity::find().filter(payment_method::Column::Name.eq(v.name.as_str())).one(db).await?.is_some() {
             return Err(user_error("같은 이름의 결제수단이 이미 있습니다"));
@@ -507,6 +675,7 @@ impl PaymentMutation {
             sort_order: Set(count as i32),
             archived: Set(input.archived.unwrap_or(false)),
             created_at: Set(Utc::now()),
+            parent_id: Set(input.parent_id),
             ..Default::default()
         }
         .insert(&txn)
@@ -526,6 +695,11 @@ impl PaymentMutation {
     ) -> Result<payment_method::Model> {
         let db = db(ctx);
         let found = payment_method::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
+        let mut input = input;
+        apply_parent(db, Some(&found), &mut input).await?;
+        if !input.kind.is_card() && has_family(db, id).await? {
+            return Err(user_error("가족카드가 있는 카드는 카드가 아닌 종류로 바꿀 수 없습니다"));
+        }
         let v = validate(&input)?;
         if let Some(other) = payment_method::Entity::find()
             .filter(payment_method::Column::Name.eq(v.name.as_str()))
@@ -536,7 +710,9 @@ impl PaymentMutation {
             return Err(user_error(format!("'{}' 이름은 이미 쓰고 있습니다", other.name)));
         }
         let txn = db.begin().await?;
+        let old_parent = found.parent_id;
         let mut active: payment_method::ActiveModel = found.into();
+        active.parent_id = Set(input.parent_id);
         active.name = Set(v.name);
         active.kind = Set(input.kind);
         active.issuer = Set(trim_opt(input.issuer));
@@ -559,37 +735,28 @@ impl PaymentMutation {
         }
         let saved = active.update(&txn).await?;
         save_children(&txn, saved.id, input.benefits, input.tiers).await?;
+        if saved.parent_id != old_parent {
+            prune_foreign_benefits(&txn, &saved).await?;
+        }
+        sync_family(&txn, &saved).await?;
         txn.commit().await?;
         lookup(ctx).invalidate();
         Ok(saved)
     }
 
     /// 거래가 있는 결제수단은 보관 처리하고(내역 유지), 없으면 지운다.
+    /// 가족카드가 있는 본인 카드도 지우지 않고 보관하며, 가족카드도 함께 보관한다.
     async fn delete_payment_method(&self, ctx: &Context<'_>, id: i32) -> Result<DeleteResult> {
         let db = db(ctx);
         let found = payment_method::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
         let used = transaction::Entity::find().filter(transaction::Column::PaymentMethodId.eq(id)).count(db).await?;
-        let result = if used > 0 {
-            let txn = db.begin().await?;
-            let mut active: payment_method::ActiveModel = found.into();
-            active.archived = Set(true);
-            active.update(&txn).await?;
-            // 앞으로 생길 예정 항목이 보관된 카드로 잡히지 않게 반복 규칙은 끄고, 이미 만든 예정분도 지운다.
-            let rule_ids: Vec<i32> = recurring_rule::Entity::find()
-                .filter(recurring_rule::Column::PaymentMethodId.eq(id))
-                .all(&txn)
-                .await?
-                .into_iter()
-                .map(|r| r.id)
-                .collect();
-            recurring_rule::Entity::update_many()
-                .col_expr(recurring_rule::Column::Active, false.into())
-                .filter(recurring_rule::Column::PaymentMethodId.eq(id))
-                .exec(&txn)
-                .await?;
+        let family = payment_method::Entity::find().filter(payment_method::Column::ParentId.eq(id)).all(db).await?;
+        let result = if used > 0 || !family.is_empty() {
             let today = config(ctx).today();
-            for rule_id in rule_ids {
-                crate::domain::recurring::remove_future_planned(&txn, rule_id, today).await?;
+            let txn = db.begin().await?;
+            archive(&txn, found, today).await?;
+            for f in family.into_iter().filter(|f| !f.archived) {
+                archive(&txn, f, today).await?;
             }
             txn.commit().await?;
             DeleteResult { deleted: false, archived: true }
@@ -605,6 +772,12 @@ impl PaymentMutation {
     async fn restore_payment_method(&self, ctx: &Context<'_>, id: i32) -> Result<payment_method::Model> {
         let db = db(ctx);
         let found = payment_method::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
+        if let Some(pid) = found.parent_id
+            && let Some(parent) = payment_method::Entity::find_by_id(pid).one(db).await?
+            && parent.archived
+        {
+            return Err(user_error(format!("본인 카드 '{}'가 보관되어 있습니다. 본인 카드를 먼저 다시 사용하세요", parent.name)));
+        }
         let mut active: payment_method::ActiveModel = found.into();
         active.archived = Set(false);
         let saved = active.update(db).await?;
@@ -630,7 +803,164 @@ impl PaymentMutation {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::*;
+    use crate::entity::ledger;
+
+    async fn gql(schema: &crate::graphql::CashbookSchema, query: &str) -> Value {
+        let res = schema.execute(query).await;
+        assert!(res.errors.is_empty(), "{query}: {:?}", res.errors);
+        res.data.into_json().unwrap()
+    }
+
+    async fn gql_error(schema: &crate::graphql::CashbookSchema, query: &str) -> String {
+        let res = schema.execute(query).await;
+        res.errors.first().unwrap_or_else(|| panic!("{query}: 오류가 나야 합니다")).message.clone()
+    }
+
+    #[tokio::test]
+    async fn family_card_shares_parent_performance_and_benefits() {
+        let db = crate::db::connect_in_memory().await;
+        let home = ledger::ActiveModel {
+            name: Set("가계부".into()),
+            description: Set(None),
+            is_default: Set(true),
+            sort_order: Set(0),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap()
+        .id;
+        let schema = crate::graphql::build_schema(db.clone(), crate::config::AppConfig::for_tests());
+        let id = |v: &Value| v.as_i64().unwrap();
+        let fields = "id kind parentId issuer paymentDay closingDay closingMonthOffset monthlyTarget annualFee benefits { id } tiers { minSpending }";
+
+        let parent = gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createPaymentMethod(input: {{name: "본인", kind: CREDIT_CARD, issuer: "신한", paymentDay: 25, closingDay: 11,
+                closingMonthOffset: 0, monthlyTarget: 300000, benefits: [{{name: "10%", rate: 0.1, sharesCardLimit: false}}],
+                tiers: [{{minSpending: 300000, benefitLimit: 10000}}]}}) {{ {fields} }} }}"#
+            ),
+        )
+        .await["createPaymentMethod"]
+            .clone();
+        let p = id(&parent["id"]);
+        let benefit = id(&parent["benefits"][0]["id"]);
+
+        // 종류·정산 일정·카드사는 본인 카드를 따르고, 실적 목표·혜택·구간은 본인 카드 것을 쓴다. 연회비는 따로
+        let family = gql(
+            &schema,
+            &format!(
+                r#"mutation {{ createPaymentMethod(input: {{parentId: {p}, name: "가족", kind: CHECK_CARD, last4: "1234", annualFee: 5000,
+                monthlyTarget: 999, benefits: [{{name: "무시", rate: 0.5}}], tiers: [{{minSpending: 1, benefitLimit: 1}}]}}) {{ {fields} }} }}"#
+            ),
+        )
+        .await["createPaymentMethod"]
+            .clone();
+        let f = id(&family["id"]);
+        assert_eq!(family["kind"], "CREDIT_CARD");
+        assert_eq!(family["parentId"], p);
+        assert_eq!(family["issuer"], "신한");
+        assert_eq!((family["paymentDay"].clone(), family["closingDay"].clone(), family["closingMonthOffset"].clone()), (json!(25), json!(11), json!(0)));
+        assert_eq!(family["monthlyTarget"], Value::Null);
+        assert_eq!(family["annualFee"], 5000);
+        assert_eq!(family["benefits"], parent["benefits"]);
+        assert_eq!(family["tiers"], json!([{"minSpending": 300000}]));
+        assert_eq!(card_benefit::Entity::find().count(&db).await.unwrap(), 1, "가족카드는 혜택을 따로 두지 않는다");
+
+        // 가족카드 거래에 본인 카드 혜택을 고를 수 있다
+        let tx = |pm: i64, amount: i64| {
+            format!(
+                r#"mutation {{ createTransaction(input: {{ledgerId: {home}, date: "2026-11-05", amount: {amount}, paymentMethodId: {pm},
+                description: "마트", benefitIds: [{benefit}]}}) {{ id benefitIds }} }}"#
+            )
+        };
+        gql(&schema, &tx(p, 100_000)).await;
+        let ft = gql(&schema, &tx(f, 250_000)).await["createTransaction"].clone();
+        assert_eq!(ft["benefitIds"], json!([benefit]));
+
+        // 실적·혜택은 합쳐서, 이용금액은 카드별. 전월실적 목록에는 가족카드를 넣지 않는다
+        let report = "paymentMethodId spending performance target discountTotal";
+        let monthly = gql(&schema, &format!(r#"{{ cardsMonthly(month: "2026-11") {{ {report} }} }}"#)).await;
+        assert_eq!(
+            monthly["cardsMonthly"],
+            json!([{"paymentMethodId": p, "spending": 100000, "performance": 350000, "target": 300000, "discountTotal": 35000}])
+        );
+        let all = gql(&schema, &format!(r#"{{ cardsMonthly(month: "2026-11", includeFamily: true) {{ {report} }} }}"#)).await;
+        assert_eq!(
+            all["cardsMonthly"][1],
+            json!({"paymentMethodId": f, "spending": 250000, "performance": 350000, "target": 300000, "discountTotal": 35000})
+        );
+
+        // 가족카드 대금은 본인 카드 청구서에 합쳐진다: 본인 카드 청구서는 합친 금액, 가족카드 청구서는 그 카드 이용분.
+        // 여유자금 카드대금 목록에는 본인 카드만 (두 번 세지 않는다)
+        let bill = |pm: i64| {
+            format!(r#"{{ paymentMethod(id: {pm}) {{ statements(from: "2026-11", to: "2026-11") {{ confirmedAmount }} }} statementLines(paymentMethodId: {pm}, month: "2026-11") {{ amount transaction {{ paymentMethodId }} }} }}"#)
+        };
+        let parent_bill = gql(&schema, &bill(p)).await;
+        assert_eq!(parent_bill["paymentMethod"]["statements"], json!([{"confirmedAmount": 350000}]));
+        assert_eq!(
+            parent_bill["statementLines"],
+            json!([{"amount": 100000, "transaction": {"paymentMethodId": p}}, {"amount": 250000, "transaction": {"paymentMethodId": f}}])
+        );
+        let family_bill = gql(&schema, &bill(f)).await;
+        assert_eq!(family_bill["paymentMethod"]["statements"], json!([{"confirmedAmount": 250000}]));
+        let funds = gql(&schema, "{ availableFunds { cards { paymentMethodId statements { month confirmedAmount } } } }").await;
+        let due: Vec<&Value> = funds["availableFunds"]["cards"].as_array().unwrap().iter().filter(|c| [p, f].contains(&id(&c["paymentMethodId"]))).collect();
+        assert_eq!(due.len(), 1);
+        assert_eq!(id(&due[0]["paymentMethodId"]), p);
+
+        // 가족카드 아래 가족카드, 가족카드가 있는 카드를 가족카드로·카드 아닌 종류로 바꾸기는 막는다
+        let msg = gql_error(&schema, &format!(r#"mutation {{ createPaymentMethod(input: {{parentId: {f}, name: "손자", kind: CREDIT_CARD}}) {{ id }} }}"#)).await;
+        assert!(msg.contains("가족카드라"), "{msg}");
+        let other = id(&gql(&schema, r#"mutation { createPaymentMethod(input: {name: "다른", kind: CREDIT_CARD}) { id } }"#).await["createPaymentMethod"]["id"]);
+        let msg = gql_error(&schema, &format!(r#"mutation {{ updatePaymentMethod(id: {p}, input: {{parentId: {other}, name: "본인", kind: CREDIT_CARD}}) {{ id }} }}"#)).await;
+        assert!(msg.contains("가족카드가 있는 카드"), "{msg}");
+        let msg = gql_error(&schema, &format!(r#"mutation {{ updatePaymentMethod(id: {p}, input: {{name: "본인", kind: CASH}}) {{ id }} }}"#)).await;
+        assert!(msg.contains("카드가 아닌 종류"), "{msg}");
+
+        // 본인 카드의 정산 일정을 고치면 가족카드도 따라간다 (혜택은 그대로 두려고 목록을 빼고 보낸다)
+        gql(
+            &schema,
+            &format!(
+                r#"mutation {{ updatePaymentMethod(id: {p}, input: {{name: "본인", kind: CREDIT_CARD, issuer: "신한", paymentDay: 14, closingDay: 31,
+                closingMonthOffset: -1, monthlyTarget: 300000}}) {{ id }} }}"#
+            ),
+        )
+        .await;
+        let read = |pm: i64| format!("{{ paymentMethod(id: {pm}) {{ archived paymentDay closingDay closingMonthOffset benefits {{ id }} }} }}");
+        let synced = gql(&schema, &read(f)).await["paymentMethod"].clone();
+        assert_eq!((synced["paymentDay"].clone(), synced["closingDay"].clone(), synced["closingMonthOffset"].clone()), (json!(14), json!(31), json!(-1)));
+        assert_eq!(synced["benefits"], json!([{"id": benefit}]));
+
+        // 본인 카드를 지우면(거래가 있어 보관) 가족카드도 보관된다. 가족카드만 먼저 다시 쓸 수는 없다
+        let del = gql(&schema, &format!("mutation {{ deletePaymentMethod(id: {p}) {{ deleted archived }} }}")).await;
+        assert_eq!(del["deletePaymentMethod"], json!({"deleted": false, "archived": true}));
+        assert_eq!(gql(&schema, &read(f)).await["paymentMethod"]["archived"], true);
+        let msg = gql_error(&schema, &format!("mutation {{ restorePaymentMethod(id: {f}) {{ id }} }}")).await;
+        assert!(msg.contains("본인 카드"), "{msg}");
+        gql(&schema, &format!("mutation {{ restorePaymentMethod(id: {p}) {{ id }} }}")).await;
+        gql(&schema, &format!("mutation {{ restorePaymentMethod(id: {f}) {{ id }} }}")).await;
+
+        // 가족카드에서 풀면 본인 카드 혜택 지정은 지운다
+        gql(&schema, &format!(r#"mutation {{ updatePaymentMethod(id: {f}, input: {{name: "가족", kind: CREDIT_CARD}}) {{ id }} }}"#)).await;
+        let t = id(&ft["id"]);
+        let after = gql(&schema, &format!("{{ transaction(id: {t}) {{ benefitIds }} }}")).await;
+        assert_eq!(after["transaction"]["benefitIds"], json!([]));
+
+        // 거래가 없어도 가족카드가 있는 본인 카드는 지우지 않고 보관한다
+        let lonely = id(&gql(&schema, r#"mutation { createPaymentMethod(input: {name: "새 본인", kind: CREDIT_CARD}) { id } }"#).await["createPaymentMethod"]["id"]);
+        let kid = id(&gql(&schema, &format!(r#"mutation {{ createPaymentMethod(input: {{parentId: {lonely}, name: "새 가족", kind: CREDIT_CARD}}) {{ id }} }}"#)).await["createPaymentMethod"]["id"]);
+        let del = gql(&schema, &format!("mutation {{ deletePaymentMethod(id: {lonely}) {{ deleted archived }} }}")).await;
+        assert_eq!(del["deletePaymentMethod"], json!({"deleted": false, "archived": true}));
+        assert_eq!(gql(&schema, &read(kid)).await["paymentMethod"]["archived"], true);
+        let msg = gql_error(&schema, &format!(r#"mutation {{ createPaymentMethod(input: {{parentId: {lonely}, name: "또 가족", kind: CREDIT_CARD}}) {{ id }} }}"#)).await;
+        assert!(msg.contains("보관된 카드"), "{msg}");
+    }
 
     #[test]
     fn labels() {
