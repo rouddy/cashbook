@@ -21,7 +21,7 @@ server/
 └── src/
     ├── main.rs             CLI 분기(serve / import / generate-planned), Rocket 기동, 매시간 예정 거래 작업
     ├── config.rs           AppConfig: 환경 변수, "오늘"(CASHBOOK_TZ 기준)
-    ├── auth.rs             비밀번호 세션·API 토큰, Auth / FullAccess 가드, Origin·Host 검사, 로그인 시도 제한
+    ├── auth.rs             비밀번호 세션·API 토큰, Auth 가드, Origin·Host 검사, 로그인 시도 제한
     ├── routes.rs           REST 라우트, /api 오류 catcher(JSON), SPA 서빙
     ├── db/
     │   ├── mod.rs          연결 + 마이그레이션 자동 적용, SQLite·MySQL 차이를 감추는 SQL 조각(sql), 테스트용 인메모리 DB
@@ -80,7 +80,7 @@ flowchart LR
 
 ### GraphQL 요청
 
-1. `POST /api/graphql`: `FullAccess` 가드를 통과해야 합니다 (로그인 세션 또는 `FULL` 토큰. `INGEST` 토큰은 403).
+1. `POST /api/graphql`: `Auth` 가드를 통과해야 합니다 (로그인 세션 또는 API 토큰).
 2. 요청마다 `Lookup::new(db)`를 `request.data`로 넣습니다. 장부·카테고리·결제수단·계좌·혜택·구간·거래-혜택처럼 작은 테이블을 요청당 한 번만 읽어서, 거래 목록의 하위 필드(`category`, `paymentMethod`, `benefits` …)가 N+1 쿼리를 내지 않게 합니다.
 3. 리졸버는 `db(ctx)`, `config(ctx)`, `lookup(ctx)`로 꺼내 쓰고, 뮤테이션 후에는 `lookup(ctx).invalidate()`를 호출합니다.
 4. 입력 오류는 `user_error()`로 `code: BAD_USER_INPUT`을 붙여 돌려줍니다.
@@ -97,15 +97,15 @@ flowchart LR
 
 ### 자동 입력 요청
 
-`routes.rs`의 `ingest_json`/`ingest_text`가 `Auth` 가드(토큰 권한 무관, 세션도 허용)를 통과하면 건마다 DB 트랜잭션을 열고 `domain::ingest::ingest()`를 실행한 뒤, 카테고리·결제수단 이름까지 풀어서 JSON으로 응답합니다. GraphQL `ingestTransaction`도 같은 `domain::ingest`를 씁니다.
+`routes.rs`의 `ingest_json`/`ingest_text`가 `Auth` 가드(API 토큰 또는 세션)를 통과하면 건마다 DB 트랜잭션을 열고 `domain::ingest::ingest()`를 실행한 뒤, 카테고리·결제수단 이름까지 풀어서 JSON으로 응답합니다. GraphQL `ingestTransaction`도 같은 `domain::ingest`를 씁니다.
 
 ### 인증 가드 (`auth.rs`)
 
-`Auth`는 아래 순서로 판정합니다. `FullAccess`는 `Auth` 결과 중 `INGEST` 토큰만 추가로 막습니다.
+`Auth`는 아래 순서로 판정합니다. GraphQL과 자동 입력이 같은 가드를 쓰고, 토큰에는 권한 구분이 없습니다.
 
 1. `Origin`이 `Host`(또는 `X-Forwarded-Host`, `CASHBOOK_ALLOWED_ORIGINS`)와 다르면 403
 2. `CASHBOOK_PASSWORD`가 없으면 localhost Host(+ `CASHBOOK_ALLOWED_HOSTS`)일 때만 `Auth::Disabled`, 아니면 403
-3. `Authorization: Bearer` / `X-Api-Key` 토큰이 있으면 SHA-256 해시로 조회 → `Auth::Token { scope }` 또는 401
+3. `Authorization: Bearer` / `X-Api-Key` 토큰이 있으면 SHA-256 해시로 조회 → `Auth::Token` 또는 401
 4. 암호화 세션 쿠키가 현재 비밀번호와 맞으면 `Auth::Session`, 아니면 401
 
 403 사유는 `ForbiddenReason`으로 요청 로컬 캐시에 남기고, `/api` catcher가 `{"ok": false, "error": "..."}`로 돌려줍니다.
@@ -297,7 +297,6 @@ erDiagram
         string name
         string token_hash UK "SHA-256"
         string token_prefix "목록 표시용"
-        TokenScope scope "기본 INGEST"
         timestamptz created_at
         timestamptz last_used_at "null"
     }
@@ -348,7 +347,6 @@ erDiagram
 | `TxStatus` | `transactions.status` | `CONFIRMED`, `PLANNED`, `SKIPPED` |
 | `TxSource` | `transactions.source` | `MANUAL`, `IMPORT`, `API`, `RECURRING` |
 | `PlanItemKind` | `plan_items.kind` | `ALLOCATION`, `MEMBER_ALLOWANCE` (예전 `INCOME`은 정기수익 반복 규칙으로 옮겨 없음) |
-| `TokenScope` | `api_tokens.scope` | `INGEST`, `FULL` |
 
 ### 스키마에 드러나지 않는 규칙
 
@@ -374,6 +372,7 @@ erDiagram
 | `m20261120_000006_ledger_transfers` | `transactions.transfer_ledger_id`(+ `(transfer_ledger_id, date)` 인덱스), `recurring_rules.transfer_ledger_id` |
 | `m20261120_000007_convert_legacy_plan` | 데이터만, 한 트랜잭션: 합계 제외 카테고리 → 같은 이름 장부로(거래·반복 규칙째), 월 수입 계획 → 정기수익 항목 매월 10일 반복 수입, 장부와 이름이 맞는 배분 → 매월 1일 장부 이체 반복(이번 달부터), 이체가 대신하는 받는 장부의 월 수입 삭제. 규칙은 `domain::legacy_plan`, 가져오기도 같은 규칙 |
 | `m20261120_000008_drop_excluded_from_spending` | `categories.excluded_from_spending` 삭제 |
+| `m20261122_000011_drop_api_token_scope` | `api_tokens.scope` 삭제: 토큰 권한을 하나로 합쳐 예전 자동 입력 전용(`INGEST`) 토큰도 GraphQL을 쓴다 |
 
 스키마를 바꿀 때:
 

@@ -19,6 +19,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261120_000008_drop_excluded_from_spending::Migration),
             Box::new(m20261120_000009_recurring_match_amount::Migration),
             Box::new(m20261120_000010_recurring_rule_benefits::Migration),
+            Box::new(m20261122_000011_drop_api_token_scope::Migration),
         ]
     }
 }
@@ -1519,5 +1520,32 @@ INSERT INTO transactions (ledger_id, date, amount, category_id, payment_method_i
         assert_eq!(items, vec![(1, PlanItemKind::MemberAllowance, "송화 용돈".into()), (1, PlanItemKind::Allocation, "저축".into())]);
         // 합계 제외 컬럼은 없어졌다
         assert!(db.execute_unprepared("SELECT excluded_from_spending FROM categories").await.is_err());
+    }
+}
+
+/// API 토큰 권한을 하나로 합친다: 자동 입력 전용(`INGEST`)과 전체(`FULL`) 구분을 없애고 모든 토큰이 전체 API를 쓴다.
+/// 기존 자동 입력 전용 토큰도 그대로 전체 권한이 된다.
+mod m20261122_000011_drop_api_token_scope {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261122_000011_drop_api_token_scope"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum ApiTokens {
+        Table,
+        Scope,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            manager.alter_table(Table::alter().table(ApiTokens::Table).drop_column(ApiTokens::Scope).to_owned()).await
+        }
     }
 }

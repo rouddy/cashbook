@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::auth::{
-    Auth, ForbiddenReason, FullAccess, SESSION_COOKIE, SESSION_DAYS, check_password, session_valid, session_value,
+    Auth, ForbiddenReason, SESSION_COOKIE, SESSION_DAYS, check_password, session_valid, session_value,
 };
 use crate::domain::ingest::{self, IngestError, IngestInput, IngestOutcome};
 use crate::graphql::{CashbookSchema, Lookup};
@@ -35,7 +35,7 @@ fn api_error(status: Status, message: impl Into<String>) -> ApiError {
 }
 
 #[post("/graphql", data = "<request>", format = "json")]
-async fn graphql(schema: &State<CashbookSchema>, state: &State<AppState>, _auth: FullAccess, request: GraphQLRequest) -> GraphQLResponse {
+async fn graphql(schema: &State<CashbookSchema>, state: &State<AppState>, _auth: Auth, request: GraphQLRequest) -> GraphQLResponse {
     request.data(Lookup::new(state.db.clone())).execute(schema.inner()).await
 }
 
@@ -193,7 +193,7 @@ async fn ingest_text(state: &State<AppState>, _auth: Auth, text: String) -> Resu
     }
 }
 
-/// 자동 입력 규칙에서 고를 장부·카테고리·결제수단 이름 (안드로이드 앱의 선택 목록). 자동 입력 전용 토큰으로도 읽는다.
+/// 자동 입력 규칙에서 고를 장부·카테고리·결제수단 이름 (안드로이드 앱 규칙 화면의 선택 목록).
 #[get("/ingest/options")]
 async fn ingest_options(state: &State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
     let options = ingest::options(&state.db).await.map_err(|e| api_error(Status::InternalServerError, e.to_string()))?;

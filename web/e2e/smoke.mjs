@@ -574,17 +574,14 @@ await step('설정: API 토큰 발급 → 토큰으로 자동 입력 → 폐기 
   // 다른 사이트에서 보낸 요청(Origin 불일치)은 토큰이 있어도 거부
   const evil = await post({ Authorization: `Bearer ${token}`, Origin: 'https://evil.example' })
   assert.equal(evil.status, 403)
-  // 자동 입력 전용 토큰으로는 GraphQL을 쓸 수 없다
+  // 같은 토큰으로 GraphQL도 쓴다 (토큰 권한은 하나)
   const gqlWith = (t) =>
     fetch(`${BASE}/api/graphql`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
       body: JSON.stringify({ query: '{ appInfo { version } }' }),
     })
-  assert.equal((await gqlWith(token)).status, 403)
-  const full = await gql(`mutation { createApiToken(name: "e2e-full-${STAMP}", scope: FULL) { token apiToken { id } } }`)
-  assert.equal((await gqlWith(full.data.createApiToken.token)).status, 200)
-  await gql(`mutation($id: Int!) { deleteApiToken(id: $id) }`, { id: full.data.createApiToken.apiToken.id })
+  assert.equal((await gqlWith(token)).status, 200)
 
   await page.reload()
   const row = page.locator('tbody tr', { hasText: `e2e-${STAMP}` })
@@ -593,6 +590,7 @@ await step('설정: API 토큰 발급 → 토큰으로 자동 입력 → 폐기 
   await row.getByRole('button', { name: '폐기' }).click()
   await row.waitFor({ state: 'detached' })
   assert.equal((await post({ Authorization: `Bearer ${token}` })).status, 401)
+  assert.equal((await gqlWith(token)).status, 401)
   await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: body.transaction.id })
 })
 

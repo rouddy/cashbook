@@ -1,4 +1,4 @@
-//! 자동 입력 API 토큰 발급/폐기.
+//! API 토큰 발급/폐기. 토큰은 자동 입력과 GraphQL을 모두 쓴다.
 
 use async_graphql::{Context, Object, Result, SimpleObject};
 use chrono::Utc;
@@ -6,7 +6,7 @@ use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, Set};
 
 use super::{db, user_error};
 use crate::auth::{generate_token, sha256_hex};
-use crate::entity::{api_token, enums::TokenScope};
+use crate::entity::api_token;
 
 #[derive(SimpleObject)]
 pub struct CreatedApiToken {
@@ -30,13 +30,8 @@ pub struct TokenMutation;
 
 #[Object]
 impl TokenMutation {
-    /// 토큰 발급 (예: "아이폰 단축어", "갤럭시 문자 전달"). 기본은 자동 입력 전용.
-    async fn create_api_token(
-        &self,
-        ctx: &Context<'_>,
-        name: String,
-        #[graphql(default_with = "TokenScope::Ingest")] scope: TokenScope,
-    ) -> Result<CreatedApiToken> {
+    /// 토큰 발급 (예: "아이폰 단축어", "가계부 앱"). 자동 입력과 GraphQL 전체를 쓸 수 있다.
+    async fn create_api_token(&self, ctx: &Context<'_>, name: String) -> Result<CreatedApiToken> {
         let name = name.trim().to_string();
         if name.is_empty() {
             return Err(user_error("토큰 이름을 입력하세요"));
@@ -46,7 +41,6 @@ impl TokenMutation {
             name: Set(name),
             token_hash: Set(sha256_hex(&token)),
             token_prefix: Set(token.chars().take(10).collect()),
-            scope: Set(scope),
             created_at: Set(Utc::now()),
             last_used_at: Set(None),
             ..Default::default()
