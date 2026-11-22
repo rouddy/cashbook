@@ -64,6 +64,7 @@ import com.rouddy.cashbook.relay.Graph
 import com.rouddy.cashbook.relay.book.BookException
 import com.rouddy.cashbook.relay.book.Category
 import com.rouddy.cashbook.relay.book.EntryRules
+import com.rouddy.cashbook.relay.book.RecentFilter
 import com.rouddy.cashbook.relay.book.RefData
 import com.rouddy.cashbook.relay.book.SOURCE_LABEL
 import com.rouddy.cashbook.relay.book.Tx
@@ -83,10 +84,10 @@ import kotlinx.coroutines.launch
 
 /**
  * 최근 내역: 확정 거래를 날짜 최신순으로 [PAGE]건씩 이어서 읽는다.
- * "자동 입력만"(source = API)은 SharedPreferences에 마지막 상태를 둔다.
+ * "자동 입력만"(source = API)·"미분류만"(항목 없음) 체크는 SharedPreferences에 마지막 상태를 둔다.
  */
 class RecentViewModel : ViewModel() {
-    var autoOnly by mutableStateOf(Graph.prefs.recentAutoOnly)
+    var filter by mutableStateOf(RecentFilter(Graph.prefs.recentAutoOnly, Graph.prefs.recentUncategorizedOnly))
         private set
     val items = mutableStateListOf<Tx>()
     var total by mutableLongStateOf(0)
@@ -141,10 +142,11 @@ class RecentViewModel : ViewModel() {
         if (isVisible) reload(keepCount = true, refreshRef = ref == null)
     }
 
-    fun changeAutoOnly(on: Boolean) {
-        if (on == autoOnly) return
-        autoOnly = on
-        Graph.prefs.recentAutoOnly = on
+    fun changeFilter(next: RecentFilter) {
+        if (next == filter) return
+        filter = next
+        Graph.prefs.recentAutoOnly = next.autoOnly
+        Graph.prefs.recentUncategorizedOnly = next.uncategorizedOnly
         items.clear()
         loaded = false
         reload()
@@ -166,7 +168,7 @@ class RecentViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 if (refreshRef || ref == null) ref = Graph.book.loadRef()
-                val page = Graph.book.transactions(autoOnly, offset = 0, limit = limit)
+                val page = Graph.book.transactions(filter, offset = 0, limit = limit)
                 if (gen != generation) return@launch
                 items.clear()
                 items.addAll(page.items)
@@ -198,7 +200,7 @@ class RecentViewModel : ViewModel() {
         moreError = null
         viewModelScope.launch {
             try {
-                val page = Graph.book.transactions(autoOnly, offset = items.size, limit = PAGE)
+                val page = Graph.book.transactions(filter, offset = items.size, limit = PAGE)
                 if (gen != generation) return@launch
                 // 그사이 새 거래가 들어와 밀린 행은 이미 있으니 건너뛴다
                 val have = items.mapTo(HashSet()) { it.id }
@@ -246,9 +248,14 @@ class RecentViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 val saved = Graph.book.update(tx.id, patch)
-                // 바로 보이게 바꿔 끼운다 (곧 changes로 목록 전체를 다시 읽는다)
+                // 바로 보이게 바꿔 끼우고, 필터에서 벗어나면(미분류만 보기에서 항목을 정함) 뺀다 (곧 changes로 목록 전체를 다시 읽는다)
                 val i = items.indexOfFirst { it.id == saved.id }
-                if (i >= 0) items[i] = saved
+                if (i >= 0 && filter.matches(saved)) {
+                    items[i] = saved
+                } else if (i >= 0) {
+                    items.removeAt(i)
+                    total = (total - 1).coerceAtLeast(0)
+                }
                 message = "'${saved.description}' 고쳤습니다"
                 if (selected?.id == tx.id) onSaved()
             } catch (e: BookException) {
@@ -285,12 +292,10 @@ fun RecentScreen(onOpenSettings: () -> Unit) {
     }
     Scaffold(topBar = { TopAppBar(title = { Text("최근 내역") }) }, snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            Row(
-                Modifier.fillMaxWidth().clickable { vm.changeAutoOnly(!vm.autoOnly) }.padding(start = 4.dp, end = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Checkbox(checked = vm.autoOnly, onCheckedChange = vm::changeAutoOnly)
-                Text("자동 입력만 보기", style = MaterialTheme.typography.bodyLarge)
+            val filter = vm.filter
+            Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                FilterCheck("자동 입력만", filter.autoOnly) { vm.changeFilter(filter.copy(autoOnly = it)) }
+                FilterCheck("미분류만", filter.uncategorizedOnly) { vm.changeFilter(filter.copy(uncategorizedOnly = it)) }
                 Spacer(Modifier.weight(1f))
                 if (vm.loaded) {
                     Text("${amountText(vm.total)}건", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -338,7 +343,11 @@ private fun RecentList(vm: RecentViewModel, onOpenSettings: () -> Unit, onSelect
         if (vm.loaded && vm.items.isEmpty()) {
             item {
                 Text(
-                    if (vm.autoOnly) "자동 입력된 거래가 없습니다. 설정 → 규칙에서 카드 문자·앱 알림 규칙을 만드세요." else "거래가 없습니다.",
+                    when {
+                        vm.filter.uncategorizedOnly -> if (vm.filter.autoOnly) "항목이 없는 자동 입력 거래가 없습니다." else "항목이 없는 거래가 없습니다."
+                        vm.filter.autoOnly -> "자동 입력된 거래가 없습니다. 설정 → 규칙에서 카드 문자·앱 알림 규칙을 만드세요."
+                        else -> "거래가 없습니다."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(24.dp),
@@ -366,6 +375,18 @@ private fun RecentList(vm: RecentViewModel, onOpenSettings: () -> Unit, onSelect
                 }
             }
         }
+    }
+}
+
+/** 체크박스 + 글자 (글자를 눌러도 바뀐다) */
+@Composable
+private fun FilterCheck(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.clickable { onChange(!checked) }.padding(end = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(checked = checked, onCheckedChange = onChange)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
 

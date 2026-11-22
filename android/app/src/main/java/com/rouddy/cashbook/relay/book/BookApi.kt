@@ -81,14 +81,27 @@ object BookApi {
         }
     }
 
-    /** 최근 내역 필터: 확정 거래만 (예정은 대시보드에서), 자동 입력만이면 source = API */
-    fun recentFilter(autoOnly: Boolean): JsonObject = buildJsonObject {
-        put("statuses", JsonArray(listOf(JsonPrimitive("CONFIRMED"))))
-        if (autoOnly) put("source", "API")
-    }
-
     /** 대시보드의 예정 거래 범위: 석 달 전부터(지난 미확정) 앞으로 [aheadDays]일 */
     fun plannedRange(today: LocalDate, aheadDays: Long = 7): Pair<LocalDate, LocalDate> = today.minusDays(92) to today.plusDays(aheadDays)
+}
+
+/**
+ * 최근 내역 필터. 확정 거래만 (예정은 대시보드에서).
+ * [autoOnly]: 자동 입력(source = API)만, [uncategorizedOnly]: 항목 없는 거래만 (서버 `uncategorized` — 장부 이체 제외)
+ */
+data class RecentFilter(val autoOnly: Boolean = false, val uncategorizedOnly: Boolean = false) {
+    /** `TransactionFilter` */
+    fun toJson(): JsonObject = buildJsonObject {
+        put("statuses", JsonArray(listOf(JsonPrimitive("CONFIRMED"))))
+        if (autoOnly) put("source", "API")
+        if (uncategorizedOnly) put("uncategorized", true)
+    }
+
+    /** 서버 필터와 같은 기준: 고친 거래가 아직 이 목록에 남는지 (항목을 정하면 '미분류만'에서 빠진다) */
+    fun matches(tx: Tx): Boolean =
+        tx.status == "CONFIRMED" &&
+            (!autoOnly || tx.isAuto) &&
+            (!uncategorizedOnly || (tx.categoryId == null && !tx.isTransfer))
 }
 
 @Serializable
@@ -155,9 +168,9 @@ class BookRepository(private val store: Store) {
         return query(Queries.DASHBOARD, variables, Dashboard.serializer())
     }
 
-    suspend fun transactions(autoOnly: Boolean, offset: Int, limit: Int): TxPage {
+    suspend fun transactions(filter: RecentFilter, offset: Int, limit: Int): TxPage {
         val variables = buildJsonObject {
-            put("filter", BookApi.recentFilter(autoOnly))
+            put("filter", filter.toJson())
             put("offset", offset)
             put("limit", limit)
         }
