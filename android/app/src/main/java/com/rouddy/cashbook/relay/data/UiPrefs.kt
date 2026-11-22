@@ -12,6 +12,11 @@ class UiPrefs(context: Context) {
         get() = prefs.getBoolean(KEY_RECENT_AUTO_ONLY, false)
         set(value) = prefs.edit { putBoolean(KEY_RECENT_AUTO_ONLY, value) }
 
+    /** 최근 내역의 "미분류만" 체크 */
+    var recentUncategorizedOnly: Boolean
+        get() = prefs.getBoolean(KEY_RECENT_UNCATEGORIZED_ONLY, false)
+        set(value) = prefs.edit { putBoolean(KEY_RECENT_UNCATEGORIZED_ONLY, value) }
+
     /** 대시보드 장부: [LEDGER_DEFAULT], [LEDGER_ALL] 또는 장부 id */
     var dashboardLedger: String
         get() = prefs.getString(KEY_DASHBOARD_LEDGER, LEDGER_DEFAULT) ?: LEDGER_DEFAULT
@@ -19,6 +24,7 @@ class UiPrefs(context: Context) {
 
     companion object {
         private const val KEY_RECENT_AUTO_ONLY = "recent_auto_only"
+        private const val KEY_RECENT_UNCATEGORIZED_ONLY = "recent_uncategorized_only"
         private const val KEY_DASHBOARD_LEDGER = "dashboard_ledger"
         const val LEDGER_DEFAULT = "default"
         const val LEDGER_ALL = "all"

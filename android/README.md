@@ -33,7 +33,7 @@ CircleCI(`.circleci/config.yml`의 `android-apk`)는 키스토어를 `CASHBOOK_K
 |---|---|
 | **대시보드** | 달(◀ ▶)·장부(기본 장부/장부별/전체, 마지막 선택을 기억) 기준으로 이번 달 소비(평균 대비)·수입·월잔액(장부를 고르면, 예정 반영 값 포함)·예정 포함 예상 소비(예산 대비 막대), 일별 누적 소비 차트(누르거나 끌면 그날 값, 표로 보기), 카드 실적 현황(목표까지 남은 금액·혜택·한도), 여유자금과 다가오는 카드 결제(오늘 기준), 예정 거래(지난 미확정 + 앞으로 7일, 확정·건너뛰기), 카테고리별 소비(평균·예산 비교) |
 | **수동 입력** | 지출 / 수입 / 장부 이체. 금액(지출은 환불·취소), 내용(과거 내용을 고르면 장부·항목·결제수단·혜택을 채움), 날짜, 장부(이체는 보내는·받는 장부), 항목, 결제수단, 할부(신용카드), 카드 혜택·전월실적 제외(카드), 구성원, 메모, 확정/예정 |
-| **최근 내역** | 확정 거래를 날짜 최신순으로 30건씩 이어서 불러옵니다(끝 가까이 내리면 다음 쪽). 맨 위 **자동 입력만 보기**(입력 경로가 자동 입력 API인 거래)는 마지막 상태를 기기(SharedPreferences)에 둡니다. 거래를 누르면 원문까지 자세히 봅니다 |
+| **최근 내역** | 확정 거래를 날짜 최신순으로 30건씩 이어서 불러옵니다(끝 가까이 내리면 다음 쪽). 맨 위 체크 **자동 입력만**(입력 경로가 자동 입력 API인 거래)·**미분류만**(항목이 없는 거래, 장부 이체 제외 — 항목을 정하면 목록에서 빠짐)은 함께 걸 수 있고 마지막 상태를 기기(SharedPreferences)에 둡니다. 거래를 누르면 원문까지 자세히 보고 **항목·카드 혜택·메모**를 고쳐 저장합니다(항목은 그 거래 장부의 것만, 수입 항목이면 혜택 없음, 장부 이체는 메모만, 저장하지 않고 닫으면 버림) |
 | **설정** | 탭 **서버**(주소·토큰·연결 확인) / **권한** / **규칙**(자동 업로드 스위치·규칙 목록) / **업로드 기록**. 서버 미설정·필요한 권한 없음·업로드 실패가 있으면 하단 메뉴와 탭에 표시 |
 
 대시보드·수동 입력·최근 내역은 화면이 다시 보일 때와, 이 앱에서 거래를 넣거나 자동 입력 업로드가 성공했을 때 다시 읽습니다(아래로 당겨 새로 고침도 됨).
@@ -146,9 +146,9 @@ app/src/main/java/com/rouddy/cashbook/relay/
   ingest/UploadWorker.kt   서버 전송·재시도
   ingest/CashbookApi.kt    /api/ingest, 연결 확인, 응답 해석
   source/                  SmsReceiver, MmsReceiver + MmsWorker, MessageReader(문자 저장소), NotificationCaptureService
-  data/UiPrefs.kt          화면 선택 상태(SharedPreferences): 최근 내역 "자동 입력만", 대시보드 장부
+  data/UiPrefs.kt          화면 선택 상태(SharedPreferences): 최근 내역 "자동 입력만"·"미분류만", 대시보드 장부
   book/                    가계부 GraphQL: Queries(문서), BookModels(응답), BookApi(해석·오류 종류·BookRepository),
-                           EntryForm(수동 입력 규칙·요청 JSON), BookFormat(금액·날짜·이체 표시)
+                           EntryForm(수동 입력 규칙·요청 JSON), TxEdit(최근 내역 고치기 — 바뀐 값만 보내는 patch), BookFormat(금액·날짜·이체 표시)
   ui/                      AppNav(하단 메뉴), DashboardScreen·DailyChart·BookUi(막대·차트 색), EntryScreen, RecentScreen,
                            SettingsScreen(탭: 서버) + PermissionsPane·RulesPane·HistoryPane, 규칙 편집, 앱/번호/샘플 선택
 ```

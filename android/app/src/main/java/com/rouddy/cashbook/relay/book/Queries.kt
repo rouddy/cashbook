@@ -52,6 +52,11 @@ object Queries {
   createTransaction(input: $input) { id description amount status }
 }"""
 
+    /** 바꿀 필드만 보낸다 (`TransactionPatch`, null이면 비움). 최근 내역 목록의 행을 바꿔 끼우도록 거래 전체를 돌려받는다 */
+    const val UPDATE_TX = $$"""mutation UpdateTx($id: Int!, $input: TransactionPatch!) {
+  updateTransaction(id: $id, input: $input) { $$TX_FIELDS }
+}"""
+
     const val CONFIRM_TX = $$"""mutation ConfirmTx($id: Int!) { confirmTransaction(id: $id) { id description amount status } }"""
 
     const val SKIP_TX = $$"""mutation SkipTx($id: Int!) { skipTransaction(id: $id) { id description amount status } }"""

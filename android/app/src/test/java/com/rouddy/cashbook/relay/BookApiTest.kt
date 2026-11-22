@@ -3,7 +3,9 @@ package com.rouddy.cashbook.relay
 import com.rouddy.cashbook.relay.book.BookApi
 import com.rouddy.cashbook.relay.book.BookException
 import com.rouddy.cashbook.relay.book.Dashboard
+import com.rouddy.cashbook.relay.book.RecentFilter
 import com.rouddy.cashbook.relay.book.RefData
+import com.rouddy.cashbook.relay.book.Tx
 import com.rouddy.cashbook.relay.ingest.CashbookApi
 import com.rouddy.cashbook.relay.ingest.CashbookApi.Outcome
 import kotlinx.serialization.json.JsonPrimitive
@@ -108,12 +110,30 @@ class BookApiTest {
 
     @Test
     fun recentFilterAndPlannedRange() {
-        val all = BookApi.recentFilter(autoOnly = false)
+        val all = RecentFilter().toJson()
         assertEquals(listOf(JsonPrimitive("CONFIRMED")), all["statuses"]!!.jsonArray.toList())
         assertNull(all["source"])
-        assertEquals(JsonPrimitive("API"), BookApi.recentFilter(autoOnly = true)["source"])
+        assertNull(all["uncategorized"])
+        assertEquals(JsonPrimitive("API"), RecentFilter(autoOnly = true).toJson()["source"])
+        val both = RecentFilter(autoOnly = true, uncategorizedOnly = true).toJson()
+        assertEquals(JsonPrimitive("API"), both["source"])
+        assertEquals(JsonPrimitive(true), both["uncategorized"])
         val (from, to) = BookApi.plannedRange(LocalDate.of(2026, 11, 21))
         assertEquals(LocalDate.of(2026, 8, 21), from)
         assertEquals(LocalDate.of(2026, 11, 28), to)
+    }
+
+    @Test
+    fun recentFilterMatchesLikeServer() {
+        val tx = Tx(id = 1, ledgerId = 1, date = "2026-11-21", amount = 5_000, description = "편의점", source = "API")
+        val uncategorized = RecentFilter(uncategorizedOnly = true)
+        assertTrue(uncategorized.matches(tx))
+        // 항목을 정하면 '미분류만'에서 빠진다
+        assertFalse(uncategorized.matches(tx.copy(categoryId = 10)))
+        // 서버 uncategorized는 장부 이체를 빼고, 최근 내역은 확정만
+        assertFalse(uncategorized.matches(tx.copy(transferLedgerId = 2)))
+        assertFalse(RecentFilter().matches(tx.copy(status = "PLANNED")))
+        assertTrue(RecentFilter(autoOnly = true).matches(tx.copy(categoryId = 10)))
+        assertFalse(RecentFilter(autoOnly = true, uncategorizedOnly = true).matches(tx.copy(source = "MANUAL")))
     }
 }
