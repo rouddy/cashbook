@@ -299,6 +299,7 @@ function ApiGuide({ authEnabled }: { authEnabled: boolean }) {
             <b>가계부 자동 입력 앱</b>(저장소의 <code>android/</code>): 서버 주소에 <code>{base}</code>
             {authEnabled ? ', API 토큰에 발급한 토큰' : ''}을 넣고, 카드사 문자 번호나 결제 앱 알림을 규칙으로 등록하면 받는 즉시 올립니다
             (문자 형식 템플릿, 장문 LMS, 재시도·기록).
+            {' '}같은 연결로 앱의 대시보드·수동 입력·최근 내역도 씁니다.
           </p>
           <p className="small text-2" style={{ margin: 0 }}>
             다른 앱을 쓸 때: 카드사 번호에서 온 문자를 받으면 HTTP POST로 <code>{base}/api/ingest</code>에 문자 내용(본문)을 보내도록 설정합니다. Content-Type은 <code>text/plain</code>

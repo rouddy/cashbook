@@ -2,7 +2,9 @@ package com.rouddy.cashbook.relay
 
 import android.app.Application
 import android.content.Context
+import com.rouddy.cashbook.relay.book.BookRepository
 import com.rouddy.cashbook.relay.data.Store
+import com.rouddy.cashbook.relay.data.UiPrefs
 import com.rouddy.cashbook.relay.ingest.Notifications
 import com.rouddy.cashbook.relay.source.MmsWorker
 import kotlinx.coroutines.CoroutineScope
@@ -15,11 +17,22 @@ object Graph {
     lateinit var store: Store
         private set
 
+    /** 가계부 GraphQL (대시보드·수동 입력·최근 내역) */
+    lateinit var book: BookRepository
+        private set
+
+    lateinit var prefs: UiPrefs
+        private set
+
     /** 수신기·알림 서비스에서 화면과 관계없이 처리할 때 쓰는 범위 */
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     fun init(context: Context) {
-        if (!::store.isInitialized) store = Store(context.applicationContext)
+        if (!::store.isInitialized) {
+            store = Store(context.applicationContext)
+            book = BookRepository(store)
+            prefs = UiPrefs(context.applicationContext)
+        }
     }
 }
 

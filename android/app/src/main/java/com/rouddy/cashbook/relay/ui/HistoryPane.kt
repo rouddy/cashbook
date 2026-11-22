@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -13,24 +14,19 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -82,61 +78,70 @@ private fun UploadRecord.detailLine(): String {
     return (listOf(ruleName.ifBlank { originLabel }) + parts).joinToString(" · ")
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** 설정 → 업로드 기록 상단 메뉴: 실패한 항목 다시 보내기, 기록 지우기 */
 @Composable
-fun HistoryScreen(onBack: () -> Unit) {
+fun HistoryMenu(snackbar: SnackbarHostState) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val snackbar = remember { SnackbarHostState() }
     val records by Graph.store.recordsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    var selected by remember { mutableStateOf<String?>(null) }
     var menu by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("업로드 기록") },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "뒤로") } },
-                actions = {
-                    Box {
-                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "더 보기") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("실패한 항목 다시 보내기") },
-                                enabled = records.any { it.status == UploadStatus.FAILED },
-                                onClick = {
-                                    menu = false
-                                    scope.launch {
-                                        val n = Ingestor.resendFailed(context)
-                                        snackbar.showSnackbar("${n}건을 다시 보냅니다")
-                                    }
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("기록 지우기") },
-                                enabled = records.isNotEmpty(),
-                                onClick = {
-                                    menu = false
-                                    confirmClear = true
-                                },
-                            )
-                        }
+    Box {
+        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "기록 메뉴") }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(
+                text = { Text("실패한 항목 다시 보내기") },
+                enabled = records.any { it.status == UploadStatus.FAILED },
+                onClick = {
+                    menu = false
+                    scope.launch {
+                        val n = Ingestor.resendFailed(context)
+                        snackbar.showSnackbar("${n}건을 다시 보냅니다")
                     }
                 },
             )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { padding ->
-        if (records.isEmpty()) {
-            Text(
-                "아직 받은 내역이 없습니다. 규칙에 맞는 문자·알림을 받으면 여기에 쌓입니다.",
-                Modifier.padding(padding).padding(24.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            DropdownMenuItem(
+                text = { Text("기록 지우기") },
+                enabled = records.isNotEmpty(),
+                onClick = {
+                    menu = false
+                    confirmClear = true
+                },
             )
-            return@Scaffold
         }
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = padding) {
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("기록 지우기") },
+            text = { Text("보내기를 기다리는 항목을 빼고 모두 지웁니다. 지운 문자가 다시 오면 다시 보냅니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmClear = false
+                    scope.launch { Graph.store.clearFinishedRecords() }
+                }) { Text("지우기") }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("취소") } },
+        )
+    }
+}
+
+/** 설정 → 업로드 기록: 받은 문자·알림과 서버로 보낸 결과 */
+@Composable
+fun HistoryPane(contentPadding: PaddingValues) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val records by Graph.store.recordsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    var selected by remember { mutableStateOf<String?>(null) }
+
+    if (records.isEmpty()) {
+        Text(
+            "아직 받은 내역이 없습니다. 규칙에 맞는 문자·알림을 받으면 여기에 쌓입니다.",
+            Modifier.padding(contentPadding).padding(24.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
             items(records, key = { it.id }) { record ->
                 val (label, color) = statusLabel(record.status)
                 ListItem(
@@ -169,20 +174,6 @@ fun HistoryScreen(onBack: () -> Unit) {
                 scope.launch { Graph.store.deleteRecord(record.id) }
                 selected = null
             },
-        )
-    }
-    if (confirmClear) {
-        AlertDialog(
-            onDismissRequest = { confirmClear = false },
-            title = { Text("기록 지우기") },
-            text = { Text("보내기를 기다리는 항목을 빼고 모두 지웁니다. 지운 문자가 다시 오면 다시 보냅니다.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmClear = false
-                    scope.launch { Graph.store.clearFinishedRecords() }
-                }) { Text("지우기") }
-            },
-            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("취소") } },
         )
     }
 }

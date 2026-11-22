@@ -6,13 +6,13 @@
 - **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite 또는 MySQL
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
 - **가져오기 도구**: Python + openpyxl (스프레드시트 xlsx → 정규화 JSON)
-- **안드로이드 자동 입력 앱**: Kotlin · Jetpack Compose (카드 승인 문자·결제 앱 알림 → 자동 입력 API)
+- **안드로이드 앱**: Kotlin · Jetpack Compose (카드 승인 문자·결제 앱 알림 → 자동 입력 API, 대시보드·수동 입력·최근 내역)
 
 | 문서 | 내용 |
 |---|---|
 | [server/README.md](server/README.md) | 서버 코드 구조, GraphQL 리졸버 위치, 데이터베이스 ERD |
 | [web/README.md](web/README.md) | 프론트엔드 코드 구조, 화면 명세 |
-| [android/README.md](android/README.md) | 안드로이드 자동 입력 앱: 문자·앱 알림 규칙, 형식 템플릿, 빌드·시험 |
+| [android/README.md](android/README.md) | 안드로이드 앱: 화면(대시보드·수동 입력·최근 내역·설정), 문자·앱 알림 규칙, 형식 템플릿, 빌드·시험 |
 | [k8s/README.md](k8s/README.md) | Kubernetes 배포: 서버 이미지, 웹 빌드 PVC, DB(SQLite PVC 또는 MySQL), 백업·복원 |
 
 ## 화면
