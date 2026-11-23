@@ -37,6 +37,8 @@ data class PaymentMethod(
     val kind: String = "OTHER",
     val isCard: Boolean = false,
     val archived: Boolean = false,
+    /** 확정 거래가 있는 마지막 날 (yyyy-MM-dd), 쓴 적 없으면 null */
+    val lastUsedOn: String? = null,
     val benefits: List<Benefit> = emptyList(),
 ) {
     val isCreditCard: Boolean get() = kind == "CREDIT_CARD"

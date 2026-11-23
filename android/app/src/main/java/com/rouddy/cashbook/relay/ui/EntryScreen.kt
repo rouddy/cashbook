@@ -185,6 +185,8 @@ class EntryViewModel : ViewModel() {
                 message = "$what ${amountText(abs(tx.amount))}원 ${if (tx.status == "PLANNED") "예정으로 " else ""}저장했습니다"
                 form = EntryRules.afterSave(saved)
                 dismissSuggestions()
+                // 방금 쓴 카드가 결제수단 목록에서 최근 사용 순으로 올라오게 다시 읽는다
+                loadRef()
             } catch (e: BookException) {
                 message = e.message
             } finally {
@@ -329,7 +331,7 @@ private fun EntryFields(vm: EntryViewModel, ref: RefData) {
             }
         }
 
-        val methods = ref.activePaymentMethods
+        val methods = EntryRules.paymentMethodChoices(ref)
         ChoiceField(
             label = if (expense) "결제수단" else "결제수단 (받은 곳, 선택)",
             value = f.paymentMethodId?.toString().orEmpty(),
