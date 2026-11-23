@@ -13,6 +13,8 @@ pub mod card_tier;
 pub mod category;
 pub mod enums;
 pub mod ledger;
+pub mod oauth_client;
+pub mod oauth_grant;
 pub mod payment_method;
 pub mod plan_item;
 pub mod recurring_rule;

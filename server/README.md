@@ -24,6 +24,10 @@ server/
     ├── auth.rs             계정 세션·API 토큰, Auth 가드(계정 id·관리자), Origin·Host 검사
     ├── oauth.rs            Google 로그인: Authorization Code + PKCE, 코드 교환·userinfo
     ├── routes.rs           REST 라우트(세션·Google 로그인·자동 입력), /api 오류 catcher(JSON), SPA 서빙
+    ├── mcp/
+    │   ├── mod.rs          MCP 서버 /api/mcp: 세션 없는 JSON-RPC(initialize·ping·tools/list·tools/call)
+    │   ├── tools.rs        조회 도구 7개 — 요청 계정의 GraphQL을 실행해 이름·kind를 붙여 돌려준다
+    │   └── auth.rs         MCP 클라이언트용 OAuth 2.1 인가 서버(동적 등록·승인 화면·토큰·메타데이터)와 /api/mcp 인증
     ├── db/
     │   ├── mod.rs          연결 + 마이그레이션 자동 적용, SQLite·MySQL 차이를 감추는 SQL 조각(sql), 테스트용 인메모리 DB
     │   ├── migration.rs    손으로 쓴 마이그레이션
@@ -66,12 +70,14 @@ server/
 flowchart LR
     Web["웹 (React SPA)"] -->|"POST /api/graphql"| Routes
     Auto["단축어·문자 전달 앱"] -->|"POST /api/ingest"| Routes
+    AI["AI 앱 (Dots·ChatGPT·Claude)"] -->|"POST /api/mcp<br/>OAuth"| Mcp
     CLI["cashbook import<br/>generate-planned<br/>copy-db"] --> Domain
     Timer["시작 시·매시간<br/>(main.rs)"] --> Domain
 
     subgraph server
         Routes["routes.rs<br/>auth.rs 가드"] --> GraphQL["graphql/<br/>Query·Mutation·Lookup"]
         Routes -->|ingest| Domain
+        Mcp["mcp/<br/>도구·OAuth"] -->|"계정 범위 GraphQL"| GraphQL
         GraphQL --> Domain["domain/"]
         GraphQL --> Entity
         Domain --> Entity["entity/<br/>(SeaORM)"]
@@ -122,6 +128,14 @@ flowchart LR
 4. 세션 쿠키를 만들고 `next`(이 사이트 안의 경로만)로 보냅니다. 실패하면 `/login?error=이유`.
 
 시험은 `routes.rs`의 가짜 Google 서버(토큰·userinfo를 흉내 내는 TCP 서버)로 전체 흐름을 돌립니다.
+
+### MCP (`mcp/`)
+
+- `POST /api/mcp`는 메시지 하나(또는 배열)를 받아 JSON으로 답하고, 알림만 오면 202. 서버가 먼저 보내는 것이 없어 SSE·세션은 쓰지 않습니다(GET·DELETE 405).
+- 도구는 조회 전용이고 모두 `readOnlyHint`. 각 도구는 고정된 GraphQL 문서를 요청 계정(`Lookup`·`CurrentUser`)으로 실행합니다. 거래 행은 `summary::tx_kind`로 지출/환불/정산/수입/이체를 붙입니다. 인자·입력 오류는 JSON-RPC 오류가 아니라 `isError: true` 도구 결과로 돌려 모델이 고쳐 부르게 합니다.
+- 인증(`McpCaller` 가드): Origin 검사 → 인증 없는 로컬이면 계정 1 → `cb_` API 토큰 → OAuth 액세스 토큰(`oauth_grants`, 만료·리소스·범위 확인). 실패하면 `401` + `WWW-Authenticate: Bearer resource_metadata="…/.well-known/oauth-protected-resource/api/mcp"`로 OAuth 설정을 알려 줍니다.
+- OAuth 흐름: `/.well-known/oauth-authorization-server` → `POST /api/oauth/register`(RFC 7591, `none`·`client_secret_basic`·`client_secret_post`, redirect는 https나 localhost) → `GET /oauth/authorize`(승인 화면, `/api/` 밖이라 Google 로그인의 `next`로 돌아올 수 있음) → `POST /oauth/authorize`(세션 쿠키로 계정 확인, 인가 코드는 `AppState.oauth_codes` 메모리에 5분) → `POST /api/oauth/token`(PKCE S256, 코드는 한 번만, 리프레시하면 액세스·리프레시를 둘 다 교체). 응답에 `iss`를 붙입니다(RFC 9207).
+- 승인한 연결이 없는 30일 넘은 클라이언트와 만료된 연결은 등록할 때 지우고, 클라이언트는 500개까지 받습니다.
 
 403 사유는 `ForbiddenReason`으로 요청 로컬 캐시에 남기고, `/api` catcher가 `{"ok": false, "error": "..."}`로 돌려줍니다.
 

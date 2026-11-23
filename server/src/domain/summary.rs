@@ -60,6 +60,57 @@ pub fn outflow(tx: &transaction::Model, categories: &HashMap<i32, category::Mode
     }
 }
 
+/// 사람·AI가 읽는 거래 한 건의 성격. 합계 계산은 [`classify`]를 쓰고, 이것은 표시용이다.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TxKind {
+    /// 지출 카테고리(와 미분류)의 + 금액
+    Spending,
+    /// 카드 결제의 − 금액: 결제 취소·환불
+    Refund,
+    /// 카드가 아닌 결제수단(현금·계좌이체 등, 결제수단 없음 포함)의 − 금액:
+    /// 다른 사람 몫을 대신 내거나 회사 물건을 사고 돌려받은 돈
+    Reimbursement,
+    Income,
+    TransferIn,
+    TransferOut,
+    /// 장부를 정하지 않은 조회의 장부 이체
+    Transfer,
+}
+
+impl TxKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            TxKind::Spending => "지출",
+            TxKind::Refund => "환불",
+            TxKind::Reimbursement => "정산",
+            TxKind::Income => "수입",
+            TxKind::TransferIn => "받은 이체",
+            TxKind::TransferOut => "보낸 이체",
+            TxKind::Transfer => "장부 이체",
+        }
+    }
+}
+
+/// 지출 카테고리의 − 금액은 계산에서는 모두 소비를 줄이지만(카드는 실적도), 카드면 환불, 카드가 아니면 정산으로 본다.
+pub fn tx_kind(
+    tx: &transaction::Model,
+    categories: &HashMap<i32, category::Model>,
+    payment_methods: &HashMap<i32, payment_method::Model>,
+    ledger_id: Option<i32>,
+) -> TxKind {
+    match classify(tx, categories, ledger_id) {
+        Flow::TransferIn => TxKind::TransferIn,
+        Flow::TransferOut => TxKind::TransferOut,
+        Flow::Internal => TxKind::Transfer,
+        Flow::Income => TxKind::Income,
+        Flow::Spending { .. } if tx.amount >= 0 => TxKind::Spending,
+        Flow::Spending { .. } => match tx.payment_method_id.and_then(|id| payment_methods.get(&id)) {
+            Some(pm) if pm.kind.is_card() => TxKind::Refund,
+            _ => TxKind::Reimbursement,
+        },
+    }
+}
+
 #[derive(SimpleObject, Clone, Debug, PartialEq)]
 pub struct CategorySummary {
     pub category_id: Option<i32>,
@@ -567,6 +618,62 @@ mod tests {
         t.transfer_ledger_id = Some(to);
         t.payment_method_id = None;
         t
+    }
+
+    fn pm(id: i32, kind: crate::entity::enums::PaymentKind) -> payment_method::Model {
+        payment_method::Model {
+            id,
+            user_id: 1,
+            name: format!("p{id}"),
+            kind,
+            issuer: None,
+            last4: None,
+            aliases: None,
+            account_id: None,
+            payment_day: None,
+            closing_day: None,
+            closing_month_offset: None,
+            expires_on: None,
+            color: None,
+            memo: None,
+            sort_order: id,
+            archived: false,
+            parent_id: None,
+            card_product_id: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn negative_spending_is_refund_on_card_and_reimbursement_otherwise() {
+        use crate::entity::enums::PaymentKind;
+        let categories: HashMap<i32, category::Model> =
+            [cat(1, "외식", CategoryKind::Expense, false, None), cat(2, "월급", CategoryKind::Income, false, None)]
+                .into_iter()
+                .map(|c| (c.id, c))
+                .collect();
+        let pms: HashMap<i32, payment_method::Model> =
+            [pm(1, PaymentKind::CreditCard), pm(2, PaymentKind::CheckCard), pm(3, PaymentKind::Cash), pm(4, PaymentKind::BankTransfer)]
+                .into_iter()
+                .map(|p| (p.id, p))
+                .collect();
+        let with_pm = |amount: i64, cat: Option<i32>, pm: Option<i32>| {
+            let mut t = tx(1, (2026, 11, 1), amount, cat, TxStatus::Confirmed, None);
+            t.payment_method_id = pm;
+            t
+        };
+        let kind = |t: &transaction::Model, ledger: Option<i32>| tx_kind(t, &categories, &pms, ledger);
+        assert_eq!(kind(&with_pm(5000, Some(1), Some(1)), None), TxKind::Spending);
+        assert_eq!(kind(&with_pm(-5000, Some(1), Some(1)), None), TxKind::Refund);
+        assert_eq!(kind(&with_pm(-5000, Some(1), Some(2)), None), TxKind::Refund, "체크카드도 카드");
+        assert_eq!(kind(&with_pm(-5000, Some(1), Some(3)), None), TxKind::Reimbursement);
+        assert_eq!(kind(&with_pm(-5000, Some(1), Some(4)), None), TxKind::Reimbursement);
+        assert_eq!(kind(&with_pm(-5000, None, None), None), TxKind::Reimbursement, "미분류·결제수단 없음");
+        assert_eq!(kind(&with_pm(-5000, Some(2), Some(1)), None), TxKind::Income, "수입 카테고리는 부호와 무관");
+        let t = transfer(2, (2026, 11, 1), 100_000, 1, 2, TxStatus::Confirmed);
+        assert_eq!(kind(&t, None), TxKind::Transfer);
+        assert_eq!(kind(&t, Some(1)), TxKind::TransferOut);
+        assert_eq!(kind(&t, Some(2)), TxKind::TransferIn);
     }
 
     #[test]

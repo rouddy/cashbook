@@ -185,6 +185,8 @@ export const CREATE_TOKEN = `mutation CreateToken($name: String!) {
   createApiToken(name: $name) { token apiToken { id name tokenPrefix createdAt lastUsedAt } }
 }`
 export const DELETE_TOKEN = `mutation DeleteToken($id: Int!) { deleteApiToken(id: $id) }`
+export const CONNECTED_APPS_QUERY = `query ConnectedApps { connectedApps { id clientName scope createdAt lastUsedAt refreshExpiresAt } }`
+export const REVOKE_CONNECTED_APP = `mutation RevokeConnectedApp($id: Int!) { revokeConnectedApp(id: $id) }`
 
 export const INGEST = `mutation Ingest($input: IngestInput!) {
   ingestTransaction(input: $input) { created duplicate matchedPlanned warnings transaction { ${TX_FIELDS} } }

@@ -17,6 +17,9 @@ use crate::domain::users::GoogleProfile;
 /// 로그인 중 상태를 담는 쿠키 (Google에서 돌아오는 요청에도 실리도록 SameSite=Lax)
 pub const STATE_COOKIE: &str = "cashbook_oauth";
 pub const STATE_MINUTES: i64 = 10;
+/// 로그인 뒤 돌아갈 경로의 최대 길이. MCP 승인 화면(`/oauth/authorize?...`)은 OAuth 요청 값을 모두 담아 길다.
+/// 로그인 중 쿠키(4KB 한도)에 암호화해 넣으므로 이 정도로 묶는다.
+const MAX_NEXT_LEN: usize = 2048;
 
 /// Google로 보낸 로그인 요청 (쿠키에 암호화해 둔다)
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -52,7 +55,7 @@ pub fn challenge(verifier: &str) -> String {
 /// 한글 검색어처럼 URI에 그대로 못 쓰는 글자는 퍼센트 인코딩한다 (Location 헤더로 보낼 수 있게).
 pub fn safe_next(next: Option<&str>) -> String {
     match next.map(str::trim) {
-        Some(n) if n.starts_with('/') && !n.starts_with("//") && !n.contains('\\') && !n.starts_with("/api/") && n.len() <= 512 => {
+        Some(n) if n.starts_with('/') && !n.starts_with("//") && !n.contains('\\') && !n.starts_with("/api/") && n.len() <= MAX_NEXT_LEN => {
             let mut out = String::with_capacity(n.len());
             for c in n.chars() {
                 if c.is_ascii_graphic() && !"\"<>^`{|}".contains(c) {

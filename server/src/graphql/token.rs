@@ -1,4 +1,4 @@
-//! API 토큰 발급/폐기. 토큰은 자동 입력과 GraphQL을 모두 쓴다.
+//! API 토큰 발급/폐기(토큰은 자동 입력과 GraphQL을 모두 쓴다)와 MCP로 연결된 앱(OAuth 연결) 목록·끊기.
 
 use async_graphql::{Context, Object, Result, SimpleObject};
 use chrono::Utc;
@@ -6,7 +6,7 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrde
 
 use super::{db, uid, user_error};
 use crate::auth::{generate_token, sha256_hex};
-use crate::entity::{OfUser, api_token};
+use crate::entity::{OfUser, api_token, oauth_grant};
 
 #[derive(SimpleObject)]
 pub struct CreatedApiToken {
@@ -23,6 +23,12 @@ impl TokenQuery {
     async fn api_tokens(&self, ctx: &Context<'_>) -> Result<Vec<api_token::Model>> {
         let uid = uid(ctx)?;
         Ok(api_token::Entity::find().of_user(uid).order_by_desc(api_token::Column::Id).all(db(ctx)).await?)
+    }
+
+    /// MCP로 연결된 앱 (OpenAI Dots·ChatGPT 플러그인 등이 OAuth로 승인받은 연결)
+    async fn connected_apps(&self, ctx: &Context<'_>) -> Result<Vec<oauth_grant::Model>> {
+        let uid = uid(ctx)?;
+        Ok(oauth_grant::Entity::find().of_user(uid).order_by_desc(oauth_grant::Column::Id).all(db(ctx)).await?)
     }
 }
 
@@ -55,5 +61,11 @@ impl TokenMutation {
     async fn delete_api_token(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
         let uid = uid(ctx)?;
         Ok(api_token::Entity::delete_many().of_user(uid).filter(api_token::Column::Id.eq(id)).exec(db(ctx)).await?.rows_affected > 0)
+    }
+
+    /// 연결 끊기: 그 앱의 액세스·리프레시 토큰이 바로 무효가 된다
+    async fn revoke_connected_app(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
+        let uid = uid(ctx)?;
+        Ok(oauth_grant::Entity::delete_many().of_user(uid).filter(oauth_grant::Column::Id.eq(id)).exec(db(ctx)).await?.rows_affected > 0)
     }
 }

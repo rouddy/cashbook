@@ -87,7 +87,7 @@ fn forbid<T>(req: &Request<'_>, reason: &'static str) -> Outcome<T, &'static str
     Outcome::Error((Status::Forbidden, reason))
 }
 
-fn bearer_token<'a>(req: &'a Request<'_>) -> Option<&'a str> {
+pub(crate) fn bearer_token<'a>(req: &'a Request<'_>) -> Option<&'a str> {
     req.headers()
         .get_one("Authorization")
         .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")))
