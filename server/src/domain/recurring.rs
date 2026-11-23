@@ -31,7 +31,8 @@ pub fn occurs_in(rule: &recurring_rule::Model, month: YearMonth) -> bool {
     start.months_until(month) % rule.interval_months.max(1) == 0
 }
 
-/// 활성 규칙의 예정 거래를 채운다. 새로 만든 개수를 돌려준다.
+/// 활성 규칙의 예정 거래를 채운다 (모든 계정, `only_rule`이면 그 규칙만). 새로 만든 개수를 돌려준다.
+/// 예정 거래는 규칙의 계정 것이 된다.
 pub async fn ensure_planned<C: ConnectionTrait>(
     db: &C,
     today: NaiveDate,
@@ -77,6 +78,7 @@ pub async fn ensure_planned<C: ConnectionTrait>(
                 continue;
             }
             let saved = transaction::ActiveModel {
+                user_id: Set(rule.user_id),
                 ledger_id: Set(rule.ledger_id),
                 date: Set(month.day(rule.day_of_month.max(1) as u32)),
                 amount: Set(rule.amount),
@@ -121,6 +123,7 @@ pub async fn regenerate<C: ConnectionTrait>(
     ensure_planned(db, today, months_ahead, Some(rule_id)).await
 }
 
+/// 규칙이 이번 달 이후에 만든 예정 거래를 지운다. 규칙의 계정은 부르는 쪽에서 확인한다.
 pub async fn remove_future_planned<C: ConnectionTrait>(db: &C, rule_id: i32, today: NaiveDate) -> Result<u64, DbErr> {
     let res = transaction::Entity::delete_many()
         .filter(transaction::Column::RecurringRuleId.eq(rule_id))
@@ -138,6 +141,7 @@ mod tests {
     fn rule(start: &str, end: Option<&str>, interval: i32) -> recurring_rule::Model {
         recurring_rule::Model {
             id: 1,
+            user_id: 1,
             ledger_id: 1,
             description: "보험".into(),
             amount: 10_000,
@@ -181,6 +185,7 @@ mod tests {
         let db = crate::db::connect_in_memory().await;
         let now = Utc::now();
         crate::entity::ledger::ActiveModel {
+            user_id: Set(1),
             name: Set("가계부".into()),
             description: Set(None),
             is_default: Set(true),

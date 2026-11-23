@@ -12,3 +12,4 @@ pub mod recurring;
 pub mod sms;
 pub mod split;
 pub mod summary;
+pub mod users;

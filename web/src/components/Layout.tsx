@@ -1,6 +1,7 @@
+import { useQuery } from '@tanstack/react-query'
 import { NavLink, Outlet } from 'react-router-dom'
 
-import { logout } from '../api/client'
+import { fetchSession, signOut } from '../api/client'
 import { useRefData } from '../api/hooks'
 
 const NAV = [
@@ -16,6 +17,8 @@ const NAV = [
 
 export default function Layout() {
   const { ref } = useRefData()
+  const session = useQuery({ queryKey: ['session'], queryFn: fetchSession, staleTime: Infinity })
+  const user = session.data?.authRequired ? session.data.user : null
   return (
     <div className="app">
       <nav className="sidebar" aria-label="주 메뉴">
@@ -32,14 +35,14 @@ export default function Layout() {
           </NavLink>
         ))}
         <div className="sidebar-footer">
-          {ref?.appInfo.authEnabled && (
-            <button
-              className="btn sm ghost"
-              onClick={async () => {
-                await logout()
-                window.location.href = '/login'
-              }}
-            >
+          {user && (
+            <div className="sidebar-user" title={user.email ?? undefined}>
+              {user.picture && <img src={user.picture} alt="" referrerPolicy="no-referrer" />}
+              <span>{user.name ?? user.email}</span>
+            </div>
+          )}
+          {user && (
+            <button className="btn sm ghost" onClick={signOut}>
               로그아웃
             </button>
           )}

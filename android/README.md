@@ -158,7 +158,9 @@ app/src/main/java/com/rouddy/cashbook/relay/
 ```bash
 # 1) 테스트용 서버 (실제 DB 사본으로, 루트 README의 E2E와 같은 방식)
 sqlite3 server/data/cashbook.db ".backup /tmp/cashbook-android-e2e.db"
-(cd server && DATABASE_URL="sqlite:///tmp/cashbook-android-e2e.db?mode=rwc" CASHBOOK_PASSWORD=e2e-pass \
+#    Google 로그인 설정 없이 띄우면 기본 계정(id 1, 사본의 기존 데이터)으로 동작하고 토큰은 확인하지 않는다.
+#    토큰까지 시험하려면 루트 README의 E2E처럼 가짜 Google 서버 설정으로 띄운다
+(cd server && DATABASE_URL="sqlite:///tmp/cashbook-android-e2e.db?mode=rwc" \
    CASHBOOK_SECRET_FILE=/tmp/cashbook-android-e2e.key ROCKET_PORT=8001 cargo run) &
 
 # 2) 앱 설치, 에뮬레이터의 127.0.0.1:8001을 PC로 연결 → 앱 서버 주소 http://127.0.0.1:8001

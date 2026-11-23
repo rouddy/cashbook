@@ -2,13 +2,16 @@
 
 use async_graphql::{ComplexObject, Context, InputObject, Object, Result};
 use chrono::{Duration, NaiveDate, Utc};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+    sea_query::Query,
+};
 
-use super::{config, db, lookup, trim_opt, user_error};
+use super::{config, db, lookup, trim_opt, uid, user_error};
 use crate::domain::billing::INSTALLMENT_LOOKBACK_DAYS;
 use crate::domain::funds::{self, AvailableFunds, FundsInput};
 use crate::entity::{
-    account, account_balance,
+    OfUser, account, account_balance,
     enums::{AccountKind, TxStatus},
     payment_method, transaction,
 };
@@ -46,7 +49,8 @@ pub struct AccountQuery;
 #[Object]
 impl AccountQuery {
     async fn accounts(&self, ctx: &Context<'_>, #[graphql(default = false)] include_archived: bool) -> Result<Vec<account::Model>> {
-        let mut q = account::Entity::find();
+        let uid = uid(ctx)?;
+        let mut q = account::Entity::find().of_user(uid);
         if !include_archived {
             q = q.filter(account::Column::Archived.eq(false));
         }
@@ -58,19 +62,22 @@ impl AccountQuery {
     }
 
     async fn account(&self, ctx: &Context<'_>, id: i32) -> Result<Option<account::Model>> {
-        Ok(account::Entity::find_by_id(id).one(db(ctx)).await?)
+        let uid = uid(ctx)?;
+        Ok(account::Entity::find_by_id(id).of_user(uid).one(db(ctx)).await?)
     }
 
     /// 여유자금 = 은행 잔고 − 잔고 기준일 이후 결제될 카드대금 − 잔고 반영 전 계좌 출금
     async fn available_funds(&self, ctx: &Context<'_>) -> Result<AvailableFunds> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
         let today = config(ctx).today();
-        let accounts = account::Entity::find().all(db).await?;
+        let accounts = account::Entity::find().of_user(uid).all(db).await?;
         let lookup = lookup(ctx);
         let pms: Vec<payment_method::Model> = lookup.payment_methods().await?.values().cloned().collect();
         let categories = lookup.categories().await?;
         // 최대 60개월 할부의 남은 청구분까지 보려고 5년 전부터 읽는다.
         let txs = transaction::Entity::find()
+            .of_user(uid)
             .filter(transaction::Column::Status.ne(TxStatus::Skipped))
             .filter(transaction::Column::Date.gte(today - Duration::days(INSTALLMENT_LOOKBACK_DAYS)))
             .all(db)
@@ -128,18 +135,20 @@ pub struct AccountMutation;
 #[Object]
 impl AccountMutation {
     async fn create_account(&self, ctx: &Context<'_>, input: AccountInput) -> Result<account::Model> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
         let name = input.name.trim().to_string();
         if name.is_empty() {
             return Err(user_error("계좌 이름을 입력하세요"));
         }
         let today = config(ctx).today();
-        let count = account::Entity::find().count(db).await?;
+        let count = account::Entity::find().of_user(uid).count(db).await?;
         let now = Utc::now();
         let balance = input.balance.unwrap_or(0);
         let balance_date = input.balance_date.or(input.balance.map(|_| today));
         let txn = db.begin().await?;
         let saved = account::ActiveModel {
+            user_id: Set(uid),
             name: Set(name),
             bank: Set(trim_opt(input.bank)),
             kind: Set(input.kind),
@@ -167,8 +176,9 @@ impl AccountMutation {
     }
 
     async fn update_account(&self, ctx: &Context<'_>, id: i32, input: AccountInput) -> Result<account::Model> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
-        let found = account::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("계좌가 없습니다"))?;
+        let found = account::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("계좌가 없습니다"))?;
         let today = config(ctx).today();
         let txn = db.begin().await?;
         // 잔고 값을 보냈을 때만 잔고 변경으로 본다 (이름 등만 고칠 때 기준일이 바뀌지 않게)
@@ -214,8 +224,9 @@ impl AccountMutation {
         date: Option<NaiveDate>,
         memo: Option<String>,
     ) -> Result<account::Model> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
-        let found = account::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("계좌가 없습니다"))?;
+        let found = account::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("계좌가 없습니다"))?;
         let date = date.unwrap_or_else(|| config(ctx).today());
         let txn = db.begin().await?;
         record_balance(&txn, id, balance, date, trim_opt(memo)).await?;
@@ -235,21 +246,32 @@ impl AccountMutation {
     }
 
     async fn delete_account_balance(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
-        Ok(account_balance::Entity::delete_by_id(id).exec(db(ctx)).await?.rows_affected > 0)
+        let uid = uid(ctx)?;
+        let mine = Query::select().column(account::Column::Id).from(account::Entity).and_where(account::Column::UserId.eq(uid)).to_owned();
+        Ok(account_balance::Entity::delete_many()
+            .filter(account_balance::Column::Id.eq(id))
+            .filter(account_balance::Column::AccountId.in_subquery(mine))
+            .exec(db(ctx))
+            .await?
+            .rows_affected
+            > 0)
     }
 
     /// 계좌 삭제 (연결된 카드의 결제 계좌는 비워진다)
     async fn delete_account(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
-        let res = account::Entity::delete_by_id(id).exec(db(ctx)).await?;
+        let uid = uid(ctx)?;
+        let res = account::Entity::delete_many().of_user(uid).filter(account::Column::Id.eq(id)).exec(db(ctx)).await?;
         lookup(ctx).invalidate();
         Ok(res.rows_affected > 0)
     }
 
     async fn reorder_accounts(&self, ctx: &Context<'_>, ids: Vec<i32>) -> Result<bool> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
         let txn = db.begin().await?;
         for (i, id) in ids.iter().enumerate() {
             account::Entity::update_many()
+                .of_user(uid)
                 .col_expr(account::Column::SortOrder, (i as i32).into())
                 .filter(account::Column::Id.eq(*id))
                 .exec(&txn)

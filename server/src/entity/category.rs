@@ -9,6 +9,9 @@ use super::enums::CategoryKind;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
+    /// 계정 (`users.id`)
+    #[graphql(skip)]
+    pub user_id: i32,
     pub ledger_id: i32,
     pub name: String,
     pub kind: CategoryKind,
@@ -24,4 +27,4 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
-impl ActiveModelBehavior for ActiveModel {}
+super::user_owned!();

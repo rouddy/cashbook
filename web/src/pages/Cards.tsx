@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 
 import { useGql, useMutate, useRefData } from '../api/hooks'
-import { CARD_LIST_QUERY, CARDS_MONTHLY_QUERY, DELETE_PM, RESTORE_PM } from '../api/queries'
-import type { CardMonthReport, PaymentMethod, StatementInfo } from '../api/types'
+import { CARD_LIST_QUERY, CARD_PRODUCTS_QUERY, CARDS_MONTHLY_QUERY, DELETE_CARD_PRODUCT, DELETE_PM, RESTORE_PM } from '../api/queries'
+import type { CardMonthReport, CardProduct, PaymentMethod, StatementInfo } from '../api/types'
 import CardForm from '../components/CardForm'
-import { ErrorBox, Loading, PerformanceMeter, PlannedSwatch } from '../components/Common'
+import CardProductForm from '../components/CardProductForm'
+import { ErrorBox, Loading, Panel, PerformanceMeter, PlannedSwatch } from '../components/Common'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
 import { benefitTotalsText, hasBenefit, plannedPerformance } from '../lib/benefits'
@@ -196,6 +197,7 @@ export default function Cards() {
           })}
         </div>
       )}
+      <CardProducts />
       {adding && (
         <Modal title="카드 추가" onClose={() => setAdding(false)} width={860}>
           <CardForm
@@ -209,5 +211,92 @@ export default function Cards() {
         </Modal>
       )}
     </div>
+  )
+}
+
+/** 카드 상품 목록 (모든 계정 공용). 만든 계정과 관리자는 고치거나 (쓰는 카드가 없으면) 지울 수 있다 */
+function CardProducts() {
+  const products = useGql<{ cardProducts: CardProduct[] }>(['cardProducts'], CARD_PRODUCTS_QUERY)
+  const { run, pending } = useMutate()
+  const toast = useToast()
+  const [editing, setEditing] = useState<'new' | CardProduct | null>(null)
+  const list = products.data?.cardProducts ?? []
+  const editingProduct = editing === 'new' ? undefined : (editing ?? undefined)
+  return (
+    <Panel
+      title="카드 상품"
+      sub="전월실적 목표·구간·혜택·연회비. 모든 계정이 함께 쓰고, 만든 사람과 관리자만 고칩니다. 카드 편집에서 상품을 고르세요."
+      actions={
+        <button className="btn sm" onClick={() => setEditing('new')}>
+          + 새 상품
+        </button>
+      }
+      flush
+    >
+      {products.error ? (
+        <ErrorBox error={products.error} />
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>상품</th>
+                <th className="num">연회비</th>
+                <th className="num">전월실적 목표</th>
+                <th>혜택</th>
+                <th className="num">사용 카드</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    <b>{p.label}</b> {p.createdByMe && <span className="badge planned">내 상품</span>}
+                    {p.memo && <div className="small muted">{p.memo}</div>}
+                  </td>
+                  <td className="num">{p.annualFee != null ? `${won(p.annualFee)}원` : '-'}</td>
+                  <td className="num">{p.monthlyTarget != null ? `${won(p.monthlyTarget)}원` : '-'}</td>
+                  <td className="small">{p.benefits.length ? p.benefits.map((b) => b.name).join(', ') : <span className="muted">없음</span>}</td>
+                  <td className="num">{p.cardCount}</td>
+                  <td className="nowrap" style={{ textAlign: 'right' }}>
+                    {p.canEdit && (
+                      <>
+                        <button className="btn sm ghost" onClick={() => setEditing(p)}>
+                          수정
+                        </button>
+                        <button
+                          className="btn sm ghost danger"
+                          disabled={pending || p.cardCount > 0}
+                          title={p.cardCount > 0 ? '이 상품을 쓰는 카드가 있어 지울 수 없습니다' : undefined}
+                          onClick={async () => {
+                            if (!window.confirm(`'${p.label}' 카드 상품을 삭제할까요?`)) return
+                            if (await run(DELETE_CARD_PRODUCT, { id: p.id })) toast('삭제했습니다')
+                          }}
+                        >
+                          삭제
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {products.data && list.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="empty">
+                    등록된 카드 상품이 없습니다
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {editing && (
+        <Modal title={editingProduct ? `카드 상품 수정 · ${editingProduct.label}` : '새 카드 상품'} onClose={() => setEditing(null)} width={860}>
+          <CardProductForm product={editingProduct} onDone={() => setEditing(null)} onCancel={() => setEditing(null)} />
+        </Modal>
+      )}
+    </Panel>
   )
 }

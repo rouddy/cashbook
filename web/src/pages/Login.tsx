@@ -1,55 +1,34 @@
-import { useQueryClient } from '@tanstack/react-query'
-import { useState, type FormEvent } from 'react'
+import { useLocation, useSearchParams } from 'react-router-dom'
 
-import { errorMessage, login } from '../api/client'
+import { googleLoginUrl } from '../api/client'
 
+/** Google 계정으로 로그인. 처음 로그인하면 그 계정의 장부가 새로 생긴다 */
 export default function Login() {
-  const qc = useQueryClient()
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    setBusy(true)
-    setError(null)
-    try {
-      await login(password)
-      await qc.invalidateQueries()
-    } catch (err) {
-      setError(errorMessage(err))
-    } finally {
-      setBusy(false)
-    }
-  }
+  const location = useLocation()
+  const [params] = useSearchParams()
+  const error = params.get('error')
+  // 로그인 화면 자체가 아니면 지금 보던 화면으로 돌아온다
+  const next = location.pathname.startsWith('/login') ? '/' : `${location.pathname}${location.search}`
 
   return (
     <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 16 }}>
-      <form className="panel" style={{ width: 'min(360px, 100%)', padding: 24 }} onSubmit={submit}>
+      <div className="panel" style={{ width: 'min(360px, 100%)', padding: 24 }}>
         <div className="brand" style={{ padding: '0 0 16px' }}>
           <span className="brand-mark">₩</span>
           가계부
         </div>
-        <label className="field">
-          비밀번호
-          <input
-            className="input"
-            type="password"
-            autoFocus
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </label>
+        <p className="muted" style={{ margin: '0 0 16px', fontSize: 13 }}>
+          Google 계정으로 로그인합니다. 처음 로그인하면 그 계정의 장부가 새로 만들어집니다.
+        </p>
         {error && (
-          <div className="error-box" style={{ marginTop: 12 }}>
+          <div className="error-box" role="alert" style={{ marginBottom: 12 }}>
             {error}
           </div>
         )}
-        <button className="btn primary" style={{ width: '100%', marginTop: 16 }} disabled={busy || !password}>
-          {busy ? '확인 중…' : '로그인'}
-        </button>
-      </form>
+        <a className="btn primary" style={{ width: '100%', textDecoration: 'none' }} href={googleLoginUrl(next)}>
+          Google로 로그인
+        </a>
+      </div>
     </div>
   )
 }

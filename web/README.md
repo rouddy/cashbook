@@ -19,13 +19,13 @@ web/
 ├── tsconfig*.json            앱(src) / 빌드 설정(vite.config.ts) 분리
 ├── .oxlintrc.json            린트 설정
 ├── public/favicon.svg
-├── e2e/smoke.mjs             playwright-core + 시스템 Chrome 스모크 테스트 (24단계)
+├── e2e/smoke.mjs             playwright-core + 시스템 Chrome 스모크 테스트 (25단계, 가짜 Google 로그인 서버 포함)
 └── src/
     ├── main.tsx              QueryClient · ToastProvider · BrowserRouter 구성
     ├── App.tsx               세션 확인 → 로그인 화면 또는 라우트 표
     ├── styles.css            디자인 토큰(라이트/다크), 레이아웃, 반응형 (CSS 파일 하나)
     ├── api/
-    │   ├── client.ts         gql() 호출, 세션·로그인·로그아웃 REST, 401 → 전역 이벤트
+    │   ├── client.ts         gql() 호출, 세션(로그인한 계정)·Google 로그인 주소·로그아웃, 401 → 전역 이벤트
     │   ├── hooks.ts          useRefData(기준 데이터 + id 맵), useGql, useMutate
     │   ├── queries.ts        GraphQL 문서 (필드 묶음, 화면별 쿼리, 뮤테이션)
     │   └── types.ts          응답 타입 (스키마에 맞춰 손으로 작성)
@@ -33,13 +33,15 @@ web/
     │   ├── month.ts          "YYYY-MM" 계산, URL 상태 훅 useMonthParam / useQueryParam
     │   ├── benefits.ts       카드 혜택 종류·단위 표시, 혜택률(% / N원당 1마일), 중복 적용 선택 규칙
     │   ├── selection.ts      거래 그리드 선택 모드 상태 useTxSelection
+    │   ├── cards.ts          카드사 목록, 가족카드 묶음·순서
     │   └── format.ts         금액·날짜·비율 포맷, enum 표시 이름
     ├── components/
-    │   ├── Layout.tsx        사이드바 메뉴 + 본문(Outlet)
+    │   ├── Layout.tsx        사이드바 메뉴(로그인한 계정·로그아웃) + 본문(Outlet)
     │   ├── TransactionGrid.tsx  스프레드시트식 거래 표 (셀 편집, 새 행 입력, 확정·건너뛰기·복원)
     │   ├── DeleteTransactions.tsx 선택한 거래 삭제 버튼 + 확인 창, 카드 화면용 선택·삭제 버튼
     │   ├── DescriptionInput.tsx 내용(가맹점) 자동완성, 고르면 과거 분류를 넘겨줌
-    │   ├── CardForm.tsx      결제수단 추가/편집 (정산 일정 자동 추정, 혜택 항목·종류·중복 적용, 실적 구간)
+    │   ├── CardForm.tsx      결제수단 추가/편집 (정산 일정 자동 추정, 가족카드, 카드 상품 고르기·새로 만들기)
+    │   ├── CardProductForm.tsx 카드 상품 추가/편집 (연회비·전월실적 목표, 혜택 항목·종류·중복 적용, 실적 구간)
     │   ├── BenefitChecks.tsx 거래 혜택 선택 (중복 적용이 아닌 혜택은 하나만)
     │   ├── Common.tsx        Loading, ErrorBox, Panel, Amount, Delta, Meter, StatTile
     │   ├── LedgerTabs.tsx    장부 선택 탭 (전체 포함 여부 선택)
@@ -170,17 +172,19 @@ GraphQL 요청이 401을 받으면 `client.ts`가 `cashbook:unauthorized` 이벤
 |---|---|
 | 카드 목록 | 카드별 다음 결제일·금액, 이번 달 실적 미터, 결제 계좌, 마지막 사용일. 누르면 카드 상세 |
 | 보관 카드 보기 | 체크하면 보관한 카드도 표시, 복원 가능 |
-| 카드 추가 | `CardForm` 모달. 결제일만 고르고 "결제일로 자동 추정"하면 마감일·마감월을 채움 |
+| 카드 추가 | `CardForm` 모달. 결제일만 고르고 "결제일로 자동 추정"하면 마감일·마감월을 채움. 카드 상품을 고르거나 '새 상품'으로 그 자리에서 만들면(`CardProductForm`) 골라진 채로 돌아옴 |
+| 카드 상품 | 모든 계정 공용 상품 목록(연회비·목표·혜택·사용 카드 수). 새 상품, 만든 사람·관리자는 수정·삭제(쓰는 카드가 없을 때) |
 | 삭제 | 거래가 있으면 보관, 없으면 삭제 (결과를 토스트로 표시) |
 
 - 데이터: `CARD_LIST_QUERY`, `CARDS_MONTHLY_QUERY`(이번 달 고정)
-- 변경: `CREATE_PM`, `SUGGEST_BILLING`(CardForm), `DELETE_PM`, `RESTORE_PM`
+- 데이터: `CARD_PRODUCTS_QUERY`(CardForm·카드 상품 목록)
+- 변경: `CREATE_PM`, `SUGGEST_BILLING`(CardForm), `DELETE_PM`, `RESTORE_PM`, `CREATE/UPDATE/DELETE_CARD_PRODUCT`
 
 ### 카드 상세 `/cards/:id`
 
 | 영역 | 내용 |
 |---|---|
-| 카드 정보 | 카드사·상품명·카드번호·결제 계좌·정산 일정·전월실적 목표·연회비·유효기간·자동입력 별칭·거래 수·메모, 삭제(보관)·복원. `?edit=1`이면 `CardForm` 편집 모드 |
+| 카드 정보 | 카드사·카드 상품(공용)·카드번호·결제 계좌·정산 일정·전월실적 목표·연회비(상품 값)·유효기간·자동입력 별칭·거래 수·메모, 삭제(보관)·복원. `?edit=1`이면 `CardForm` 편집 모드('상품 수정'으로 상품 편집) |
 | 결제 / 결제 예정 금액 | 다음 결제, 청구서(결제월)별 이용기간·확정·예정 금액·상태(이용 전 / 이용 중 / 결제 예정 / 결제됨). 청구서를 누르면 결제분 내역 모달(할부 회차 포함) |
 | 월 실적 · 혜택 | 전월실적 목표 대비 미터, 혜택 한도 사용 미터(통합 한도에서 차감된 혜택만), 종류별 혜택 합계(원·P·마일), 혜택 항목별 사용·잔여·한도 방식·중복 적용, 다음 구간까지 남은 금액 |
 | 카드 거래 | 그리드. 열: 날짜·금액·항목·내용·혜택·혜택액·구성원·메모·실적제외. 혜택 칸에서 거래별 혜택 항목 지정, 실적제외 체크로 전월실적에서 빼기(새 행 포함) |
@@ -230,9 +234,10 @@ GraphQL 요청이 401을 받으면 `client.ts`가 `cashbook:unauthorized` 이벤
 
 | 영역 | 내용 |
 |---|---|
+| 계정 | 로그인한 Google 계정(이름·이메일·관리자), 로그아웃. 로그인 없는 로컬 실행이면 숨김 |
 | 장부 | 추가·이름 변경·삭제, 기본 장부 지정 (자동 입력과 대시보드의 기본값) |
 | 카드 외 결제수단 | 현금·계좌이체 등 추가/편집(`CardForm`), 연결 계좌 지정, 삭제·복원 |
-| API 토큰 | 이름으로 발급(자동 입력·GraphQL 모두), 원문은 발급 모달에서 한 번만 표시, 폐기 |
+| API 토큰 | 이 계정의 토큰을 이름으로 발급(자동 입력·GraphQL 모두), 원문은 발급 모달에서 한 번만 표시, 폐기 |
 | 자동 입력 API 사용법 | 문자 원문 / JSON / 아이폰 단축어 / 안드로이드(자동 입력 앱·문자 전달 앱·MacroDroid·Tasker) / GraphQL 단계별 안내 |
 
 - 데이터: `TOKENS_QUERY`
@@ -240,7 +245,7 @@ GraphQL 요청이 401을 받으면 `client.ts`가 `cashbook:unauthorized` 이벤
 
 ### 로그인
 
-인증이 켜져 있고 세션이 없으면 경로와 관계없이 표시됩니다. `POST /api/login` 성공 시 세션을 다시 읽어 원래 화면으로 돌아갑니다.
+Google 로그인이 설정돼 있고 세션이 없으면 경로와 관계없이 표시됩니다. 'Google로 로그인'은 `/api/auth/google?next=<지금 경로>`로 가고, 서버가 로그인을 마치면 그 경로로 돌아옵니다. 실패하면 `/login?error=이유`로 돌아와 이유를 보여 줍니다.
 
 ## 새 화면을 추가할 때
 

@@ -1,8 +1,11 @@
-// 가족카드: 본인 카드(`parentId`)와 전월실적·혜택을 함께 쓰는 카드.
-// 종류·결제 계좌·정산 일정은 서버가 본인 카드에 맞추고, 혜택·구간(`benefits`·`tiers`)도 본인 카드 것이 온다.
+// 카드 공통: 카드사 목록, 가족카드(본인 카드 `parentId`와 전월실적·혜택을 함께 쓰는 카드).
+// 가족카드의 종류·결제 계좌·정산 일정·카드 상품은 서버가 본인 카드에 맞추고, 혜택·구간(`benefits`·`tiers`)도 그 상품 것이 온다.
 
 import type { RefMaps } from '../api/hooks'
 import type { PaymentMethod } from '../api/types'
+
+/** 카드사 입력 추천 */
+export const ISSUERS = ['KB국민', '신한', '현대', '삼성', '롯데', '하나', '우리', 'BC', 'NH농협', 'IBK기업', '씨티', '카카오뱅크', '토스']
 
 type CardLike = Pick<PaymentMethod, 'id' | 'parentId'>
 

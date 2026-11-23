@@ -15,9 +15,9 @@ use serde::Deserialize;
 use super::dates::YearMonth;
 use super::legacy_plan::{self, Conversion, LedgerInfo, LegacyItem, LegacyKind};
 use crate::entity::{
-    account, account_balance, card_benefit, card_tier, category,
+    OfUser, account, account_balance, card_benefit, card_product, card_tier, category,
     enums::{AccountKind, BenefitKind, CategoryKind, PaymentKind, PlanItemKind, TxSource, TxStatus},
-    ledger, payment_method, plan_item, recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
+    ledger, payment_method, plan_item, recurring_rule, transaction, transaction_benefit,
 };
 
 #[derive(Deserialize, Debug)]
@@ -232,31 +232,28 @@ fn missing(kind: &str, name: &str) -> DbErr {
     DbErr::Custom(format!("가져오기 데이터 오류: {kind} '{name}'를 찾을 수 없습니다"))
 }
 
-async fn clear_all<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
-    // FK 순서대로 지운다. API 토큰은 남긴다.
-    transaction_benefit::Entity::delete_many().exec(db).await?;
-    transaction::Entity::delete_many().exec(db).await?;
-    recurring_rule_benefit::Entity::delete_many().exec(db).await?;
-    recurring_rule::Entity::delete_many().exec(db).await?;
-    plan_item::Entity::delete_many().exec(db).await?;
-    card_tier::Entity::delete_many().exec(db).await?;
-    card_benefit::Entity::delete_many().exec(db).await?;
-    payment_method::Entity::delete_many().exec(db).await?;
-    account_balance::Entity::delete_many().exec(db).await?;
-    account::Entity::delete_many().exec(db).await?;
-    category::Entity::delete_many().exec(db).await?;
-    ledger::Entity::delete_many().exec(db).await?;
+/// 계정의 데이터를 지운다. FK 순서대로 지우고, 딸린 혜택 지정·구간·잔고 이력은 외래 키(CASCADE)로 같이 지워진다.
+/// API 토큰은 남긴다.
+async fn clear_all<C: ConnectionTrait>(db: &C, uid: i32) -> Result<(), DbErr> {
+    transaction::Entity::delete_many().of_user(uid).exec(db).await?;
+    recurring_rule::Entity::delete_many().of_user(uid).exec(db).await?;
+    plan_item::Entity::delete_many().of_user(uid).exec(db).await?;
+    payment_method::Entity::delete_many().of_user(uid).exec(db).await?;
+    account::Entity::delete_many().of_user(uid).exec(db).await?;
+    category::Entity::delete_many().of_user(uid).exec(db).await?;
+    ledger::Entity::delete_many().of_user(uid).exec(db).await?;
     Ok(())
 }
 
-/// `today`: 시트의 월 수입·배분을 옮긴 반복 규칙의 시작 월
+/// `uid` 계정에 가져온다. `today`: 시트의 월 수입·배분을 옮긴 반복 규칙의 시작 월
 pub async fn run<C: ConnectionTrait + TransactionTrait>(
     db: &C,
+    uid: i32,
     mut data: ImportData,
     replace: bool,
     today: NaiveDate,
 ) -> Result<ImportStats, DbErr> {
-    let existing = transaction::Entity::find().count(db).await? + ledger::Entity::find().count(db).await?;
+    let existing = transaction::Entity::find().of_user(uid).count(db).await? + ledger::Entity::find().of_user(uid).count(db).await?;
     if existing > 0 && !replace {
         return Err(DbErr::Custom(
             "DB에 이미 데이터가 있습니다. 기존 데이터를 지우고 가져오려면 --replace 를 붙이세요".into(),
@@ -265,7 +262,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
     split_excluded_categories(&mut data);
     let txn = db.begin().await?;
     if replace {
-        clear_all(&txn).await?;
+        clear_all(&txn, uid).await?;
     }
     let now = Utc::now();
     let mut stats = ImportStats::default();
@@ -273,6 +270,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
     let mut ledger_ids: HashMap<String, i32> = HashMap::new();
     for (i, l) in data.ledgers.iter().enumerate() {
         let saved = ledger::ActiveModel {
+            user_id: Set(uid),
             name: Set(l.name.clone()),
             description: Set(l.description.clone()),
             is_default: Set(l.is_default),
@@ -291,6 +289,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
     for c in &data.categories {
         let lid = ledger_id(&c.ledger)?;
         let saved = category::ActiveModel {
+            user_id: Set(uid),
             ledger_id: Set(lid),
             name: Set(c.name.clone()),
             kind: Set(c.kind),
@@ -340,6 +339,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
         }
         let order = data.categories.iter().filter(|c| ledger_ids.get(&c.ledger) == Some(&lid)).count();
         let saved = category::ActiveModel {
+            user_id: Set(uid),
             ledger_id: Set(lid),
             name: Set(key.1.clone()),
             kind: Set(CategoryKind::Income),
@@ -366,19 +366,45 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
     let mut benefit_ids: HashMap<(i32, String), i32> = HashMap::new();
     for p in &data.payment_methods {
         let aliases = p.aliases.iter().map(|a| a.trim()).filter(|a| !a.is_empty()).collect::<Vec<_>>().join(",");
+        // 상품명·목표·연회비·구간·혜택이 있으면 카드 상품을 만든다 (계정 공통, 만든 계정은 가져오는 계정)
+        let product_name = p.product_name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let has_product = product_name.is_some()
+            || p.monthly_target.is_some()
+            || p.annual_fee.is_some()
+            || !p.benefits.is_empty()
+            || !p.tiers.is_empty();
+        let product = if has_product {
+            Some(
+                card_product::ActiveModel {
+                    issuer: Set(p.issuer.clone()),
+                    name: Set(product_name.unwrap_or(&p.name).to_string()),
+                    annual_fee: Set(p.annual_fee),
+                    monthly_target: Set(p.monthly_target.filter(|t| *t > 0)),
+                    memo: Set(None),
+                    created_by: Set(Some(uid)),
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?
+                .id,
+            )
+        } else {
+            None
+        };
         let saved = payment_method::ActiveModel {
+            user_id: Set(uid),
             name: Set(p.name.clone()),
             kind: Set(p.kind),
             issuer: Set(p.issuer.clone()),
-            product_name: Set(p.product_name.clone()),
+            card_product_id: Set(product),
             last4: Set(p.last4.clone()),
             aliases: Set((!aliases.is_empty()).then_some(aliases)),
             account_id: Set(None),
             payment_day: Set(None),
             closing_day: Set(None),
             closing_month_offset: Set(None),
-            monthly_target: Set(p.monthly_target),
-            annual_fee: Set(p.annual_fee),
             expires_on: Set(p.expires_on.clone()),
             color: Set(None),
             memo: Set(p.memo.clone()),
@@ -389,34 +415,36 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
         }
         .insert(&txn)
         .await?;
-        for (i, b) in p.benefits.iter().enumerate() {
-            let benefit = card_benefit::ActiveModel {
-                payment_method_id: Set(saved.id),
-                name: Set(b.name.clone()),
-                kind: Set(b.kind),
-                rate: Set(b.rate),
-                min_amount: Set(b.min_amount),
-                per_tx_max: Set(b.per_tx_max),
-                monthly_cap: Set(b.monthly_cap),
-                shares_card_limit: Set(b.shares_card_limit),
-                excludes_performance: Set(b.excludes_performance),
-                stackable: Set(b.stackable),
-                sort_order: Set(i as i32),
-                ..Default::default()
+        if let Some(product) = product {
+            for (i, b) in p.benefits.iter().enumerate() {
+                let benefit = card_benefit::ActiveModel {
+                    card_product_id: Set(product),
+                    name: Set(b.name.clone()),
+                    kind: Set(b.kind),
+                    rate: Set(b.rate),
+                    min_amount: Set(b.min_amount),
+                    per_tx_max: Set(b.per_tx_max),
+                    monthly_cap: Set(b.monthly_cap),
+                    shares_card_limit: Set(b.shares_card_limit),
+                    excludes_performance: Set(b.excludes_performance),
+                    stackable: Set(b.stackable),
+                    sort_order: Set(i as i32),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?;
+                benefit_ids.insert((saved.id, b.name.clone()), benefit.id);
             }
-            .insert(&txn)
-            .await?;
-            benefit_ids.insert((saved.id, b.name.clone()), benefit.id);
-        }
-        for t in &p.tiers {
-            card_tier::ActiveModel {
-                payment_method_id: Set(saved.id),
-                min_spending: Set(t.min_spending),
-                benefit_limit: Set(t.benefit_limit),
-                ..Default::default()
+            for t in &p.tiers {
+                card_tier::ActiveModel {
+                    card_product_id: Set(product),
+                    min_spending: Set(t.min_spending),
+                    benefit_limit: Set(t.benefit_limit),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?;
             }
-            .insert(&txn)
-            .await?;
         }
         pm_ids.insert(p.name.clone(), saved.id);
         stats.payment_methods += 1;
@@ -430,6 +458,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
 
     for (i, a) in data.accounts.iter().enumerate() {
         let saved = account::ActiveModel {
+            user_id: Set(uid),
             name: Set(a.name.clone()),
             bank: Set(a.bank.clone()),
             kind: Set(a.kind),
@@ -475,6 +504,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
                     _ => PlanItemKind::Allocation,
                 };
                 plan_item::ActiveModel {
+                    user_id: Set(uid),
                     ledger_id: Set(lid),
                     kind: Set(kind),
                     name: Set(p.name.clone()),
@@ -495,6 +525,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
             }
         };
         recurring_rule::ActiveModel {
+            user_id: Set(uid),
             ledger_id: Set(lid),
             description: Set(p.name.clone()),
             amount: Set(p.amount),
@@ -525,6 +556,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
     for r in &data.recurring_rules {
         let lid = ledger_id(&r.ledger)?;
         let saved = recurring_rule::ActiveModel {
+            user_id: Set(uid),
             ledger_id: Set(lid),
             description: Set(r.description.clone()),
             amount: Set(r.amount),
@@ -555,6 +587,7 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
         let lid = ledger_id(&t.ledger)?;
         let pid = pm_id(&t.payment_method)?;
         let saved = transaction::ActiveModel {
+            user_id: Set(uid),
             ledger_id: Set(lid),
             date: Set(t.date),
             amount: Set(t.amount),
@@ -627,7 +660,7 @@ mod tests {
         }))
         .unwrap();
         let today = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
-        run(&db, data, false, today).await.unwrap();
+        run(&db, 1, data, false, today).await.unwrap();
 
         let ledgers = ledger::Entity::find().order_by_asc(ledger::Column::SortOrder).all(&db).await.unwrap();
         assert_eq!(ledgers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["가계부", "용돈", "경조사비"]);

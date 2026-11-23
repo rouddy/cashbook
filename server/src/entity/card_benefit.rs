@@ -9,7 +9,8 @@ use super::enums::BenefitKind;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub payment_method_id: i32,
+    /// 카드 상품 (`card_products.id`)
+    pub card_product_id: i32,
     pub name: String,
     /// 할인/포인트 적립/마일리지 적립. 건당 최대·항목 월한도는 이 종류의 단위(원·P·마일)다.
     pub kind: BenefitKind,

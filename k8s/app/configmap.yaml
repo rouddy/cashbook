@@ -1,4 +1,4 @@
-# 서버 환경 변수 (루트 README "설정" 표와 같음). 비밀번호와 DATABASE_URL은 Secret(cashbook-secret)에 둔다.
+# 서버 환경 변수 (루트 README "설정" 표와 같음). Google 클라이언트·소유자 이메일과 DATABASE_URL은 Secret(cashbook-secret)에 둔다.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,6 +11,8 @@ data:
   CASHBOOK_WEB_DIR: /web/current
   CASHBOOK_TZ: Asia/Seoul
   CASHBOOK_PLAN_MONTHS: "2"
+  # 사용자가 접속하는 주소. Google 로그인 리디렉션 URI는 이 주소 + /api/auth/google/callback
+  CASHBOOK_PUBLIC_URL: https://cashbook.ster.pe.kr
   # Ingress에서 HTTPS로 끝나므로 세션 쿠키에 Secure를 붙인다
   CASHBOOK_SECURE_COOKIE: "1"
   # 브라우저 요청의 Origin으로 허용할 공개 주소 (앞단 프록시가 Host 헤더를 바꿔도 403이 나지 않게)

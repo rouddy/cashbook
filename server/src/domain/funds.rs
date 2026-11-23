@@ -328,6 +328,7 @@ mod tests {
     fn acct(id: i32, balance: i64, date: Option<NaiveDate>) -> account::Model {
         account::Model {
             id,
+            user_id: 1,
             name: format!("a{id}"),
             bank: None,
             kind: AccountKind::Checking,
@@ -348,24 +349,23 @@ mod tests {
     fn pm(id: i32, kind: PaymentKind, account_id: Option<i32>, cycle: Option<(i32, i32, i32)>) -> payment_method::Model {
         payment_method::Model {
             id,
+            user_id: 1,
             name: format!("p{id}"),
             kind,
             issuer: None,
-            product_name: None,
             last4: None,
             aliases: None,
             account_id,
             payment_day: cycle.map(|c| c.0),
             closing_day: cycle.map(|c| c.1),
             closing_month_offset: cycle.map(|c| c.2),
-            monthly_target: None,
-            annual_fee: None,
             expires_on: None,
             color: None,
             memo: None,
             sort_order: id,
             archived: false,
             parent_id: None,
+            card_product_id: None,
             created_at: Utc::now(),
         }
     }
@@ -373,6 +373,7 @@ mod tests {
     fn tx(id: i32, pm: i32, date: NaiveDate, amount: i64, status: TxStatus) -> transaction::Model {
         transaction::Model {
             id,
+            user_id: 1,
             ledger_id: 1,
             date,
             amount,
@@ -410,6 +411,7 @@ mod tests {
             1,
             category::Model {
                 id: 1,
+                user_id: 1,
                 ledger_id: 1,
                 name: "외식".into(),
                 kind: CategoryKind::Expense,
