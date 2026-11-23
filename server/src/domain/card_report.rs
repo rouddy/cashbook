@@ -47,6 +47,22 @@ pub struct BenefitUsage {
     pub remaining: Option<i64>,
     /// 남은 혜택을 다 받으려면 더 써야 하는 금액
     pub spend_to_max: Option<i64>,
+    /// 이 혜택이 붙은 이번 달 남은 예정 이용금액
+    pub planned_spending: i64,
+    pub planned_count: i32,
+    /// 예정 거래까지 받은 혜택 (확정 거래 다음에 남은 한도로 계산)
+    pub projected_amount: i64,
+    /// 예정 거래까지 받은 뒤 더 받을 수 있는 혜택
+    pub projected_remaining: Option<i64>,
+    /// 예정 거래까지 받은 뒤 남은 혜택을 다 받으려면 더 써야 하는 금액
+    pub projected_spend_to_max: Option<i64>,
+}
+
+#[derive(SimpleObject, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BenefitAmount {
+    pub kind: BenefitKind,
+    /// `kind` 단위 (원·P·마일)
+    pub amount: i64,
 }
 
 #[derive(SimpleObject, Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,8 +109,19 @@ pub struct CardMonthReport {
     pub limit_used: i64,
     /// 통합 한도 중 남은 금액
     pub benefit_remaining: Option<i64>,
+    /// 이번 달 더 받을 수 있는 혜택의 종류별 합계. 통합 한도를 함께 쓰는 혜택은 남은 한도까지만,
+    /// 한도가 없는 혜택은 빠진다 (비면 한도 있는 혜택이 없음, `BenefitOutcome::remaining_by_kind`)
+    pub remaining_benefits: Vec<BenefitAmount>,
+    /// 아래 `projected_*`는 이번 달 남은 예정 거래까지 받은 값 (확정 거래 다음에 남은 한도로 계산)
+    pub projected_benefit_total: i64,
+    pub projected_discount_total: i64,
+    pub projected_point_total: i64,
+    pub projected_mileage_total: i64,
+    pub projected_limit_used: i64,
+    pub projected_benefit_remaining: Option<i64>,
+    pub projected_remaining_benefits: Vec<BenefitAmount>,
     pub benefits: Vec<BenefitUsage>,
-    /// 거래·혜택 종류별 혜택액
+    /// 거래·혜택 종류별 혜택액. 예정 거래는 확정 거래 다음에 남은 한도로 받은 값
     pub transaction_benefits: Vec<TxBenefitAmount>,
 }
 
@@ -184,14 +211,21 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
     let previous_performance = benefits::performance(&previous, &rule_map);
     let limit = benefits::limit_for(&tiers, previous_performance);
     let outcome = benefits::compute(&current, &rules, limit);
+    let mut projected = outcome.clone();
+    projected.add(&planned, &rules);
 
+    let usage_of = |o: &benefits::BenefitOutcome, id: i32| o.per_rule.iter().find(|u| u.rule_id == id).cloned().unwrap_or_default();
+    let spend_to_max = |rule: &BenefitRule, remaining: Option<i64>| {
+        remaining.and_then(|r| (rule.rate > 0.0).then(|| (r as f64 / rule.rate).ceil() as i64))
+    };
     let usages = rules_sorted
         .iter()
         .zip(&rules)
         .map(|(model, rule)| {
-            let u = outcome.per_rule.iter().find(|u| u.rule_id == rule.id).cloned().unwrap_or_default();
+            let u = usage_of(&outcome, rule.id);
+            let p = usage_of(&projected, rule.id);
             let remaining = outcome.remaining_for(rule);
-            let spend_to_max = remaining.and_then(|r| (rule.rate > 0.0).then(|| (r as f64 / rule.rate).ceil() as i64));
+            let projected_remaining = projected.remaining_for(rule);
             BenefitUsage {
                 card_benefit_id: model.id,
                 name: model.name.clone(),
@@ -205,12 +239,20 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
                 raw: u.raw,
                 amount: u.applied,
                 remaining,
-                spend_to_max,
+                spend_to_max: spend_to_max(rule, remaining),
+                planned_spending: p.spending - u.spending,
+                planned_count: (p.count - u.count) as i32,
+                projected_amount: p.applied,
+                projected_remaining,
+                projected_spend_to_max: spend_to_max(rule, projected_remaining),
             }
         })
         .collect();
+    let remaining_by_kind = |o: &benefits::BenefitOutcome| {
+        o.remaining_by_kind(&rules).into_iter().map(|(kind, amount)| BenefitAmount { kind, amount }).collect()
+    };
 
-    let mut transaction_benefits: Vec<TxBenefitAmount> = outcome
+    let mut transaction_benefits: Vec<TxBenefitAmount> = projected
         .per_tx
         .iter()
         .map(|((id, kind), amount)| TxBenefitAmount { transaction_id: *id, kind: *kind, amount: *amount })
@@ -219,6 +261,8 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
 
     let discount_total = outcome.total_of(BenefitKind::Discount);
     let point_total = outcome.total_of(BenefitKind::Point);
+    let projected_discount_total = projected.total_of(BenefitKind::Discount);
+    let projected_point_total = projected.total_of(BenefitKind::Point);
     let performance_steps = performance_steps(input.monthly_target, &tiers);
     let target = step_target(&performance_steps, performance);
     let next_tier = benefits::next_tier(&tiers, performance);
@@ -244,6 +288,14 @@ pub fn month_report(input: &CardReportInput, month: YearMonth) -> CardMonthRepor
         mileage_total: outcome.total_of(BenefitKind::Mileage),
         limit_used: outcome.shared_used,
         benefit_remaining: outcome.remaining_limit(),
+        remaining_benefits: remaining_by_kind(&outcome),
+        projected_benefit_total: projected_discount_total + projected_point_total,
+        projected_discount_total,
+        projected_point_total,
+        projected_mileage_total: projected.total_of(BenefitKind::Mileage),
+        projected_limit_used: projected.shared_used,
+        projected_benefit_remaining: projected.remaining_limit(),
+        projected_remaining_benefits: remaining_by_kind(&projected),
         benefits: usages,
         transaction_benefits,
     }

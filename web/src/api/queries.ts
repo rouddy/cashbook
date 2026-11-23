@@ -65,8 +65,11 @@ export const FUNDS_QUERY = `query Funds {
 export const CARD_REPORT_FIELDS = `paymentMethodId month spending plannedSpending transactionCount performance projectedPerformance
   previousPerformance performanceSteps target remainingToTarget currentLimit achievedTier { minSpending benefitLimit }
   nextTier { minSpending benefitLimit } remainingToNextTier benefitTotal discountTotal pointTotal mileageTotal
-  limitUsed benefitRemaining
-  benefits { cardBenefitId name kind rate monthlyCap sharesCardLimit stackable spending count raw amount remaining spendToMax }
+  limitUsed benefitRemaining remainingBenefits { kind amount }
+  projectedBenefitTotal projectedDiscountTotal projectedPointTotal projectedMileageTotal projectedLimitUsed projectedBenefitRemaining
+  projectedRemainingBenefits { kind amount }
+  benefits { cardBenefitId name kind rate monthlyCap sharesCardLimit stackable spending count raw amount remaining spendToMax
+    plannedSpending plannedCount projectedAmount projectedRemaining projectedSpendToMax }
   transactionBenefits { transactionId kind amount }`
 
 /** 가족카드는 실적을 본인 카드 리포트에 합치므로 `includeFamily`일 때만 따로 온다 (이용금액은 카드별) */

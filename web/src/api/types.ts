@@ -344,6 +344,19 @@ export interface BenefitUsage {
   amount: number
   remaining: number | null
   spendToMax: number | null
+  /** 이 혜택이 붙은 남은 예정 이용금액 */
+  plannedSpending: number
+  plannedCount: number
+  /** 아래는 예정 거래까지 받은 값 (확정 거래 다음에 남은 한도로) */
+  projectedAmount: number
+  projectedRemaining: number | null
+  projectedSpendToMax: number | null
+}
+
+/** 종류의 단위 (원·P·마일) */
+export interface BenefitAmount {
+  kind: BenefitKind
+  amount: number
 }
 
 export interface CardMonthReport {
@@ -372,8 +385,18 @@ export interface CardMonthReport {
   /** 통합 한도에서 차감된 혜택 */
   limitUsed: number
   benefitRemaining: number | null
+  /** 더 받을 수 있는 혜택의 종류별 합계 (통합 한도는 한 번만, 한도 없는 혜택은 빠짐 — 비면 한도 있는 혜택이 없음) */
+  remainingBenefits: BenefitAmount[]
+  /** 아래 projected*는 남은 예정 거래까지 받은 값 */
+  projectedBenefitTotal: number
+  projectedDiscountTotal: number
+  projectedPointTotal: number
+  projectedMileageTotal: number
+  projectedLimitUsed: number
+  projectedBenefitRemaining: number | null
+  projectedRemainingBenefits: BenefitAmount[]
   benefits: BenefitUsage[]
-  /** 거래·혜택 종류별 혜택액 (종류의 단위) */
+  /** 거래·혜택 종류별 혜택액 (종류의 단위). 예정 거래는 확정 거래 다음에 남은 한도로 받은 값 */
   transactionBenefits: { transactionId: number; kind: BenefitKind; amount: number }[]
 }
 

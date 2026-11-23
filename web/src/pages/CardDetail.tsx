@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 
 import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { CARD_DETAIL_QUERY, DELETE_PM, RESTORE_PM, STATEMENT_LINES_QUERY, TRANSACTIONS_QUERY } from '../api/queries'
-import type { CardMonthReport, PaymentMethod, StatementInfo, StatementLine, TransactionPage } from '../api/types'
+import type { BenefitUsage, CardMonthReport, PaymentMethod, StatementInfo, StatementLine, TransactionPage } from '../api/types'
 import CardForm from '../components/CardForm'
 import { ErrorBox, Loading, Meter, Panel, PerformanceMeter, PlannedSwatch } from '../components/Common'
 import Modal from '../components/Modal'
@@ -11,7 +11,16 @@ import MonthPicker from '../components/MonthPicker'
 import { useToast } from '../components/Toast'
 import { SelectionActions } from '../components/DeleteTransactions'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
-import { benefitRateText, benefitTotalsText, benefitValueText, plannedPerformance, separateLimitLabel, txBenefitTexts } from '../lib/benefits'
+import {
+  benefitRateText,
+  benefitsChangedByPlanned,
+  benefitTotalsText,
+  benefitValueText,
+  plannedPerformance,
+  projectedTotals,
+  separateLimitLabel,
+  txBenefitTexts,
+} from '../lib/benefits'
 import { familyCardsOf, familyReportNote, familyStatementNote } from '../lib/cards'
 import { longDate, PAYMENT_KIND_LABEL, shortDate, signedWon, won } from '../lib/format'
 import { defaultDateFor, localToday, monthLabel, useMonthParam } from '../lib/month'
@@ -381,15 +390,35 @@ function StatementModal({ card, refMaps, statement, onClose }: { card: Detail; r
   )
 }
 
+/** 남은 혜택 칸: 한도가 없으면 "제한 없음" */
+function remainingCell(b: BenefitUsage, remaining: number | null): string {
+  return remaining == null ? '제한 없음' : benefitValueText(b.kind, remaining)
+}
+
+/** 한도까지 더 쓸 금액 칸 */
+function spendToMaxCell(spend: number | null): string {
+  return spend == null ? '-' : spend === 0 ? '한도 소진' : won(spend)
+}
+
+/** 예정 거래까지 받은 값이 다를 때 확정 값 아래에 붙이는 줄 */
+function WithPlanned({ show, children }: { show: boolean; children: ReactNode }) {
+  return show ? <div className="small muted">예정 포함 {children}</div> : null
+}
+
 /** `note`: 가족카드 묶음 설명 (`familyReportNote`) */
 export function ReportPanel({ report: r, card, note }: { report: CardMonthReport; card: PaymentMethod; note?: string | null }) {
   const tiers = [...card.tiers].sort((a, b) => a.minSpending - b.minSpending)
+  const plannedBenefit = benefitsChangedByPlanned(r)
+  const plannedLimit = r.projectedLimitUsed - r.limitUsed
+  // 한도 막대에 예정분이 그려질 때만 색 견본을 붙인다
+  const limitMeterPlanned = r.currentLimit != null && r.currentLimit > 0 && plannedLimit > 0
   return (
     <Panel
       title={`${monthLabel(r.month)} 실적 · 혜택`}
       sub={
         <>
           실적은 이용일 기준 달력월 합계 (실적 제외 표시·실적 제외 혜택 거래는 빠짐)
+          {plannedBenefit && ' · 예정 포함 혜택은 확정 거래 다음에 남은 한도로 계산'}
           {note && <div>{note}</div>}
         </>
       }
@@ -421,11 +450,20 @@ export function ReportPanel({ report: r, card, note }: { report: CardMonthReport
         <div>
           <div className="stat-label">이번 달 혜택</div>
           <div className="stat-value">{benefitTotalsText(r)}</div>
+          {plannedBenefit && (
+            <div className="small text-2">
+              {limitMeterPlanned && <PlannedSwatch />}
+              예정 포함 {benefitTotalsText(projectedTotals(r))}
+            </div>
+          )}
           <div className="small text-2">
             {r.currentLimit != null ? (
               <>
                 지난달 실적 {won(r.previousPerformance)}원 → 한도 {won(r.currentLimit)}원
                 {r.benefitRemaining != null && ` · 남은 한도 ${won(r.benefitRemaining)}원`}
+                {r.projectedBenefitRemaining != null &&
+                  r.projectedBenefitRemaining !== r.benefitRemaining &&
+                  ` (예정 포함 ${won(r.projectedBenefitRemaining)}원)`}
                 {r.benefitTotal > r.limitUsed && ` · 한도와 무관한 혜택 ${won(r.benefitTotal - r.limitUsed)}원`}
               </>
             ) : (
@@ -434,7 +472,13 @@ export function ReportPanel({ report: r, card, note }: { report: CardMonthReport
           </div>
           {r.currentLimit != null && r.currentLimit > 0 && (
             <div style={{ marginTop: 6 }}>
-              <Meter value={r.limitUsed} max={r.currentLimit} label="혜택 한도 사용" />
+              <Meter
+                value={r.limitUsed}
+                planned={plannedLimit}
+                max={r.currentLimit}
+                label="혜택 한도 사용"
+                valueText={`사용 ${won(r.limitUsed)}원` + (plannedLimit > 0 ? ` · 예정 포함 ${won(r.projectedLimitUsed)}원` : '')}
+              />
             </div>
           )}
         </div>
@@ -489,13 +533,25 @@ export function ReportPanel({ report: r, card, note }: { report: CardMonthReport
                   <td className="num">{benefitRateText(b)}</td>
                   <td className="num">
                     {won(b.spending)} <span className="muted small">({b.count}건)</span>
+                    {b.plannedCount > 0 && (
+                      <div className="small muted">
+                        예정 {signedWon(b.plannedSpending)} ({b.plannedCount}건)
+                      </div>
+                    )}
                   </td>
                   <td className="num">
                     {benefitValueText(b.kind, b.amount)}
                     {b.raw !== b.amount && <div className="small muted">한도 전 {benefitValueText(b.kind, b.raw)}</div>}
+                    <WithPlanned show={b.projectedAmount !== b.amount}>{benefitValueText(b.kind, b.projectedAmount)}</WithPlanned>
                   </td>
-                  <td className="num">{b.remaining == null ? '제한 없음' : benefitValueText(b.kind, b.remaining)}</td>
-                  <td className="num">{b.spendToMax == null ? '-' : b.spendToMax === 0 ? '한도 소진' : won(b.spendToMax)}</td>
+                  <td className="num">
+                    {remainingCell(b, b.remaining)}
+                    <WithPlanned show={b.projectedRemaining !== b.remaining}>{remainingCell(b, b.projectedRemaining)}</WithPlanned>
+                  </td>
+                  <td className="num">
+                    {spendToMaxCell(b.spendToMax)}
+                    <WithPlanned show={b.projectedSpendToMax !== b.spendToMax}>{spendToMaxCell(b.projectedSpendToMax)}</WithPlanned>
+                  </td>
                 </tr>
               ))}
             </tbody>

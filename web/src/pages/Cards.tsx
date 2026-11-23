@@ -9,7 +9,7 @@ import CardProductForm from '../components/CardProductForm'
 import { ErrorBox, Loading, Panel, PerformanceMeter, PlannedSwatch } from '../components/Common'
 import Modal from '../components/Modal'
 import { useToast } from '../components/Toast'
-import { benefitTotalsText, hasBenefit, plannedPerformance } from '../lib/benefits'
+import { benefitTotalsText, hasBenefit, plannedPerformance, remainingSummary } from '../lib/benefits'
 import { familyCardsOf, withFamilyOrder } from '../lib/cards'
 import { PAYMENT_KIND_LABEL, shortDate, signedWon, won } from '../lib/format'
 import { currentMonth } from '../lib/month'
@@ -79,6 +79,7 @@ export default function Cards() {
             const next = c.nextPayment
             const parent = c.parentId != null ? ref.paymentMethodById.get(c.parentId) : undefined
             const familyCount = familyCardsOf(ref, c.id).filter((f) => !f.archived).length
+            const remaining = r ? remainingSummary(r) : null
             return (
               <article key={c.id} className="panel card-tile" style={c.archived ? { opacity: 0.65 } : undefined}>
                 <div className="row">
@@ -152,19 +153,30 @@ export default function Cards() {
                     {r.target ? (
                       <PerformanceMeter report={r} label={`${c.name} 전월실적 목표 대비`} />
                     ) : null}
-                    {(hasBenefit(r) || r.currentLimit != null) && (
-                      <div className="row small" style={{ marginTop: 6 }}>
-                        <span className="text-2">혜택</span>
-                        <span className="spacer" />
-                        <span>
-                          {benefitTotalsText(r)}
-                          {r.currentLimit != null && (
-                            <span className="muted">
-                              {' '}
-                              · 한도 {won(r.limitUsed)} / {won(r.currentLimit)}
+                    {(hasBenefit(r) || r.currentLimit != null || remaining) && (
+                      <div style={{ marginTop: 6 }}>
+                        {(hasBenefit(r) || r.currentLimit != null) && (
+                          <div className="row small">
+                            <span className="text-2">혜택</span>
+                            <span className="spacer" />
+                            <span>
+                              {benefitTotalsText(r)}
+                              {r.currentLimit != null && (
+                                <span className="muted">
+                                  {' '}
+                                  · 한도 {won(r.limitUsed)} / {won(r.currentLimit)}
+                                </span>
+                              )}
                             </span>
-                          )}
-                        </span>
+                          </div>
+                        )}
+                        {remaining && (
+                          <div className="row small">
+                            <span className="text-2">남은 혜택</span>
+                            <span className="spacer" />
+                            <span>{remaining}</span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

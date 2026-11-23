@@ -171,51 +171,86 @@ impl BenefitOutcome {
             (a, b) => a.or(b),
         }
     }
+
+    /// 지금까지 받은 혜택에 이어 `txs`의 혜택을 날짜순(같은 날은 id순)으로 누적한다. `rules`는 `compute`에 준 것과 같아야 한다.
+    /// 예정 거래는 확정 거래를 다 계산한 뒤 이것으로 더해, 확정 거래의 혜택은 그대로 두고 남은 한도에서 받게 한다.
+    pub fn add(&mut self, txs: &[CardTx], rules: &[BenefitRule]) {
+        let mut ordered: Vec<&CardTx> = txs.iter().collect();
+        ordered.sort_by_key(|t| (t.date, t.id));
+        let index: HashMap<i32, usize> = rules.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
+        for tx in ordered {
+            for bid in &tx.benefit_ids {
+                let Some(&i) = index.get(bid) else { continue };
+                let rule = &rules[i];
+                let raw = raw_benefit(rule, tx.amount);
+                let mut applied = raw;
+                if applied > 0 {
+                    if let Some(cap) = rule.monthly_cap {
+                        applied = applied.min((cap - self.per_rule[i].applied).max(0));
+                    }
+                    if rule.shares_card_limit
+                        && let Some(limit) = self.limit
+                    {
+                        applied = applied.min((limit - self.shared_used).max(0));
+                    }
+                } else if applied < 0 {
+                    // 환불은 이번 달에 실제로 받은 혜택까지만 되돌린다.
+                    // (한도 때문에 덜 받은 혜택을 다 깎으면 남은 한도가 원래 한도보다 커진다)
+                    applied = applied.max(-self.per_rule[i].applied);
+                }
+                let u = &mut self.per_rule[i];
+                u.spending += tx.amount;
+                u.count += 1;
+                u.raw += raw;
+                u.applied += applied;
+                if rule.shares_card_limit {
+                    self.shared_used += applied;
+                }
+                *self.per_tx.entry((tx.id, rule.kind)).or_default() += applied;
+            }
+        }
+    }
+
+    /// 이번 달 더 받을 수 있는 혜택의 종류별 합계 (종류 순서, 한도가 있는 혜택이 있는 종류만 — 비면 한도 있는 혜택이 없다).
+    /// 통합 한도를 함께 쓰는 혜택은 한 묶음으로 남은 통합 한도까지만 센다(묶음 혜택이 모두 항목 한도가 있으면 그 남은 합과 비교).
+    /// 묶음에 종류가 섞였으면 통합 한도 단위인 할인(원)으로 센다. 한도가 전혀 없는 혜택은 셀 수 없어 뺀다.
+    pub fn remaining_by_kind(&self, rules: &[BenefitRule]) -> Vec<(BenefitKind, i64)> {
+        let cap_left = |r: &BenefitRule| {
+            let used = self.per_rule.iter().find(|u| u.rule_id == r.id).map_or(0, |u| u.applied);
+            r.monthly_cap.map(|cap| (cap - used).max(0))
+        };
+        let mut totals: Vec<(BenefitKind, i64)> = Vec::new();
+        let mut add = |kind: BenefitKind, v: i64| match totals.iter_mut().find(|(k, _)| *k == kind) {
+            Some(e) => e.1 += v,
+            None => totals.push((kind, v)),
+        };
+        let (shared, separate): (Vec<&BenefitRule>, Vec<&BenefitRule>) =
+            rules.iter().partition(|r| r.shares_card_limit && self.limit.is_some());
+        if let (Some(left), Some(first)) = (self.remaining_limit(), shared.first()) {
+            let caps: Option<i64> = shared.iter().map(|r| cap_left(r)).sum();
+            let kind = if shared.iter().all(|r| r.kind == first.kind) { first.kind } else { BenefitKind::Discount };
+            add(kind, caps.map_or(left, |c| c.min(left)));
+        }
+        for r in separate {
+            if let Some(v) = cap_left(r) {
+                add(r.kind, v);
+            }
+        }
+        totals.sort_by_key(|(k, _)| *k as u8);
+        totals
+    }
 }
 
 /// 날짜순(같은 날은 id순)으로 혜택을 누적 계산한다. `txs`는 같은 달의 확정 거래.
 pub fn compute(txs: &[CardTx], rules: &[BenefitRule], limit: Option<i64>) -> BenefitOutcome {
-    let mut ordered: Vec<&CardTx> = txs.iter().collect();
-    ordered.sort_by_key(|t| (t.date, t.id));
-    let index: HashMap<i32, usize> = rules.iter().enumerate().map(|(i, r)| (r.id, i)).collect();
-    let mut usage: Vec<RuleUsage> = rules
-        .iter()
-        .map(|r| RuleUsage { rule_id: r.id, kind: r.kind, ..Default::default() })
-        .collect();
-    let mut per_tx: HashMap<(i32, BenefitKind), i64> = HashMap::new();
-    let mut shared_used = 0i64;
-    for tx in ordered {
-        for bid in &tx.benefit_ids {
-            let Some(&i) = index.get(bid) else { continue };
-            let rule = &rules[i];
-            let raw = raw_benefit(rule, tx.amount);
-            let mut applied = raw;
-            if applied > 0 {
-                if let Some(cap) = rule.monthly_cap {
-                    applied = applied.min((cap - usage[i].applied).max(0));
-                }
-                if rule.shares_card_limit
-                    && let Some(limit) = limit
-                {
-                    applied = applied.min((limit - shared_used).max(0));
-                }
-            } else if applied < 0 {
-                // 환불은 이번 달에 실제로 받은 혜택까지만 되돌린다.
-                // (한도 때문에 덜 받은 혜택을 다 깎으면 남은 한도가 원래 한도보다 커진다)
-                applied = applied.max(-usage[i].applied);
-            }
-            let u = &mut usage[i];
-            u.spending += tx.amount;
-            u.count += 1;
-            u.raw += raw;
-            u.applied += applied;
-            if rule.shares_card_limit {
-                shared_used += applied;
-            }
-            *per_tx.entry((tx.id, rule.kind)).or_default() += applied;
-        }
-    }
-    BenefitOutcome { per_rule: usage, per_tx, shared_used, limit }
+    let mut out = BenefitOutcome {
+        per_rule: rules.iter().map(|r| RuleUsage { rule_id: r.id, kind: r.kind, ..Default::default() }).collect(),
+        per_tx: HashMap::new(),
+        shared_used: 0,
+        limit,
+    };
+    out.add(txs, rules);
+    out
 }
 
 #[cfg(test)]
@@ -406,6 +441,74 @@ mod tests {
         assert_eq!(out.total_of(BenefitKind::Mileage), 1_000);
         assert_eq!(out.total_of(BenefitKind::Discount), 29);
         assert_eq!(out.per_tx[&(2, BenefitKind::Mileage)], 6);
+    }
+
+    #[test]
+    fn planned_uses_what_confirmed_left() {
+        // 10% · 통합 한도 5,000원. 예정 거래가 확정 거래보다 날짜가 앞서도 확정 혜택은 그대로 두고 남은 한도에서 받는다
+        let easy = rule(1, 0.1);
+        let rules = [easy.clone()];
+        let confirmed = [tx(1, 10, 30_000, &[1])];
+        let planned = [tx(2, 5, 30_000, &[1]), tx(3, 20, 10_000, &[1])];
+        let current = compute(&confirmed, &rules, Some(5_000));
+        let mut projected = current.clone();
+        projected.add(&planned, &rules);
+        assert_eq!(current.tx_total(1), 3_000);
+        assert_eq!(current.remaining_for(&easy), Some(2_000));
+        assert_eq!(projected.tx_total(1), 3_000);
+        assert_eq!(projected.tx_total(2), 2_000);
+        assert_eq!(projected.tx_total(3), 0);
+        assert_eq!(projected.per_rule[0].spending, 70_000);
+        assert_eq!(projected.per_rule[0].count, 3);
+        assert_eq!(projected.shared_used, 5_000);
+        assert_eq!(projected.remaining_for(&easy), Some(0));
+        assert_eq!(projected.remaining_by_kind(&rules), vec![(BenefitKind::Discount, 0)]);
+    }
+
+    #[test]
+    fn remaining_by_kind_counts_shared_limit_once() {
+        // 백화점 1% · 간편결제 3%는 통합 한도 1만원을 함께, 전기차 30%는 별도 월 2만원, etc 0.8%는 한도 없음, 마일리지 월 1,000마일
+        let dept = rule(1, 0.01);
+        let easy = rule(2, 0.03);
+        let mut ev = rule(3, 0.3);
+        ev.shares_card_limit = false;
+        ev.monthly_cap = Some(20_000);
+        let mut etc = rule(4, 0.008);
+        etc.shares_card_limit = false;
+        let mut mile = rule(5, 1.0 / 1500.0);
+        mile.kind = BenefitKind::Mileage;
+        mile.shares_card_limit = false;
+        mile.monthly_cap = Some(1_000);
+        let rules = [dept.clone(), easy.clone(), ev, etc.clone(), mile];
+        let txs = [tx(1, 1, 100_000, &[1, 2]), tx(2, 2, 50_000, &[3]), tx(3, 3, 15_000, &[5]), tx(4, 4, 10_000, &[4])];
+        let out = compute(&txs, &rules, Some(10_000));
+        // 통합 한도 남은 6,000원을 한 번만 + 전기차 5,000원, 마일리지 990마일, etc는 빠진다
+        assert_eq!(out.remaining_by_kind(&rules), vec![(BenefitKind::Discount, 11_000), (BenefitKind::Mileage, 990)]);
+
+        // 통합 한도를 함께 쓰는 혜택이 모두 항목 한도가 있으면 그 남은 합까지만
+        let mut dept_cap = dept.clone();
+        dept_cap.monthly_cap = Some(1_500);
+        let mut easy_cap = easy.clone();
+        easy_cap.monthly_cap = Some(2_000);
+        let rules = [dept_cap, easy_cap];
+        let out = compute(&[tx(1, 1, 100_000, &[1, 2])], &rules, Some(10_000));
+        assert_eq!(out.remaining_limit(), Some(7_000));
+        assert_eq!(out.remaining_by_kind(&rules), vec![(BenefitKind::Discount, 500)]);
+
+        // 통합 한도가 없는 카드는 항목 한도만, 한도 있는 혜택이 없으면 빈 목록
+        let mut capped = easy.clone();
+        capped.monthly_cap = Some(5_000);
+        let out = compute(&[tx(1, 1, 100_000, &[2])], &[capped.clone(), etc.clone()], None);
+        assert_eq!(out.remaining_by_kind(&[capped, etc.clone()]), vec![(BenefitKind::Discount, 2_000)]);
+        assert_eq!(compute(&[], &[etc.clone()], None).remaining_by_kind(&[etc]), vec![]);
+
+        // 포인트만 통합 한도를 쓰면 포인트로, 종류가 섞이면 할인(원)으로 센다
+        let mut point = rule(6, 0.01);
+        point.kind = BenefitKind::Point;
+        let out = compute(&[], &[point.clone()], Some(3_000));
+        assert_eq!(out.remaining_by_kind(&[point.clone()]), vec![(BenefitKind::Point, 3_000)]);
+        let out = compute(&[], &[point.clone(), dept.clone()], Some(3_000));
+        assert_eq!(out.remaining_by_kind(&[point, dept]), vec![(BenefitKind::Discount, 3_000)]);
     }
 
     #[test]

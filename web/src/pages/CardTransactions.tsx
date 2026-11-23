@@ -8,7 +8,7 @@ import MonthPicker from '../components/MonthPicker'
 import { SelectionActions } from '../components/DeleteTransactions'
 import type { SuggestScope } from '../components/DescriptionInput'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
-import { benefitTotalsText, hasBenefit, plannedPerformance, txBenefitTexts } from '../lib/benefits'
+import { benefitsChangedByPlanned, benefitTotalsText, hasBenefit, plannedPerformance, projectedTotals, remainingSummary, txBenefitTexts } from '../lib/benefits'
 import { familyReportNote, familyStatementNote, withFamilyOrder } from '../lib/cards'
 import { shortDate, signedWon, won } from '../lib/format'
 import { defaultDateFor, monthLabel, useMonthParam, useQueryParam } from '../lib/month'
@@ -57,6 +57,7 @@ export default function CardTransactions() {
               {list.map((r) => {
                 const pm = ref.paymentMethodById.get(r.paymentMethodId)
                 const isFamily = pm?.parentId != null
+                const remaining = isFamily ? null : remainingSummary(r)
                 return (
                   <button
                     key={r.paymentMethodId}
@@ -96,6 +97,7 @@ export default function CardTransactions() {
                         {r.currentLimit != null && ` · 한도 ${won(r.limitUsed)} / ${won(r.currentLimit)}`}
                       </div>
                     )}
+                    {remaining && <div className="small text-2">남은 혜택 {remaining}</div>}
                   </button>
                 )
               })}
@@ -152,7 +154,17 @@ function UsageTransactions({ card, month, refMaps, report }: { card: PaymentMeth
           newRow={{ date: defaultDateFor(month), ledgerId: refMaps.defaultLedger?.id ?? null, paymentMethodId: card.id }}
           selection={sel.grid}
           suggestScope={CARD_SUGGEST_SCOPE}
-          footer={<PageTotals page={page} extra={<span>혜택 {benefitTotalsText(report)}</span>} />}
+          footer={
+            <PageTotals
+              page={page}
+              extra={
+                <span>
+                  혜택 {benefitTotalsText(report)}
+                  {benefitsChangedByPlanned(report) && <span className="text-2"> (예정 포함 {benefitTotalsText(projectedTotals(report))})</span>}
+                </span>
+              }
+            />
+          }
         />
       )}
     </Panel>

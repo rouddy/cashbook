@@ -1,6 +1,6 @@
 // 카드 혜택 표시·선택 규칙
 
-import type { BenefitKind, CardBenefit, CardMonthReport } from '../api/types'
+import type { BenefitAmount, BenefitKind, CardBenefit, CardMonthReport } from '../api/types'
 import { ratePercent, won } from './format'
 
 export const BENEFIT_KINDS: BenefitKind[] = ['DISCOUNT', 'POINT', 'MILEAGE']
@@ -63,6 +63,30 @@ export function benefitTotalsText(r: Totals): string {
   ]
   const text = parts.filter(([, v]) => v !== 0).map(([k, v]) => benefitAmountText(k, v))
   return text.length ? text.join(' · ') : '0원'
+}
+
+/** 예정 거래까지 받은 혜택의 종류별 합계 (`benefitTotalsText`에 넘긴다) */
+export function projectedTotals(r: CardMonthReport): Totals {
+  return { discountTotal: r.projectedDiscountTotal, pointTotal: r.projectedPointTotal, mileageTotal: r.projectedMileageTotal }
+}
+
+/** 예정 거래가 혜택을 바꾸는지 */
+export function benefitsChangedByPlanned(r: CardMonthReport): boolean {
+  return r.projectedDiscountTotal !== r.discountTotal || r.projectedPointTotal !== r.pointTotal || r.projectedMileageTotal !== r.mileageTotal
+}
+
+/** 남은 혜택 "6,800원 · 990마일" (한도 있는 혜택이 없으면 null) */
+export function remainingBenefitsText(list: BenefitAmount[]): string | null {
+  return list.length ? list.map((b) => benefitAmountText(b.kind, b.amount)).join(' · ') : null
+}
+
+/** 카드 목록의 남은 혜택: "6,800원 (예정 포함 4,000원)". 혜택이 없는 카드는 null, 한도 있는 혜택이 없으면 "제한 없음" */
+export function remainingSummary(r: CardMonthReport): string | null {
+  if (r.benefits.length === 0) return null
+  const now = remainingBenefitsText(r.remainingBenefits)
+  if (now == null) return '제한 없음'
+  const projected = remainingBenefitsText(r.projectedRemainingBenefits)
+  return projected != null && projected !== now ? `${now} (예정 포함 ${projected})` : now
 }
 
 /** 거래별 혜택액 (그리드 "혜택액" 칸) */
