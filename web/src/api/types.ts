@@ -465,3 +465,14 @@ export interface ApiToken {
   createdAt: string
   lastUsedAt: string | null
 }
+
+/** MCP 클라이언트(OpenAI Dots·ChatGPT 플러그인 등)에 OAuth로 허용한 연결 */
+export interface ConnectedApp {
+  id: number
+  clientName: string
+  scope: string
+  createdAt: string
+  lastUsedAt: string | null
+  /** 이때까지 쓰지 않으면 다시 연결해야 한다 */
+  refreshExpiresAt: string
+}

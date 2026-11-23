@@ -3,8 +3,19 @@ import { useState, type FormEvent } from 'react'
 
 import { fetchSession, signOut } from '../api/client'
 import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
-import { CREATE_LEDGER, CREATE_TOKEN, DELETE_LEDGER, DELETE_PM, DELETE_TOKEN, RESTORE_PM, TOKENS_QUERY, UPDATE_LEDGER } from '../api/queries'
-import type { ApiToken, Ledger, PaymentMethod } from '../api/types'
+import {
+  CONNECTED_APPS_QUERY,
+  CREATE_LEDGER,
+  CREATE_TOKEN,
+  DELETE_LEDGER,
+  DELETE_PM,
+  DELETE_TOKEN,
+  RESTORE_PM,
+  REVOKE_CONNECTED_APP,
+  TOKENS_QUERY,
+  UPDATE_LEDGER,
+} from '../api/queries'
+import type { ApiToken, ConnectedApp, Ledger, PaymentMethod } from '../api/types'
 import CardForm from '../components/CardForm'
 import { ErrorBox, Loading, Panel } from '../components/Common'
 import Modal from '../components/Modal'
@@ -26,6 +37,7 @@ export default function Settings() {
         <OtherPaymentMethods refMaps={ref} />
       </div>
       <ApiTokens />
+      <AiConnections authEnabled={ref.appInfo.authEnabled} />
       <ApiGuide authEnabled={ref.appInfo.authEnabled} />
     </div>
   )
@@ -254,6 +266,80 @@ function ApiTokens() {
           </button>
         </Modal>
       )}
+    </Panel>
+  )
+}
+
+/** MCP로 가계부를 조회하는 AI 앱 (OpenAI Dots·ChatGPT 플러그인, Claude 등) */
+function AiConnections({ authEnabled }: { authEnabled: boolean }) {
+  const q = useGql<{ connectedApps: ConnectedApp[] }>(['connectedApps'], CONNECTED_APPS_QUERY, undefined, { enabled: authEnabled })
+  const { run, pending } = useMutate()
+  const url = `${window.location.origin}/api/mcp`
+  return (
+    <Panel
+      title="AI 연결 (MCP)"
+      sub="AI가 이 계정의 거래·월 요약·카드 실적·청구서·여유자금·반복 규칙을 조회합니다. 읽기 전용이라 입력·수정·삭제는 할 수 없습니다."
+      flush
+    >
+      <div className="stack small text-2" style={{ padding: 12, gap: 6 }}>
+        <div>
+          MCP 서버 주소: <code>{url}</code>
+        </div>
+        {authEnabled ? (
+          <>
+            <div>
+              <b>OpenAI Dots · ChatGPT</b>: 설정 → 플러그인 → 커스텀 MCP 서버 추가에 위 주소를 넣고 인증은 OAuth로 둡니다. 가계부 승인 화면에서 허용하면 아래 목록에 나타납니다.
+            </div>
+            <div>
+              <b>Claude Code 등 헤더를 넣을 수 있는 클라이언트</b>: API 토큰을 <code>Authorization: Bearer cb_…</code>로 보내도 됩니다.
+            </div>
+          </>
+        ) : (
+          <div>지금은 로컬 실행이라 같은 컴퓨터의 클라이언트가 인증 없이 연결합니다. Dots·ChatGPT처럼 밖에서 붙는 앱은 Google 로그인을 설정한 외부 주소가 필요합니다.</div>
+        )}
+      </div>
+      {authEnabled &&
+        (q.error ? (
+          <ErrorBox error={q.error} />
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>앱</th>
+                <th>연결</th>
+                <th>마지막 사용</th>
+                <th>쓰지 않으면 만료</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {(q.data?.connectedApps ?? []).map((a) => (
+                <tr key={a.id}>
+                  <td>{a.clientName}</td>
+                  <td className="small">{dateTime(a.createdAt)}</td>
+                  <td className="small">{a.lastUsedAt ? dateTime(a.lastUsedAt) : <span className="muted">없음</span>}</td>
+                  <td className="small">{dateTime(a.refreshExpiresAt)}</td>
+                  <td>
+                    <button
+                      className="btn sm ghost danger"
+                      disabled={pending}
+                      onClick={() => window.confirm(`'${a.clientName}' 연결을 끊을까요? 그 앱은 다시 승인해야 가계부를 읽을 수 있습니다.`) && run(REVOKE_CONNECTED_APP, { id: a.id })}
+                    >
+                      연결 끊기
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {q.data?.connectedApps.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="empty">
+                    연결된 앱이 없습니다
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        ))}
     </Panel>
   )
 }
