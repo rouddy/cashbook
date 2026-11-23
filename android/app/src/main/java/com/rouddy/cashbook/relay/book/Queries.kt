@@ -11,7 +11,7 @@ object Queries {
     const val REF = """query Ref {
   ledgers { id name isDefault sortOrder }
   categories(includeArchived: true) { id ledgerId name kind archived }
-  paymentMethods(includeArchived: true) { id name kind isCard archived benefits { id name kind stackable } }
+  paymentMethods(includeArchived: true) { id name kind isCard archived lastUsedOn benefits { id name kind stackable } }
   members
 }"""
 

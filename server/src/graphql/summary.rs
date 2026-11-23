@@ -4,10 +4,11 @@ use async_graphql::{Context, Object, Result, SimpleObject};
 use chrono::NaiveDate;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter};
 
-use super::{config, db, lookup, user_error};
+use super::{config, db, lookup, uid, user_error};
 use crate::domain::dates::YearMonth;
 use crate::domain::summary::{MonthlySummary, SummaryContext, monthly_summary};
-use crate::entity::{enums::TxStatus, plan_item, transaction};
+use crate::entity::{
+    OfUser, enums::TxStatus, plan_item, transaction};
 
 #[derive(SimpleObject)]
 pub struct AppInfo {
@@ -44,6 +45,7 @@ impl SummaryQuery {
         #[graphql(default = 6)] average_months: i32,
         #[graphql(default = 12)] history_months: i32,
     ) -> Result<MonthlySummary> {
+        let uid = uid(ctx)?;
         if !(1..=36).contains(&average_months) || !(1..=60).contains(&history_months) {
             return Err(user_error("평균 기간은 1~36개월, 추이 기간은 1~60개월입니다"));
         }
@@ -51,6 +53,7 @@ impl SummaryQuery {
         let lookback = average_months.max(history_months);
         let start = month.add_months(-lookback).first_day();
         let mut q = transaction::Entity::find()
+            .of_user(uid)
             .filter(transaction::Column::Date.gte(start))
             .filter(transaction::Column::Date.lte(month.last_day()))
             .filter(transaction::Column::Status.ne(TxStatus::Skipped));
@@ -60,7 +63,7 @@ impl SummaryQuery {
         }
         let txs = q.all(db).await?;
         let plan_items = match ledger_id {
-            Some(id) => plan_item::Entity::find().filter(plan_item::Column::LedgerId.eq(id)).all(db).await?,
+            Some(id) => plan_item::Entity::find().of_user(uid).filter(plan_item::Column::LedgerId.eq(id)).all(db).await?,
             None => vec![],
         };
         let lookup = lookup(ctx);

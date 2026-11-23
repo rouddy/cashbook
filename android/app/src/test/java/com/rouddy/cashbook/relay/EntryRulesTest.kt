@@ -125,6 +125,25 @@ class EntryRulesTest {
     }
 
     @Test
+    fun paymentMethodChoicesPutCashFirstAndRecentCreditCards() {
+        val methods = RefData(
+            paymentMethods = listOf(
+                PaymentMethod(1, "기타 페이", kind = "OTHER"),
+                PaymentMethod(2, "안 쓴 신용", kind = "CREDIT_CARD", isCard = true),
+                PaymentMethod(3, "국민 체크", kind = "CHECK_CARD", isCard = true, lastUsedOn = "2026-11-22"),
+                PaymentMethod(4, "옛 신용", kind = "CREDIT_CARD", isCard = true, lastUsedOn = "2026-09-30"),
+                PaymentMethod(5, "계좌이체", kind = "BANK_TRANSFER"),
+                PaymentMethod(6, "최근 신용", kind = "CREDIT_CARD", isCard = true, lastUsedOn = "2026-11-20"),
+                PaymentMethod(7, "현금", kind = "CASH"),
+                PaymentMethod(8, "보관 신용", kind = "CREDIT_CARD", isCard = true, archived = true, lastUsedOn = "2026-11-23"),
+                PaymentMethod(9, "비상금", kind = "CASH", lastUsedOn = "2026-11-23"),
+            ),
+        )
+        // 현금(서버 순서) → 신용카드(최근 사용순, 안 쓴 카드는 뒤) → 체크카드 → 계좌이체 → 기타, 보관은 뺀다
+        assertEquals(listOf(7, 9, 6, 4, 2, 3, 5, 1), EntryRules.paymentMethodChoices(methods).map { it.id })
+    }
+
+    @Test
     fun benefitStackingMatchesWeb() {
         val all = listOf(coffee, movie, points)
         var sel = EntryRules.toggleBenefit(emptyList(), coffee, true, all)

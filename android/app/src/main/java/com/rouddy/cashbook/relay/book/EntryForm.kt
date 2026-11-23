@@ -76,6 +76,21 @@ object EntryRules {
         return form.copy(ledgerId = ledgerId, categoryId = category?.id, toLedgerId = to)
     }
 
+    /** 결제수단 드롭다운의 종류 순서 ('선택 안 함' 다음). 여기 없는 종류는 맨 뒤 */
+    private val PAYMENT_KIND_ORDER = listOf("CASH", "CREDIT_CARD", "CHECK_CARD", "BANK_TRANSFER", "OTHER")
+
+    /**
+     * 고를 수 있는 결제수단 순서: 현금 → 신용카드 → 체크카드 → 계좌이체 → 기타.
+     * 신용카드는 최근에 쓴 카드부터(쓴 적 없는 카드는 뒤로), 그 밖은 서버 순서(정렬 순서·id)를 지킨다.
+     */
+    fun paymentMethodChoices(ref: RefData): List<PaymentMethod> {
+        fun kindRank(pm: PaymentMethod) = PAYMENT_KIND_ORDER.indexOf(pm.kind).let { if (it < 0) PAYMENT_KIND_ORDER.size else it }
+        // yyyy-MM-dd라 글자 순서가 날짜 순서. 내림차순에서 null(쓴 적 없음)은 뒤로 간다
+        return ref.activePaymentMethods.sortedWith(
+            compareBy<PaymentMethod> { kindRank(it) }.thenByDescending { if (it.isCreditCard) it.lastUsedOn else null },
+        )
+    }
+
     /** 결제수단을 바꾸면 다른 카드의 혜택은 버리고, 신용카드가 아니면 일시불로 */
     fun withPaymentMethod(form: EntryForm, paymentMethodId: Int?, ref: RefData): EntryForm {
         val pm = ref.paymentMethod(paymentMethodId)

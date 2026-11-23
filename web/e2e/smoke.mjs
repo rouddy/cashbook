@@ -1,20 +1,66 @@
 // E2E 스모크 테스트: 실제 브라우저(시스템 Chrome)로 주요 화면과 입력 흐름을 확인한다.
 //
-// 테스트용 DB로 띄운 서버가 필요하다 (실제 데이터를 쓰지 말 것). 예:
+// 테스트용 DB로 띄운 서버가 필요하다 (실제 데이터를 쓰지 말 것). 로그인은 이 스크립트가 띄우는 가짜 Google 서버(8002)로 한다:
 //   sqlite3 ../server/data/cashbook.db ".backup /tmp/cashbook-e2e.db"
-//   (cd ../server && DATABASE_URL="sqlite:///tmp/cashbook-e2e.db?mode=rwc" CASHBOOK_PASSWORD=e2e-pass \
-//      CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 cargo run)
+//   (cd ../server && DATABASE_URL="sqlite:///tmp/cashbook-e2e.db?mode=rwc" CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 \
+//      CASHBOOK_GOOGLE_CLIENT_ID=e2e CASHBOOK_GOOGLE_CLIENT_SECRET=e2e CASHBOOK_PUBLIC_URL=http://127.0.0.1:8001 \
+//      CASHBOOK_OWNER_EMAIL=owner@e2e.test CASHBOOK_GOOGLE_AUTH_URL=http://127.0.0.1:8002/auth \
+//      CASHBOOK_GOOGLE_TOKEN_URL=http://127.0.0.1:8002/token CASHBOOK_GOOGLE_USERINFO_URL=http://127.0.0.1:8002/userinfo cargo run)
 //   npm run e2e
+// 소유자 이메일로 로그인하므로 DB 사본의 기존 데이터(계정 id 1)를 넘겨받아 쓴다.
 //
-// 환경 변수: E2E_BASE_URL(기본 http://127.0.0.1:8001), E2E_PASSWORD(기본 e2e-pass), CHROME_PATH
+// 환경 변수: E2E_BASE_URL(기본 http://127.0.0.1:8001), E2E_GOOGLE_PORT(기본 8002), E2E_EMAIL(기본 owner@e2e.test), CHROME_PATH
 
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { chromium } from 'playwright-core'
 
 const BASE = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:8001'
-const PASSWORD = process.env.E2E_PASSWORD ?? 'e2e-pass'
+const GOOGLE_PORT = Number(process.env.E2E_GOOGLE_PORT ?? 8002)
+const EMAIL = process.env.E2E_EMAIL ?? 'owner@e2e.test'
 const CHROME = process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 const STAMP = Date.now().toString(36)
+
+// 가짜 Google: 로그인 화면 없이 바로 코드를 붙여 돌려보내고, 토큰·사용자 정보를 돌려준다
+const google = createServer((req, res) => {
+  const url = new URL(req.url, `http://127.0.0.1:${GOOGLE_PORT}`)
+  const json = (body) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(body))
+  }
+  if (url.pathname === '/auth') {
+    const back = new URL(url.searchParams.get('redirect_uri'))
+    back.searchParams.set('code', 'e2e-code')
+    back.searchParams.set('state', url.searchParams.get('state'))
+    res.writeHead(302, { Location: back.toString() })
+    res.end()
+  } else if (url.pathname === '/token') {
+    json({ access_token: 'e2e-access', token_type: 'Bearer', expires_in: 3600 })
+  } else if (url.pathname === '/userinfo') {
+    json({ sub: 'e2e-owner', email: EMAIL, email_verified: true, name: 'E2E 사용자' })
+  } else {
+    res.writeHead(404)
+    res.end()
+  }
+})
+await new Promise((resolve) => google.listen(GOOGLE_PORT, '127.0.0.1', resolve))
+
+/** 카드 상품(혜택·구간 등)을 만들고 그 상품을 고른 카드를 만든다 */
+async function createCard(card, product) {
+  let cardProductId = null
+  if (product) {
+    const p = await gql(`mutation($input: CardProductInput!) { createCardProduct(input: $input) { id } }`, {
+      input: { name: `${card.name} 상품`, ...product },
+    })
+    assert.ok(p.data, JSON.stringify(p.errors))
+    cardProductId = p.data.createCardProduct.id
+  }
+  const created = await gql(`mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id name } } }`, {
+    input: { ...card, cardProductId },
+  })
+  assert.ok(created.data, JSON.stringify(created.errors))
+  return { ...created.data.createPaymentMethod, cardProductId }
+}
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true })
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'ko-KR', timezoneId: 'Asia/Seoul' })
@@ -68,14 +114,18 @@ function acceptNextDialog() {
   page.once('dialog', (d) => d.accept())
 }
 
-await step('로그인 (틀린 비밀번호 → 오류, 맞는 비밀번호 → 대시보드)', async () => {
+await step('Google 로그인 (맞지 않는 요청 → 이유 표시, 로그인 → 보던 화면, 기존 데이터 계정)', async () => {
+  await page.goto(`${BASE}/api/auth/google/callback?code=x&state=wrong`)
+  await page.getByText('로그인 요청이 만료됐거나 맞지 않습니다').waitFor()
+  await page.goto(`${BASE}/plan`)
+  await page.getByRole('link', { name: 'Google로 로그인' }).click()
+  await page.getByRole('heading', { name: '지출 계획' }).waitFor()
+  const session = await page.evaluate(async () => (await fetch('/api/session')).json())
+  assert.equal(session.user.id, 1, '소유자 이메일은 기존 데이터 계정을 넘겨받는다')
+  assert.equal(session.user.isAdmin, true)
   await page.goto(`${BASE}/`)
-  await page.getByLabel('비밀번호').fill('wrong-password')
-  await page.getByRole('button', { name: '로그인' }).click()
-  await page.getByText('비밀번호가 맞지 않습니다').waitFor()
-  await page.getByLabel('비밀번호').fill(PASSWORD)
-  await page.getByRole('button', { name: '로그인' }).click()
   await page.getByRole('heading', { name: '대시보드' }).waitFor()
+  await page.getByText('E2E 사용자').first().waitFor()
 })
 
 await step('대시보드: 지표·여유자금·차트·예정 거래', async () => {
@@ -224,6 +274,10 @@ await step('카드 추가 (정산 일정 자동 추정·혜택·구간) → 상�
   await modal.getByLabel('결제일').selectOption('25')
   await modal.getByRole('button', { name: '결제일로 자동 추정' }).click()
   await modal.getByText('이용기간 전월 12일 ~ 당월 11일').waitFor()
+  // 카드 상품은 카드 폼 안에서 새로 만들고, 만들면 그 상품이 골라진 채로 카드 폼으로 돌아온다
+  await modal.getByRole('button', { name: '새 상품' }).click()
+  assert.equal(await modal.getByLabel('카드사').inputValue(), '신한')
+  await modal.getByLabel('상품명 *').fill(`E2E상품${STAMP}`)
   await modal.getByLabel('전월실적 목표').fill('300000')
   await modal.getByRole('button', { name: '+ 혜택 추가' }).click()
   const benefitRow = modal.locator('tbody tr').last()
@@ -232,6 +286,10 @@ await step('카드 추가 (정산 일정 자동 추정·혜택·구간) → 상�
   await modal.getByRole('button', { name: '+ 구간 추가' }).click()
   await modal.getByLabel('전월실적 이상').fill('300000')
   await modal.getByLabel('혜택 한도').fill('10000')
+  await modal.getByRole('button', { name: '상품 추가' }).click()
+  await modal.getByText('혜택').filter({ hasText: '혜택' }).first().waitFor()
+  assert.equal(await modal.getByLabel('이름 *').inputValue(), `E2E카드${STAMP}`, '카드 폼 입력은 그대로')
+  assert.match(await modal.getByRole('combobox', { name: '카드 상품' }).locator('option:checked').innerText(), new RegExp(`E2E상품${STAMP}`))
   await modal.getByRole('button', { name: '추가', exact: true }).click()
   await page.getByRole('heading', { name: `E2E카드${STAMP}`, exact: true }).waitFor()
   await page.getByText('매월 25일 결제 · 전월 12일 ~ 당월 11일 이용').waitFor()
@@ -246,6 +304,11 @@ await step('카드 추가 (정산 일정 자동 추정·혜택·구간) → 상�
   await page.getByRole('heading', { name: '카드', exact: true }).waitFor()
   const after = await gql(`query($id: Int!) { paymentMethod(id: $id) { id } }`, { id: newCardId })
   assert.equal(after.data.paymentMethod, null)
+  // 카드 상품 목록에서 쓰는 카드가 없어진 상품을 지운다
+  const productRow = page.locator('tbody tr', { hasText: `E2E상품${STAMP}` })
+  acceptNextDialog()
+  await productRow.getByRole('button', { name: '삭제' }).click()
+  await productRow.waitFor({ state: 'detached' })
 })
 
 await step('카드 상세: 기존 카드 정산 일정 입력 → 결제 예정 표시', async () => {
@@ -318,23 +381,18 @@ await step('카드별 내역: 내용 자동완성은 최근 3개월 안, 같은 
 })
 
 await step('카드 혜택: 중복 적용·한도 없는 혜택·혜택 종류', async () => {
-  const created = await gql(
-    `mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id name } } }`,
+  const card = await createCard(
+    { name: `E2E혜택${STAMP}`, kind: 'CREDIT_CARD' },
     {
-      input: {
-        name: `E2E혜택${STAMP}`,
-        kind: 'CREDIT_CARD',
-        benefits: [
-          { name: '백화점', rate: 0.01 },
-          { name: '할인점', rate: 0.01 },
-          { name: '간편결제', rate: 0.03, stackable: true },
-          { name: '기본적립', kind: 'POINT', rate: 0.001, sharesCardLimit: false },
-        ],
-        tiers: [{ minSpending: 0, benefitLimit: 3000 }],
-      },
+      benefits: [
+        { name: '백화점', rate: 0.01 },
+        { name: '할인점', rate: 0.01 },
+        { name: '간편결제', rate: 0.03, stackable: true },
+        { name: '기본적립', kind: 'POINT', rate: 0.001, sharesCardLimit: false },
+      ],
+      tiers: [{ minSpending: 0, benefitLimit: 3000 }],
     },
   )
-  const card = created.data.createPaymentMethod
   const id = Object.fromEntries(card.benefits.map((b) => [b.name, b.id]))
   const tx = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id } }`, {
     input: { date: '2026-08-10', amount: 100000, paymentMethodId: card.id, description: `E2E혜택거래${STAMP}` },
@@ -370,36 +428,36 @@ await step('카드 혜택: 중복 적용·한도 없는 혜택·혜택 종류', 
   await page.getByText('3,000원 · 100P').first().waitFor()
   await page.locator('tr', { hasText: '기본적립' }).getByText('한도 없음').waitFor()
   await page.locator('tr', { hasText: '간편결제' }).getByText('중복 적용').first().waitFor()
+  // 혜택은 카드 상품에 있다: 카드 편집의 '상품 수정'에서 고친다.
   // 종류를 마일리지로 바꾸면 혜택률을 "N원당 1마일"로 다시 적는다 (0.1% → 1,000원당 1마일)
   await page.goto(`${BASE}/cards/${card.id}?edit=1&month=2026-08`)
+  await page.locator('form').first().getByRole('button', { name: '상품 수정' }).click()
   const form = page.locator('form').first()
   const pointRow = form.locator('tbody tr').nth(3)
   await pointRow.getByLabel('혜택 종류').selectOption('MILEAGE')
   assert.equal(await pointRow.getByLabel('1마일당 이용금액').inputValue(), '1000')
-  await form.getByRole('button', { name: '저장' }).click()
+  await form.getByRole('button', { name: '상품 저장' }).click()
+  await page.getByRole('button', { name: '상품 수정' }).waitFor()
   await page.locator('tr', { hasText: '기본적립' }).getByText('1,000원당 1마일').waitFor()
   const saved = await gql(`query($id: Int!) { paymentMethod(id: $id) { benefits { name kind rate stackable } } }`, { id: card.id })
   assert.deepEqual(saved.data.paymentMethod.benefits[3], { name: '기본적립', kind: 'MILEAGE', rate: 0.001, stackable: false })
   await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: txId })
   const del = await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: card.id })
   assert.equal(del.data.deletePaymentMethod.deleted, true)
+  const delProduct = await gql(`mutation($id: Int!) { deleteCardProduct(id: $id) }`, { id: card.cardProductId })
+  assert.equal(delProduct.data.deleteCardProduct, true)
 })
 
 await step('가계부: 확정 거래의 상태 칸 혜택 버튼으로 카드 혜택 고르기', async () => {
-  const created = await gql(
-    `mutation($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id benefits { id name } } }`,
+  const card = await createCard(
+    { name: `E2E상태칸카드${STAMP}`, kind: 'CREDIT_CARD' },
     {
-      input: {
-        name: `E2E상태칸카드${STAMP}`,
-        kind: 'CREDIT_CARD',
-        benefits: [
-          { name: '백화점', rate: 0.01 },
-          { name: '간편결제', rate: 0.03, stackable: true },
-        ],
-      },
+      benefits: [
+        { name: '백화점', rate: 0.01 },
+        { name: '간편결제', rate: 0.03, stackable: true },
+      ],
     },
   )
-  const card = created.data.createPaymentMethod
   const id = Object.fromEntries(card.benefits.map((b) => [b.name, b.id]))
   const ids = []
   for (const status of ['CONFIRMED', 'PLANNED']) {
@@ -422,8 +480,12 @@ await step('가계부: 확정 거래의 상태 칸 혜택 버튼으로 카드 �
     await dialog.getByRole('checkbox', { name: /간편결제/ }).check()
     await dialog.getByRole('button', { name: '적용' }).click()
     await confirmed.getByRole('button', { name: /혜택: 백화점, 간편결제/ }).waitFor()
-    const saved = await gql(`query($id: Int!) { transaction(id: $id) { benefitIds } }`, { id: ids[0] })
-    assert.deepEqual([...saved.data.transaction.benefitIds].sort(), [id['백화점'], id['간편결제']].sort())
+    // 화면은 저장 전에 먼저 바뀌므로(낙관적 반영) 서버 값은 저장이 끝날 때까지 기다린다
+    const want = JSON.stringify([id['백화점'], id['간편결제']].sort((a, b) => a - b))
+    await waitUntil(async () => {
+      const saved = await gql(`query($id: Int!) { transaction(id: $id) { benefitIds } }`, { id: ids[0] })
+      return JSON.stringify([...saved.data.transaction.benefitIds].sort((a, b) => a - b)) === want
+    }, '혜택 저장')
     // 다시 열어 하나를 풀고 Esc로 닫으면 저장하지 않고 버튼으로 포커스가 돌아온다
     const button = confirmed.getByRole('button', { name: /혜택:/ })
     await button.click()
@@ -494,6 +556,112 @@ await step('가계부·카드별 내역: 실적제외 체크박스로 전월실�
     })
     for (const t of left.data.transactions.items) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id: t.id })
     await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: card.id })
+  }
+})
+
+await step('가족카드: 카드 상세·카드 추가에서 추가 → 실적·혜택·결제 예정 금액은 본인 카드에 합산, 대시보드 실적엔 본인 카드만', async () => {
+  const parent = await createCard(
+    { name: `E2E본인${STAMP}`, kind: 'CREDIT_CARD', issuer: '현대', paymentDay: 25, closingDay: 11, closingMonthOffset: 0 },
+    { issuer: '현대', monthlyTarget: 300000, annualFee: 5000, benefits: [{ name: '할인10', rate: 0.1, sharesCardLimit: false }] },
+  )
+  const benefitId = parent.benefits[0].id
+  const familyIds = []
+  const txIds = []
+  try {
+    // 카드 상세의 가족카드 추가: 가족카드 체크·본인 카드가 골라진 채로 열리고, 정산 일정·카드 상품 입력은 없다
+    await page.goto(`${BASE}/cards/${parent.id}?month=2026-08`)
+    await page.getByRole('button', { name: '+ 가족카드 추가' }).click()
+    const modal = page.getByRole('dialog')
+    assert.equal(await modal.getByRole('checkbox', { name: '가족카드' }).isChecked(), true)
+    assert.equal(await modal.getByLabel('본인 카드 *').inputValue(), String(parent.id))
+    assert.equal(await modal.getByLabel('이름 *').inputValue(), `E2E본인${STAMP} 가족`)
+    assert.equal(await modal.getByLabel('카드사').inputValue(), '현대')
+    assert.equal(await modal.getByLabel('결제일').count(), 0)
+    assert.equal(await modal.getByRole('combobox', { name: '카드 상품' }).count(), 0)
+    assert.equal(await modal.getByRole('button', { name: '새 상품' }).count(), 0)
+    await modal.getByLabel('카드번호 끝 4자리').fill('4321')
+    await modal.getByRole('button', { name: '추가', exact: true }).click()
+    await page.getByRole('heading', { name: `E2E본인${STAMP} 가족`, exact: true }).waitFor()
+    const familyId = Number(page.url().match(/cards\/(\d+)/)[1])
+    familyIds.push(familyId)
+    const info = page.locator('dl.kv')
+    await info.getByText('매월 25일 결제 · 전월 12일 ~ 당월 11일 이용').waitFor()
+    await info.getByText('5,000원').waitFor() // 연회비는 본인 카드의 상품 것
+    await info.getByRole('link', { name: `E2E본인${STAMP}`, exact: true }).waitFor()
+    assert.equal(await page.getByRole('button', { name: '+ 가족카드 추가' }).count(), 0, '가족카드 아래에는 가족카드를 두지 않는다')
+
+    // 가족카드 거래에 본인 카드 혜택을 고르고, 실적·혜택은 본인 카드와 합친다
+    for (const [pm, amount, benefitIds] of [
+      [familyId, 200000, [benefitId]],
+      [parent.id, 150000, []],
+    ]) {
+      const tx = await gql(`mutation($input: TransactionInput!) { createTransaction(input: $input) { id benefitIds } }`, {
+        input: { date: '2026-08-10', amount, paymentMethodId: pm, description: `E2E가족결제${STAMP}`, benefitIds },
+      })
+      txIds.push(tx.data.createTransaction.id)
+      assert.deepEqual(tx.data.createTransaction.benefitIds, benefitIds)
+    }
+    const monthly = await gql(`{ cardsMonthly(month: "2026-08") { paymentMethodId spending performance discountTotal } }`)
+    const ids = monthly.data.cardsMonthly.map((r) => r.paymentMethodId)
+    assert.ok(!ids.includes(familyId), '전월실적 목록에 가족카드는 없다')
+    assert.deepEqual(
+      monthly.data.cardsMonthly.find((r) => r.paymentMethodId === parent.id),
+      { paymentMethodId: parent.id, spending: 150000, performance: 350000, discountTotal: 20000 },
+    )
+    await page.goto(`${BASE}/cards/${parent.id}?month=2026-08`)
+    // 실적·혜택과 결제 예정 금액 둘 다 가족카드 이용을 합친다
+    const included = page.getByText(`가족카드 E2E본인${STAMP} 가족 이용 포함`)
+    await included.first().waitFor()
+    assert.equal(await included.count(), 2)
+    await page.locator('.stat-value', { hasText: '350,000원' }).waitFor()
+    await page.locator('dl.kv').getByRole('link', { name: `E2E본인${STAMP} 가족` }).waitFor()
+
+    // 대시보드 카드 실적 현황: 본인 카드는 있고 가족카드는 없다
+    await page.goto(`${BASE}/?month=2026-08`)
+    const plan = page.locator('section.panel', { has: page.getByRole('heading', { name: '카드 실적 현황' }) })
+    await plan.getByRole('link', { name: `E2E본인${STAMP}`, exact: true }).waitFor()
+    assert.equal(await plan.getByRole('link', { name: `E2E본인${STAMP} 가족` }).count(), 0)
+
+    // 카드별 내역: 가족카드는 본인 카드 바로 아래, 이용금액은 따로이고 리포트는 본인 카드 것
+    await page.goto(`${BASE}/card-transactions?month=2026-08&card=${familyId}`)
+    const side = page.locator('.side-list button')
+    await side.filter({ hasText: `E2E본인${STAMP} 가족` }).waitFor()
+    const names = await side.locator('b').allTextContents()
+    assert.equal(names[names.indexOf(`E2E본인${STAMP}`) + 1], `E2E본인${STAMP} 가족`)
+    await side.filter({ hasText: `E2E본인${STAMP} 가족` }).getByText('200,000').waitFor()
+    await page.getByText(`본인 카드 E2E본인${STAMP}의 실적·혜택을 함께 씁니다`).waitFor()
+    await page.locator('table.sheet tbody tr', { hasText: `E2E가족결제${STAMP}` }).getByText('할인10').waitFor()
+
+    // 결제 예정 금액: 가족카드 이용은 본인 카드 청구서에 합쳐진다 (가족카드 청구서는 그 카드 이용분)
+    const bill = () => `statements(from: "2026-08", to: "2026-08") { confirmedAmount }`
+    const bills = await gql(`{ p: paymentMethod(id: ${parent.id}) { ${bill()} } f: paymentMethod(id: ${familyId}) { ${bill()} } }`)
+    assert.equal(bills.data.p.statements[0].confirmedAmount, 350000)
+    assert.equal(bills.data.f.statements[0].confirmedAmount, 200000)
+    await page.goto(`${BASE}/card-transactions?month=2026-08&card=${parent.id}&mode=statement`)
+    await page.getByText(`가족카드 E2E본인${STAMP} 가족 이용 포함`).waitFor()
+    const familyLine = page.locator('table tbody tr', { hasText: `E2E본인${STAMP} 가족` })
+    await familyLine.getByText('200,000').waitFor()
+    await page.getByText('결제 금액 (2건)').waitFor()
+
+    // 카드 추가 화면: 가족카드를 체크하고 본인 카드를 고른다
+    await page.goto(`${BASE}/cards`)
+    await page.getByRole('button', { name: '+ 카드 추가' }).click()
+    const add = page.getByRole('dialog')
+    await add.getByLabel('결제일').waitFor()
+    await add.getByRole('checkbox', { name: '가족카드' }).check()
+    assert.equal(await add.getByLabel('결제일').count(), 0)
+    await add.getByLabel('본인 카드 *').selectOption(String(parent.id))
+    await add.getByLabel('이름 *').fill(`E2E가족둘${STAMP}`)
+    await add.getByRole('button', { name: '추가', exact: true }).click()
+    await page.getByRole('heading', { name: `E2E가족둘${STAMP}`, exact: true }).waitFor()
+    familyIds.push(Number(page.url().match(/cards\/(\d+)/)[1]))
+    const second = await gql(`query($id: Int!) { paymentMethod(id: $id) { parentId kind paymentDay issuer benefits { id } } }`, { id: familyIds[1] })
+    assert.deepEqual(second.data.paymentMethod, { parentId: parent.id, kind: 'CREDIT_CARD', paymentDay: 25, issuer: '현대', benefits: [{ id: benefitId }] })
+  } finally {
+    for (const id of txIds) await gql(`mutation($id: Int!) { deleteTransaction(id: $id) }`, { id })
+    for (const id of familyIds) await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id })
+    const del = await gql(`mutation($id: Int!) { deletePaymentMethod(id: $id) { deleted } }`, { id: parent.id })
+    assert.equal(del.data.deletePaymentMethod.deleted, true, '가족카드를 먼저 지우면 본인 카드도 지워진다')
   }
 })
 
@@ -661,10 +829,12 @@ await step('설정: API 토큰 발급 → 토큰으로 자동 입력 → 폐기 
 await step('로그아웃 → 로그인 화면', async () => {
   await page.goto(`${BASE}/`)
   await page.getByRole('button', { name: '로그아웃' }).click()
-  await page.getByLabel('비밀번호').waitFor()
+  await page.getByRole('link', { name: 'Google로 로그인' }).waitFor()
+  assert.equal((await gql('{ appInfo { version } }')).ok, false, '로그아웃 뒤 API는 401')
 })
 
 await browser.close()
+google.close()
 if (pageErrors.length) {
   failures++
   console.log(`✗ 브라우저 콘솔 오류 ${pageErrors.length}건:\n  ${[...new Set(pageErrors)].slice(0, 10).join('\n  ')}`)

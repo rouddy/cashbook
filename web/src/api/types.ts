@@ -40,7 +40,7 @@ export interface Category {
 
 export interface CardBenefit {
   id: number
-  paymentMethodId: number
+  cardProductId: number
   name: string
   kind: BenefitKind
   /** 이용금액 1원당 혜택 (할인·포인트 0.1 = 10%, 마일리지 1/1500 = 1,500원당 1마일) */
@@ -58,9 +58,27 @@ export interface CardBenefit {
 
 export interface CardTier {
   id: number
-  paymentMethodId: number
+  cardProductId: number
   minSpending: number
   benefitLimit: number
+}
+
+/** 카드 상품: 전월실적 목표·구간·혜택·연회비. 모든 계정이 함께 쓰고, 만든 계정과 관리자만 고친다 */
+export interface CardProduct {
+  id: number
+  issuer: string | null
+  name: string
+  /** "카드사 상품명" */
+  label: string
+  annualFee: number | null
+  monthlyTarget: number | null
+  memo: string | null
+  canEdit: boolean
+  createdByMe: boolean
+  /** 이 상품을 고른 카드 수 (모든 계정) */
+  cardCount: number
+  benefits: CardBenefit[]
+  tiers: CardTier[]
 }
 
 export interface PaymentMethod {
@@ -68,6 +86,8 @@ export interface PaymentMethod {
   name: string
   kind: PaymentKind
   issuer: string | null
+  /** 카드 상품 (가족카드는 본인 카드의 상품). 상품명·목표·연회비·혜택·구간은 상품 값 */
+  cardProductId: number | null
   productName: string | null
   last4: string | null
   aliases: string[]
@@ -85,6 +105,8 @@ export interface PaymentMethod {
   isCard: boolean
   billingConfigured: boolean
   usagePeriodLabel: string | null
+  /** 가족카드면 본인 카드 id (카드 상품도 본인 카드 것) */
+  parentId: number | null
   benefits: CardBenefit[]
   tiers: CardTier[]
 }

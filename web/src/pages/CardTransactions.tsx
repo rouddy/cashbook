@@ -9,6 +9,7 @@ import { SelectionActions } from '../components/DeleteTransactions'
 import type { SuggestScope } from '../components/DescriptionInput'
 import TransactionGrid, { PageTotals } from '../components/TransactionGrid'
 import { benefitTotalsText, hasBenefit, plannedPerformance, txBenefitTexts } from '../lib/benefits'
+import { familyReportNote, familyStatementNote, withFamilyOrder } from '../lib/cards'
 import { shortDate, signedWon, won } from '../lib/format'
 import { defaultDateFor, monthLabel, useMonthParam, useQueryParam } from '../lib/month'
 import { useTxSelection } from '../lib/selection'
@@ -19,11 +20,12 @@ export default function CardTransactions() {
   const [month, setMonth] = useMonthParam()
   const [cardParam, setCard] = useQueryParam('card', '')
   const [mode, setMode] = useQueryParam('mode', 'usage')
-  const reports = useGql<{ cardsMonthly: CardMonthReport[] }>(['cardsMonthly', month], CARDS_MONTHLY_QUERY, { month })
+  // 가족카드도 이용금액을 따로 보도록 함께 받는다 (실적·혜택은 본인 카드와 같은 값)
+  const reports = useGql<{ cardsMonthly: CardMonthReport[] }>(['cardsMonthly', month, 'family'], CARDS_MONTHLY_QUERY, { month, includeFamily: true })
 
   if (error) return <ErrorBox error={error} />
   if (!ref) return <Loading />
-  const list = reports.data?.cardsMonthly ?? []
+  const list = withFamilyOrder(reports.data?.cardsMonthly ?? [], (r) => ref.paymentMethodById.get(r.paymentMethodId))
   const selectedId = cardParam ? Number(cardParam) : list.find((r) => r.spending !== 0)?.paymentMethodId ?? list[0]?.paymentMethodId
   const selected = list.find((r) => r.paymentMethodId === selectedId)
   const card = selectedId ? ref.paymentMethodById.get(selectedId) : undefined
@@ -54,15 +56,24 @@ export default function CardTransactions() {
             <div className="side-list" style={{ padding: '0 6px 8px' }}>
               {list.map((r) => {
                 const pm = ref.paymentMethodById.get(r.paymentMethodId)
+                const isFamily = pm?.parentId != null
                 return (
-                  <button key={r.paymentMethodId} className={r.paymentMethodId === selectedId ? 'on' : ''} onClick={() => setCard(String(r.paymentMethodId))}>
+                  <button
+                    key={r.paymentMethodId}
+                    className={r.paymentMethodId === selectedId ? 'on' : ''}
+                    onClick={() => setCard(String(r.paymentMethodId))}
+                    style={isFamily ? { paddingLeft: 26 } : undefined}
+                  >
                     <div className="row">
                       <b>{pm?.name}</b>
+                      {isFamily && <span className="badge">가족카드</span>}
                       {pm?.archived && <span className="badge">보관</span>}
                       <span className="spacer" />
                       <span className="num">{won(r.spending)}</span>
                     </div>
-                    {r.target ? (
+                    {isFamily ? (
+                      <div className="small muted">실적·혜택은 본인 카드에 합산</div>
+                    ) : r.target ? (
                       <div style={{ marginTop: 6 }}>
                         <PerformanceMeter report={r} label={`${pm?.name} 실적`} />
                         <div className="small text-2" style={{ marginTop: 2 }}>
@@ -79,7 +90,7 @@ export default function CardTransactions() {
                     ) : (
                       <div className="small muted">실적 {won(r.performance)}</div>
                     )}
-                    {(hasBenefit(r) || r.currentLimit) && (
+                    {!isFamily && (hasBenefit(r) || r.currentLimit) && (
                       <div className="small text-2">
                         혜택 {benefitTotalsText(r)}
                         {r.currentLimit != null && ` · 한도 ${won(r.limitUsed)} / ${won(r.currentLimit)}`}
@@ -104,7 +115,7 @@ export default function CardTransactions() {
               </div>
               {mode === 'usage' ? (
                 <>
-                  <ReportPanel report={selected} card={card} />
+                  <ReportPanel report={selected} card={card} note={familyReportNote(card, ref)} />
                   <UsageTransactions card={card} month={month} refMaps={ref} report={selected} />
                 </>
               ) : (
@@ -170,8 +181,18 @@ function StatementView({ card, month, refMaps }: { card: PaymentMethod; month: s
   const lines = q.data?.statementLines ?? []
   const confirmed = lines.filter((l) => !l.planned).reduce((a, l) => a + l.amount, 0)
   const planned = lines.filter((l) => l.planned).reduce((a, l) => a + l.amount, 0)
+  const note = familyStatementNote(card, refMaps)
   return (
-    <Panel title={`${monthLabel(month)} 결제분`} sub={`${card.usagePeriodLabel} 이용분이 매월 ${card.paymentDay}일에 결제됩니다`} flush>
+    <Panel
+      title={`${monthLabel(month)} 결제분`}
+      sub={
+        <>
+          {card.usagePeriodLabel} 이용분이 매월 {card.paymentDay}일에 결제됩니다
+          {note && <div>{note}</div>}
+        </>
+      }
+      flush
+    >
       {q.isLoading ? (
         <Loading />
       ) : q.error ? (
@@ -192,6 +213,11 @@ function StatementView({ card, month, refMaps }: { card: PaymentMethod; month: s
                 <td className="nowrap">{shortDate(l.transaction.date)}</td>
                 <td>
                   {l.transaction.description}
+                  {l.transaction.paymentMethodId !== card.id && (
+                    <span className="badge" style={{ marginLeft: 6 }} title="가족카드 이용">
+                      {refMaps.paymentMethodById.get(l.transaction.paymentMethodId ?? -1)?.name}
+                    </span>
+                  )}
                   {l.installmentMonths > 1 && (
                     <span className="badge" style={{ marginLeft: 6 }}>
                       {l.installmentNo}/{l.installmentMonths}회

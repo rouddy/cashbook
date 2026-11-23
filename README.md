@@ -2,6 +2,7 @@
 
 구글 스프레드시트로 쓰던 가계부(월급사용내역·용돈·카드별 시트)를 데이터베이스로 옮겨,
 지출/지출 예정, 카드 실적·혜택, 카드 결제 예정 금액, 은행 잔고 기반 여유자금을 한 화면에서 보는 서비스입니다.
+Google 계정으로 로그인하고, 장부·거래 등은 계정마다 따로 두되 카드 상품(전월실적·혜택·연회비)은 모든 계정이 함께 씁니다.
 
 - **백엔드**: Rust · Rocket 0.5 · async-graphql 7 (GraphQL API) · SeaORM 2 · SQLite 또는 MySQL
 - **프론트엔드**: React 19 · TypeScript · Vite (Node로 빌드, 빌드 결과는 Rocket이 서빙)
@@ -22,12 +23,13 @@
 | 대시보드 `/` | 이번 달 소비 vs 평균·예산, 여유자금, 다가오는 카드 결제, 예정 거래(지출·월급·장부 이체), 월별 추이 |
 | 가계부 `/transactions` | 스프레드시트처럼 보고 바로 고치는 월별 내역과 시트식 요약 |
 | 결제 입력 `/entry` | 휴대폰용 입력 폼, 카드 승인 문자 붙여넣기 |
-| 카드 `/cards` | 카드 목록·추가·삭제, 다음 결제일·금액, 이번 달 실적 |
+| 카드 `/cards` | 카드 목록·추가·삭제, 다음 결제일·금액, 이번 달 실적, 카드 상품(모든 계정 공용) 목록 |
 | 카드 상세 `/cards/:id` | 카드 정보·정산 일정, 청구서별 결제 예정 금액, 실적·혜택, 카드 거래 |
 | 카드별 내역 `/card-transactions` | 카드별 월 이용 내역과 혜택액 (이용월/결제월 기준). 내용 자동완성은 최근 3개월 내역에서 찾고, 같은 내용이라도 항목이 다르면 따로 보여 줌 |
 | 은행 잔고 `/accounts` | 계좌, 잔고 기록과 이력, 여유자금 포함 여부 |
 | 지출 계획 `/plan` | 카테고리 예산, 배분·구성원 용돈, 반복 지출·수입(정기수익)·장부 이체 규칙 |
-| 설정 `/settings` | 장부, 카드 외 결제수단, API 토큰과 자동 입력 사용법 |
+| 설정 `/settings` | 로그인한 계정, 장부, 카드 외 결제수단, API 토큰과 자동 입력 사용법 |
+| 로그인 `/login` | Google로 로그인 (Google 로그인을 설정한 서버) |
 
 화면별 구성, URL 파라미터, 쓰는 API는 [web/README.md](web/README.md#화면-명세)에 있습니다.
 
@@ -45,6 +47,8 @@ npm run build          # → web/dist
 cd ../server
 cargo run              # http://127.0.0.1:8000  (GraphQL 탐색기: /api/graphiql)
 ```
+
+Google 로그인을 설정하지 않으면 로그인 없이 기본 계정(id 1)으로 동작하고 localhost로만 접속할 수 있습니다.
 
 개발 중에는 서버(`cargo run`)를 띄운 채로 `cd web && npm run dev` → http://127.0.0.1:5173 (Vite가 `/api`를 8000으로 넘김. 다른 서버로 넘기려면 `CASHBOOK_API=http://127.0.0.1:8001 npm run dev`).
 웹 타입 검사·린트: `cd web && npx tsc -b && npm run lint`.
@@ -65,11 +69,13 @@ tools/.venv/bin/python -I tools/export_sheets.py \
   --out import/normalized.json
 
 cd server
-cargo run -- import ../import/normalized.json            # 빈 DB에 넣기
-cargo run -- import ../import/normalized.json --replace  # 기존 데이터(토큰 제외)를 지우고 다시 넣기 ⚠️
+cargo run -- import ../import/normalized.json            # 빈 DB(기본 계정 id 1)에 넣기
+cargo run -- import ../import/normalized.json --replace  # 그 계정의 기존 데이터(토큰 제외)를 지우고 다시 넣기 ⚠️
+cargo run -- import ../import/normalized.json --user me@gmail.com   # 다른 계정(id 또는 이메일, 한 번 로그인한 뒤)에 넣기
 ```
 
-`--replace`는 앱에서 입력한 거래·잔고·카드 정산 일정까지 모두 지웁니다. 처음 한 번만 쓰세요.
+`--replace`는 그 계정에서 앱으로 입력한 거래·잔고·카드 정산 일정까지 모두 지웁니다. 처음 한 번만 쓰세요.
+카드의 상품명·전월실적 목표·연회비·혜택·구간은 카드 상품(모든 계정 공용)으로 만들어집니다.
 
 가져오기 규칙 (`tools/export_sheets.py`):
 
@@ -98,8 +104,9 @@ tools/.venv/bin/python -I tools/verify_totals.py "import/raw/salary2020/월급�
 ```bash
 cd web && npm ci && npm run build
 cd ../server && cargo build --release
-# server 디렉터리에서 실행 (data/cashbook.db, ../web/dist 기준)
-CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cashbook
+# server 디렉터리에서 실행 (data/cashbook.db, ../web/dist 기준). Google 로그인 설정은 아래 '계정과 Google 로그인'
+CASHBOOK_GOOGLE_CLIENT_ID=... CASHBOOK_GOOGLE_CLIENT_SECRET=... CASHBOOK_PUBLIC_URL=https://cashbook.example.com \
+CASHBOOK_OWNER_EMAIL=me@gmail.com ROCKET_ADDRESS=0.0.0.0 ./target/release/cashbook
 ```
 
 - 세션 쿠키 키는 `data/secret.key`에 자동으로 만들어 두고 재시작해도 그대로 씁니다(로그인 유지).
@@ -114,25 +121,40 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 | 변수 | 기본값 | 설명 |
 |---|---|---|
 | `DATABASE_URL` | `sqlite://data/cashbook.db?mode=rwc` | SQLite 파일 (실행 위치 기준) 또는 MySQL `mysql://사용자:비밀번호@호스트:3306/DB` (비밀번호 특수문자는 URL 인코딩) |
-| `CASHBOOK_PASSWORD` | (없음) | 설정하면 웹 로그인과 API 토큰 인증을 요구 |
+| `CASHBOOK_GOOGLE_CLIENT_ID`, `CASHBOOK_GOOGLE_CLIENT_SECRET` | (없음) | Google OAuth 클라이언트. 설정하면 Google 로그인과 API 토큰 인증을 요구 (없으면 로그인 없이 기본 계정, localhost 전용) |
+| `CASHBOOK_PUBLIC_URL` | (없음) | 사용자가 접속하는 주소 (예: `https://cashbook.example.com`). Google 로그인에 필요, 리디렉션 URI는 이 주소 + `/api/auth/google/callback`. https면 쿠키에 Secure |
+| `CASHBOOK_OWNER_EMAIL` | (없음) | 이 Google 계정이 처음 로그인하면 기존 데이터(계정 id 1)를 넘겨받는다. 관리자이기도 하다 |
+| `CASHBOOK_ADMIN_EMAILS` | (없음) | 쉼표 구분. 모든 카드 상품을 고칠 수 있는 계정 |
 | `CASHBOOK_TZ` | `Asia/Seoul` | "오늘" 기준 시간대 |
 | `CASHBOOK_PLAN_MONTHS` | `2` | 반복 규칙으로 이번 달 + N개월 예정 거래 생성 |
 | `CASHBOOK_WEB_DIR` | `../web/dist` 또는 `web/dist` | React 빌드 위치 |
 | `CASHBOOK_SECRET_FILE` | `data/secret.key` | 세션 쿠키 키 (없으면 생성, `ROCKET_SECRET_KEY`가 우선) |
-| `CASHBOOK_SECURE_COOKIE` | (끔) | HTTPS 프록시 뒤에서 `1` |
+| `CASHBOOK_SECURE_COOKIE` | (끔) | HTTPS 프록시 뒤에서 `1` (`CASHBOOK_PUBLIC_URL`이 https면 자동) |
 | `CASHBOOK_ALLOWED_ORIGINS` | (없음) | 브라우저 요청의 Origin이 Host와 다를 때 허용할 출처 (프록시가 Host를 바꾸는 경우, 예: `https://cash.example.com`) |
-| `CASHBOOK_ALLOWED_HOSTS` | (없음) | 비밀번호 없이 실행할 때 localhost 외에 허용할 Host 이름 |
-| `CASHBOOK_ALLOW_INSECURE` | (끔) | 비밀번호 없이 외부 주소로 여는 것을 허용 (권장하지 않음) |
+| `CASHBOOK_ALLOWED_HOSTS` | (없음) | 로그인 없이 실행할 때 localhost 외에 허용할 Host 이름 |
+| `CASHBOOK_ALLOW_INSECURE` | (끔) | 로그인 없이 외부 주소로 여는 것을 허용 (권장하지 않음) |
 | `ROCKET_ADDRESS`, `ROCKET_PORT` | `127.0.0.1`, `8000` | `server/Rocket.toml` |
 
-**외부(휴대폰 자동 입력 등)에서 접속하려면** `CASHBOOK_PASSWORD`를 설정하고 `ROCKET_ADDRESS=0.0.0.0`으로 띄운 뒤, HTTPS 리버스 프록시(nginx·Caddy 등) 뒤에 두고 `CASHBOOK_SECURE_COOKIE=1`을 켜세요. 비밀번호 없이 외부 주소로 띄우면 서버가 시작을 거부합니다.
+**외부(휴대폰 자동 입력 등)에서 접속하려면** Google 로그인을 설정하고 `ROCKET_ADDRESS=0.0.0.0`으로 띄운 뒤 HTTPS 리버스 프록시(nginx·Caddy 등) 뒤에 두세요. 로그인 설정 없이 외부 주소로 띄우면 서버가 시작을 거부합니다.
+
+### 계정과 Google 로그인
+
+- 장부·카테고리·지출 계획·계좌·결제수단·거래·반복 규칙·API 토큰은 계정마다 따로입니다. 처음 로그인한 Google 계정에는 기본 장부(가계부)와 항목이 만들어집니다.
+- 카드 상품(전월실적 목표·구간·혜택·연회비)은 모든 계정이 함께 씁니다. 누구나 만들 수 있고, 고치거나 지우는 건 만든 계정과 관리자(`CASHBOOK_ADMIN_EMAILS`, `CASHBOOK_OWNER_EMAIL`)만 합니다. 고치면 그 상품을 쓰는 모든 계정의 실적·혜택 계산이 바뀝니다.
+- 계정 기능 이전의 데이터는 계정 id 1에 있고, `CASHBOOK_OWNER_EMAIL` 계정이 처음 로그인할 때 넘겨받습니다. 그 전에 다른 계정이 로그인해도 가져가지 않습니다.
+- Google 계정이면 누구나 가입할 수 있습니다 (이메일이 확인된 계정만).
+
+Google OAuth 클라이언트 만들기:
+1. [Google Cloud 콘솔](https://console.cloud.google.com/) → API 및 서비스 → **OAuth 동의 화면**: 외부(External), 앱 이름·지원 이메일. 범위는 기본(`openid`·`email`·`profile`)만 씁니다. 게시 상태가 '테스트'이면 테스트 사용자로 추가한 계정만 로그인할 수 있으니 누구나 쓰게 하려면 '프로덕션'으로 게시합니다.
+2. **사용자 인증 정보** → 사용자 인증 정보 만들기 → OAuth 클라이언트 ID → 웹 애플리케이션 → 승인된 리디렉션 URI에 `CASHBOOK_PUBLIC_URL` + `/api/auth/google/callback`(예: `https://cashbook.example.com/api/auth/google/callback`)을 넣습니다. 로컬에서 시험하려면 `http://localhost:8000/api/auth/google/callback`도 넣고 `CASHBOOK_PUBLIC_URL=http://localhost:8000`으로 띄웁니다(Vite 개발 서버로 열면 `http://localhost:5173`).
+3. 클라이언트 ID·보안 비밀을 `CASHBOOK_GOOGLE_CLIENT_ID`·`CASHBOOK_GOOGLE_CLIENT_SECRET`에 넣습니다. 서버가 시작할 때 쓰는 리디렉션 URI를 출력합니다.
 
 보안 동작:
-- 로그인 세션 쿠키는 암호화·HttpOnly·SameSite=Strict, 30일 유지(재시작해도 유지). 비밀번호를 바꾸면 기존 세션은 무효가 됩니다.
+- 로그인은 Authorization Code + PKCE입니다. state·검증값은 10분짜리 암호화 쿠키(SameSite=Lax)에 두고, 코드 교환과 사용자 정보는 서버가 Google과 직접 주고받습니다. 로그인 뒤에는 이 사이트 안의 경로로만 돌아갑니다.
+- 로그인 세션 쿠키는 계정 id를 담아 암호화·HttpOnly·SameSite=Strict, 30일 유지(재시작해도 유지).
 - 보호된 API(`/api/graphql`, `/api/ingest`)는 브라우저가 다른 사이트에서 보낸 요청(Origin이 Host와 다름)을 403으로 거부합니다. 자동화 앱처럼 Origin을 보내지 않는 요청은 영향이 없습니다. 프록시가 Host를 바꾸면 `X-Forwarded-Host`를 넘기거나 `CASHBOOK_ALLOWED_ORIGINS`를 설정하세요.
-- 비밀번호 없이(로컬) 실행할 때는 `localhost`/`127.0.0.1` 주소로 온 요청만 받습니다(DNS 리바인딩 방지).
-- 로그인 실패는 IP당 10분에 10번, 전체 10분에 100번까지.
-- API 토큰은 SHA-256 해시만 저장하고, 자동 입력(`/api/ingest`)과 GraphQL 전체(내역 읽기·쓰기)를 모두 쓸 수 있습니다(권한 구분 없음). 기기·용도마다 따로 발급하고, 잃어버리거나 유출되면 설정에서 바로 폐기하세요.
+- 로그인 없이(로컬) 실행할 때는 `localhost`/`127.0.0.1` 주소로 온 요청만 받습니다(DNS 리바인딩 방지).
+- API 토큰은 계정마다 발급하고 SHA-256 해시만 저장합니다. 그 계정의 자동 입력(`/api/ingest`)과 GraphQL 전체(내역 읽기·쓰기)를 모두 쓸 수 있습니다(권한 구분 없음). 기기·용도마다 따로 발급하고, 잃어버리거나 유출되면 설정에서 바로 폐기하세요.
 
 ## 핵심 계산 규칙
 
@@ -156,7 +178,7 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 - 반복 규칙은 이번 달 + `CASHBOOK_PLAN_MONTHS`개월치 예정 거래를 만들고(서버 시작 시·매시간), 규칙을 고치면 이번 달 이후 예정분을 다시 만듭니다.
 - 반복 규칙이 이번 달 이후에 만든 항목을 지우면(확정·예정 모두) 그 달은 `건너뜀`으로 남아 다시 생기지 않습니다. 건너뛴 항목은 `복원`으로 되살립니다.
 - 결제수단을 보관(거래가 있는 카드 삭제)하면 그 결제수단의 반복 규칙을 끄고 이번 달 이후 예정 항목을 지웁니다.
-- 반복 규칙에 결제수단 카드의 혜택을 골라 두면 만드는 예정 거래에 그 혜택이 붙습니다(자동 입력으로 확정돼도 유지). 결제수단을 바꾸면 고른 혜택은 비워집니다.
+- 반복 규칙에 결제수단 카드의 혜택을 골라 두면 만드는 예정 거래에 그 혜택이 붙습니다(자동 입력으로 확정돼도 유지). 결제수단을 바꾸면 고른 혜택은 비워집니다(본인 카드 ↔ 가족카드는 혜택이 같아 그대로).
 - 날짜가 지났는데 확정되지 않은 예정 항목은 대시보드·가계부에 `! 미확정`으로 표시됩니다.
 
 ### 거래 삭제
@@ -196,6 +218,14 @@ CASHBOOK_PASSWORD='긴-비밀번호' ROCKET_ADDRESS=0.0.0.0 ./target/release/cas
 - 거래 하나에 고른 혜택은 모두 더합니다(백화점 1% + 간편결제 3% = 4%). `중복 적용`이 아닌 혜택은 거래당 하나만 고를 수 있고, 서버도 둘 이상이면 거절합니다.
 - 혜택 종류: 할인(원) / 포인트 적립(P, 1P = 1원) / 마일리지 적립(마일). 마일리지 혜택률은 "N원당 1마일"로 입력하고, 건당 최대·항목 월한도도 그 단위로 적습니다. 혜택 합계는 종류별로 따로 보여줍니다.
 - 거래에 혜택 항목을 지정해야 계산됩니다(가계부/카드별 내역의 "혜택" 칸, 결제 입력 폼). 자동 입력은 같은 가맹점의 과거 혜택 지정을 따라갑니다.
+
+### 가족카드
+- 카드 추가 화면에서 `가족카드`를 체크하고 본인 카드를 고르거나, 카드 상세의 `+ 가족카드 추가`로 만듭니다(본인 카드가 골라진 채로 열림). 가족카드 아래에 가족카드는 둘 수 없습니다.
+- 가족카드는 본인 카드와 전월실적·혜택을 함께 씁니다: 실적·혜택 한도는 본인 카드와 가족카드 이용을 합쳐 계산하고, 거래에는 본인 카드의 혜택을 고릅니다. 대시보드 `카드 실적 현황`에는 본인 카드만 나오고, 카드별 내역에는 본인 카드 아래에 가족카드 이용금액이 따로 나옵니다.
+- 종류·결제 계좌·정산 일정은 본인 카드를 따릅니다(본인 카드를 고치면 같이 바뀜). 연회비·카드번호 끝자리·유효기간·별칭은 따로 입력합니다.
+- 가족카드 대금은 본인 카드 청구서에 합쳐 출금되므로, 본인 카드의 결제 예정 금액·청구서 내역·여유자금 카드대금에 가족카드 이용이 들어갑니다(청구서 내역에는 가족카드 이름 표시). 가족카드 화면의 결제 예정 금액은 그 카드 이용분이고, 여유자금에서 따로 빼지 않습니다.
+- 본인 카드를 지우면 삭제 대신 보관하고 가족카드도 함께 보관합니다. 가족카드로 바꾸거나 가족카드에서 풀면 그 카드 거래에 고른 혜택 중 쓸 수 없게 된 것은 지웁니다.
+- 승인 문자에 끝자리 없이 카드사만 맞으면 가족카드보다 본인 카드로 넣습니다(가족카드는 끝 4자리로 구분).
 
 ## 자동 입력 API
 
@@ -247,7 +277,7 @@ GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 API 토큰): `
 엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 API 토큰).
 전체 스키마는 `/api/graphiql`에서 확인하세요. Query·Mutation 목록과 리졸버 위치는 [server/README.md](server/README.md#graphql-요청)에 있습니다.
 
-그 밖의 REST: `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/health`.
+그 밖의 REST: `GET /api/session`(로그인한 계정), `POST /api/logout`, `GET /api/auth/google?next=/경로`(Google 로그인 시작) → `GET /api/auth/google/callback`, `GET /api/health`.
 
 ## 데이터베이스
 
@@ -267,16 +297,20 @@ cargo run -- copy-db "mysql://cashbook:비밀번호@127.0.0.1:3306/cashbook" "sq
 ## 테스트
 
 ```bash
-cd server && cargo test        # 정산 일정·할부·혜택·여유자금·월 요약·문자 해석·자동 입력·반복 규칙·인증·DB 복사 (46개)
+cd server && cargo test        # 정산 일정·할부·혜택·여유자금·월 요약·문자 해석·자동 입력·반복 규칙·계정 격리·카드 상품·Google 로그인(가짜 Google 서버)·DB 복사 (81개)
 
-# 브라우저 E2E (시스템 Chrome + playwright-core). 반드시 테스트용 DB 사본으로 띄운 서버에 대해 실행
+# 브라우저 E2E (시스템 Chrome + playwright-core). 반드시 테스트용 DB 사본으로 띄운 서버에 대해 실행.
+# 로그인은 스크립트가 띄우는 가짜 Google 서버(8002)로 하고, 소유자 이메일이라 사본의 기존 데이터를 넘겨받는다
 sqlite3 server/data/cashbook.db ".backup /tmp/cashbook-e2e.db"
-(cd server && DATABASE_URL="sqlite:///tmp/cashbook-e2e.db?mode=rwc" CASHBOOK_PASSWORD=e2e-pass \
-   CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 cargo run) &
-cd web && npm run e2e          # 로그인, 셀 편집·키보드, 입력, 카드 추가/삭제, 잔고, 반복 규칙·장부 이체, 토큰·교차 사이트 차단, 실적 제외 체크 (24단계)
+(cd server && DATABASE_URL="sqlite:///tmp/cashbook-e2e.db?mode=rwc" CASHBOOK_SECRET_FILE=/tmp/cashbook-e2e.key ROCKET_PORT=8001 \
+   CASHBOOK_GOOGLE_CLIENT_ID=e2e CASHBOOK_GOOGLE_CLIENT_SECRET=e2e CASHBOOK_PUBLIC_URL=http://127.0.0.1:8001 \
+   CASHBOOK_OWNER_EMAIL=owner@e2e.test CASHBOOK_GOOGLE_AUTH_URL=http://127.0.0.1:8002/auth \
+   CASHBOOK_GOOGLE_TOKEN_URL=http://127.0.0.1:8002/token CASHBOOK_GOOGLE_USERINFO_URL=http://127.0.0.1:8002/userinfo cargo run) &
+cd web && npm run e2e          # Google 로그인, 셀 편집·키보드, 입력, 카드·카드 상품 추가/삭제, 잔고, 반복 규칙·장부 이체, 토큰·교차 사이트 차단, 실적 제외 체크, 가족카드 (25단계)
 ```
 
-E2E 환경 변수: `E2E_BASE_URL`(기본 `http://127.0.0.1:8001`), `E2E_PASSWORD`(기본 `e2e-pass`), `CHROME_PATH`(기본 macOS Google Chrome 경로).
+E2E 환경 변수: `E2E_BASE_URL`(기본 `http://127.0.0.1:8001`), `E2E_GOOGLE_PORT`(기본 `8002`), `E2E_EMAIL`(기본 `owner@e2e.test`, 서버의 `CASHBOOK_OWNER_EMAIL`과 같게), `CHROME_PATH`(기본 macOS Google Chrome 경로).
+`CASHBOOK_GOOGLE_AUTH_URL`·`_TOKEN_URL`·`_USERINFO_URL`은 시험용으로만 바꿉니다(기본은 Google 주소).
 
 ## 알려진 제한
 

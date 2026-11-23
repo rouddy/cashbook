@@ -7,7 +7,10 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    #[sea_orm(unique)]
+    /// 계정 (`users.id`)
+    #[graphql(skip)]
+    pub user_id: i32,
+    /// 계정 안에서 겹치지 않는다
     pub name: String,
     pub description: Option<String>,
     /// 자동 입력 등에서 장부를 지정하지 않았을 때 쓰는 기본 장부
@@ -19,4 +22,4 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
-impl ActiveModelBehavior for ActiveModel {}
+super::user_owned!();

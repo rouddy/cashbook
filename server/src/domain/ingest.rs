@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use super::sms::{self, ParsedMessage};
 use crate::db::sql;
 use crate::entity::{
-    category,
+    OfUser, category,
     enums::{CategoryKind, PaymentKind, TxSource, TxStatus},
     ledger, payment_method, recurring_rule, transaction, transaction_benefit,
 };
@@ -162,6 +162,13 @@ pub fn resolve_payment_method<'a>(
         if by_issuer.len() == 1 {
             return Some(by_issuer[0]);
         }
+        // 카드사만 맞으면 본인 카드와 그 가족카드 사이에서는 본인 카드 (끝자리 없는 문자)
+        let heads: Vec<_> = by_issuer.iter().filter(|p| p.parent_id.is_none()).collect();
+        if let [head] = heads[..]
+            && by_issuer.iter().all(|p| p.parent_id.is_none_or(|id| id == head.id))
+        {
+            return Some(head);
+        }
     }
     None
 }
@@ -183,8 +190,9 @@ pub struct Suggestion {
 
 /// 추천에 쓰는 과거 거래: 확정 거래, `since`가 있으면 그날 이후만.
 /// 분할해 옮긴 거래는 원래 거래의 분류를 흐리지 않게, 장부 이체는 결제가 아니라서 뺀다.
-fn history(since: Option<NaiveDate>) -> Select<transaction::Entity> {
+fn history(uid: i32, since: Option<NaiveDate>) -> Select<transaction::Entity> {
     transaction::Entity::find()
+        .of_user(uid)
         .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
         .filter(transaction::Column::SplitParentId.is_null())
         .filter(transaction::Column::TransferLedgerId.is_null())
@@ -205,15 +213,17 @@ async fn benefit_ids_of<C: ConnectionTrait>(db: &C, transaction_id: i32) -> Resu
 /// 같은(또는 서로 포함하는) 내용의 최근 확정 거래로 장부/카테고리를 추천한다.
 pub async fn suggest<C: ConnectionTrait>(
     db: &C,
+    uid: i32,
     description: &str,
     payment_method_id: Option<i32>,
 ) -> Result<Option<Suggestion>, DbErr> {
-    suggest_since(db, description, payment_method_id, None).await
+    suggest_since(db, uid, description, payment_method_id, None).await
 }
 
 /// [`suggest`]와 같고, `since`가 있으면 그날 이후 거래만 본다.
 pub async fn suggest_since<C: ConnectionTrait>(
     db: &C,
+    uid: i32,
     description: &str,
     payment_method_id: Option<i32>,
     since: Option<NaiveDate>,
@@ -226,7 +236,7 @@ pub async fn suggest_since<C: ConnectionTrait>(
         "({}(description) >= 2 AND instr(?, description) > 0)",
         sql::char_length(db.get_database_backend())
     );
-    let rows = history(since)
+    let rows = history(uid, since)
         .filter(
             Condition::any()
                 .add(transaction::Column::Description.eq(d))
@@ -282,6 +292,7 @@ pub async fn suggest_since<C: ConnectionTrait>(
 /// 결제수단·구성원·혜택·최근 금액은 그 묶음의 가장 최근 거래 것이고, 횟수는 `since` 이후만 센다.
 pub async fn suggestions_by_category<C: ConnectionTrait>(
     db: &C,
+    uid: i32,
     query: &str,
     ledger_id: Option<i32>,
     since: Option<NaiveDate>,
@@ -291,7 +302,7 @@ pub async fn suggestions_by_category<C: ConnectionTrait>(
     if q.is_empty() {
         return Ok(vec![]);
     }
-    let groups: Vec<(String, i32, Option<i32>, i64)> = history(since)
+    let groups: Vec<(String, i32, Option<i32>, i64)> = history(uid, since)
         .select_only()
         .column(transaction::Column::Description)
         .column(transaction::Column::LedgerId)
@@ -318,7 +329,7 @@ pub async fn suggestions_by_category<C: ConnectionTrait>(
             Some(id) => transaction::Column::CategoryId.eq(id),
             None => transaction::Column::CategoryId.is_null(),
         };
-        let Some(latest) = history(since)
+        let Some(latest) = history(uid, since)
             .filter(transaction::Column::Description.eq(description.as_str()))
             .filter(transaction::Column::LedgerId.eq(ledger_id))
             .filter(same_category)
@@ -412,12 +423,14 @@ fn match_rank(planned: (i64, &str), rule: Option<&RuleMatch>, amount: i64, descr
 
 async fn find_planned_match<C: ConnectionTrait>(
     db: &C,
+    uid: i32,
     payment_method_id: i32,
     amount: i64,
     date: NaiveDate,
     description: &str,
 ) -> Result<Option<transaction::Model>, DbErr> {
     let candidates = transaction::Entity::find()
+        .of_user(uid)
         .filter(transaction::Column::Status.eq(TxStatus::Planned))
         .filter(transaction::Column::PaymentMethodId.eq(payment_method_id))
         .filter(transaction::Column::Date.between(date - Duration::days(7), date + Duration::days(7)))
@@ -431,6 +444,7 @@ async fn find_planned_match<C: ConnectionTrait>(
         HashMap::new()
     } else {
         recurring_rule::Entity::find()
+            .of_user(uid)
             .filter(recurring_rule::Column::Id.is_in(rule_ids))
             .all(db)
             .await?
@@ -505,17 +519,17 @@ pub struct PaymentMethodOption {
 }
 
 /// 보관하지 않은 장부·카테고리·결제수단. 화면과 같은 순서(sort_order, id)로, 기본 장부를 먼저 둔다.
-pub async fn options<C: ConnectionTrait>(db: &C) -> Result<IngestOptions, DbErr> {
-    let mut ledgers = ledger::Entity::find().all(db).await?;
+pub async fn options<C: ConnectionTrait>(db: &C, uid: i32) -> Result<IngestOptions, DbErr> {
+    let mut ledgers = ledger::Entity::find().of_user(uid).all(db).await?;
     ledgers.sort_by_key(|l| (!l.is_default, l.sort_order, l.id));
     let ledger_order: HashMap<i32, usize> = ledgers.iter().enumerate().map(|(i, l)| (l.id, i)).collect();
 
     let mut categories: Vec<category::Model> =
-        category::Entity::find().all(db).await?.into_iter().filter(|c| !c.archived && ledger_order.contains_key(&c.ledger_id)).collect();
+        category::Entity::find().of_user(uid).all(db).await?.into_iter().filter(|c| !c.archived && ledger_order.contains_key(&c.ledger_id)).collect();
     categories.sort_by_key(|c| (ledger_order[&c.ledger_id], c.kind == CategoryKind::Income, c.sort_order, c.id));
 
     let mut pms: Vec<payment_method::Model> =
-        payment_method::Entity::find().all(db).await?.into_iter().filter(|p| !p.archived).collect();
+        payment_method::Entity::find().of_user(uid).all(db).await?.into_iter().filter(|p| !p.archived).collect();
     pms.sort_by_key(|p| (p.sort_order, p.id));
 
     let ledger_name: HashMap<i32, &str> = ledgers.iter().map(|l| (l.id, l.name.as_str())).collect();
@@ -538,7 +552,12 @@ pub async fn options<C: ConnectionTrait>(db: &C) -> Result<IngestOptions, DbErr>
     })
 }
 
-pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: NaiveDate) -> Result<IngestOutcome, IngestError> {
+pub async fn ingest<C: ConnectionTrait>(
+    db: &C,
+    uid: i32,
+    input: IngestInput,
+    today: NaiveDate,
+) -> Result<IngestOutcome, IngestError> {
     let mut warnings = Vec::new();
     let raw_text = raw_input(&input);
     let text = non_empty(input.text.as_deref()).map(str::to_string);
@@ -569,6 +588,7 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
 
     if let Some(eid) = &external_id
         && let Some(existing) = transaction::Entity::find()
+            .of_user(uid)
             .filter(transaction::Column::ExternalId.eq(eid.as_str()))
             .one(db)
             .await?
@@ -583,7 +603,7 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
             });
         }
 
-    let pms = payment_method::Entity::find().all(db).await?;
+    let pms = payment_method::Entity::find().of_user(uid).all(db).await?;
     let pm = resolve_payment_method(
         &pms,
         non_empty(input.payment_method.as_deref()),
@@ -601,7 +621,7 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
     }
     let pm_id = pm.map(|p| p.id);
 
-    let ledgers = ledger::Entity::find().all(db).await?;
+    let ledgers = ledger::Entity::find().of_user(uid).all(db).await?;
     let default_ledger = ledgers
         .iter()
         .find(|l| l.is_default)
@@ -618,8 +638,8 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
         None => None,
     };
 
-    let suggestion = suggest(db, &description, pm_id).await?;
-    let categories = category::Entity::find().all(db).await?;
+    let suggestion = suggest(db, uid, &description, pm_id).await?;
+    let categories = category::Entity::find().of_user(uid).all(db).await?;
     let explicit_category = match non_empty(input.category.as_deref()) {
         Some(name) => {
             // 장부를 지정했으면 그 장부의 카테고리만, 아니면 기본 장부의 카테고리를 먼저 찾는다.
@@ -652,7 +672,7 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
 
     if !planned && !cancel
         && let Some(pid) = pm_id
-            && let Some(found) = find_planned_match(db, pid, amount, date, &description).await? {
+            && let Some(found) = find_planned_match(db, uid, pid, amount, date, &description).await? {
                 let mut memo = found.memo.clone().unwrap_or_default();
                 if !similar(&found.description, &description) {
                     let note = format!("자동입력: {description}");
@@ -686,6 +706,7 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
             }
 
     let saved = transaction::ActiveModel {
+        user_id: Set(uid),
         ledger_id: Set(ledger_id),
         date: Set(date),
         amount: Set(amount),
@@ -709,9 +730,10 @@ pub async fn ingest<C: ConnectionTrait>(db: &C, input: IngestInput, today: Naive
     .insert(db)
     .await?;
 
-    if let (Some(s), Some(pid)) = (&suggestion, pm_id) {
+    // 추천의 혜택 중 이 카드 상품의 것만 (가족카드는 본인 카드의 상품)
+    if let (Some(s), Some(product)) = (&suggestion, pm.and_then(|p| p.card_product_id)) {
         let valid: Vec<i32> = crate::entity::card_benefit::Entity::find()
-            .filter(crate::entity::card_benefit::Column::PaymentMethodId.eq(pid))
+            .filter(crate::entity::card_benefit::Column::CardProductId.eq(product))
             .filter(crate::entity::card_benefit::Column::Id.is_in(s.benefit_ids.clone()))
             .all(db)
             .await?
@@ -736,6 +758,7 @@ mod tests {
         let db = crate::db::connect_in_memory().await;
         let now = Utc::now();
         let ledger = ledger::ActiveModel {
+            user_id: Set(1),
             name: Set("가계부".into()),
             description: Set(None),
             is_default: Set(true),
@@ -748,6 +771,7 @@ mod tests {
         .unwrap();
         for (name, kind) in [("외식", CategoryKind::Expense), ("비용", CategoryKind::Expense)] {
             category::ActiveModel {
+                user_id: Set(1),
                 ledger_id: Set(ledger.id),
                 name: Set(name.into()),
                 kind: Set(kind),
@@ -768,18 +792,16 @@ mod tests {
             ("스카이패스", "KB국민", Some("9876"), None),
         ] {
             payment_method::ActiveModel {
+                user_id: Set(1),
                 name: Set(name.into()),
                 kind: Set(PaymentKind::CreditCard),
                 issuer: Set(Some(issuer.into())),
-                product_name: Set(None),
                 last4: Set(last4.map(str::to_string)),
                 aliases: Set(aliases.map(str::to_string)),
                 account_id: Set(None),
                 payment_day: Set(None),
                 closing_day: Set(None),
                 closing_month_offset: Set(None),
-                monthly_target: Set(None),
-                annual_fee: Set(None),
                 expires_on: Set(None),
                 color: Set(None),
                 memo: Set(None),
@@ -802,6 +824,7 @@ mod tests {
     async fn insert_tx(db: &sea_orm::DatabaseConnection, desc: &str, amount: i64, cat: i32, pm: i32, status: TxStatus, date: NaiveDate) -> transaction::Model {
         let now = Utc::now();
         transaction::ActiveModel {
+            user_id: Set(1),
             ledger_id: Set(1),
             date: Set(date),
             amount: Set(amount),
@@ -832,14 +855,14 @@ mod tests {
         let db = setup().await;
         insert_tx(&db, "스타벅스", 5_000, 1, 1, TxStatus::Confirmed, NaiveDate::from_ymd_opt(2026, 9, 1).unwrap()).await;
         let sms = "[Web발신]\n신한카드(1234)승인 홍*동 12,500원(일시불)10/23 12:34 스타벅스 누적1,234,567원\n";
-        let out = ingest(&db, IngestInput { text: Some(sms.into()), ..Default::default() }, today()).await.unwrap();
+        let out = ingest(&db, 1, IngestInput { text: Some(sms.into()), ..Default::default() }, today()).await.unwrap();
         assert!(out.created);
         assert_eq!(out.transaction.raw_text.as_deref(), Some(sms), "원문은 줄바꿈까지 그대로");
         assert_eq!(out.transaction.amount, 12_500);
         assert_eq!(out.transaction.payment_method_id, Some(1));
         assert_eq!(out.transaction.category_id, Some(1));
         assert_eq!(out.transaction.description, "스타벅스");
-        let again = ingest(&db, IngestInput { text: Some(sms.into()), ..Default::default() }, today()).await.unwrap();
+        let again = ingest(&db, 1, IngestInput { text: Some(sms.into()), ..Default::default() }, today()).await.unwrap();
         assert!(again.duplicate);
         assert_eq!(again.transaction.id, out.transaction.id);
     }
@@ -850,6 +873,7 @@ mod tests {
         let planned = insert_tx(&db, "아파트관리비", 350_000, 2, 1, TxStatus::Planned, NaiveDate::from_ymd_opt(2026, 10, 25).unwrap()).await;
         let out = ingest(
             &db,
+            1,
             IngestInput {
                 amount: Some(302_590),
                 description: Some("위례아파트관리비".into()),
@@ -918,6 +942,7 @@ mod tests {
         let db = setup().await;
         let now = Utc::now();
         let rule = recurring_rule::ActiveModel {
+            user_id: Set(1),
             ledger_id: Set(1),
             description: Set("아파트관리비".into()),
             amount: Set(350_000),
@@ -955,10 +980,10 @@ mod tests {
             ..Default::default()
         };
         // 내용이 비슷해도 금액이 다르면 새 거래로 저장하고 예정은 그대로 둔다
-        let other = ingest(&db, send(302_590), today()).await.unwrap();
+        let other = ingest(&db, 1, send(302_590), today()).await.unwrap();
         assert!(other.created && !other.matched_planned);
         assert_ne!(other.transaction.id, planned.id);
-        let exact = ingest(&db, send(350_000), today()).await.unwrap();
+        let exact = ingest(&db, 1, send(350_000), today()).await.unwrap();
         assert!(exact.matched_planned, "{:?}", exact.warnings);
         assert_eq!(exact.transaction.id, planned.id);
         assert_eq!(exact.transaction.status, TxStatus::Confirmed);
@@ -969,6 +994,7 @@ mod tests {
         let db = setup().await;
         let out = ingest(
             &db,
+            1,
             IngestInput { text: Some("KB국민카드 승인 홍*동님 9,000원 일시불 10/23 09:00 김밥천국".into()), ..Default::default() },
             today(),
         )
@@ -978,6 +1004,7 @@ mod tests {
         assert!(!out.warnings.is_empty());
         let by_last4 = ingest(
             &db,
+            1,
             IngestInput { text: Some("KB국민카드9876승인 홍*동님 9,000원 일시불 10/23 09:10 김밥천국".into()), ..Default::default() },
             today(),
         )
@@ -987,10 +1014,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issuer_only_prefers_parent_over_family_card() {
+        let db = setup().await;
+        // 신한은 카드 하나뿐이었는데 가족카드를 더해도 끝자리 없는 문자는 본인 카드로
+        let family = payment_method::ActiveModel {
+            user_id: Set(1),
+            name: Set("알뜰교통신한 가족".into()),
+            kind: Set(PaymentKind::CreditCard),
+            issuer: Set(Some("신한".into())),
+            last4: Set(Some("5555".into())),
+            sort_order: Set(0),
+            archived: Set(false),
+            created_at: Set(Utc::now()),
+            parent_id: Set(Some(1)),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let send = |text: &str| IngestInput { text: Some(text.into()), ..Default::default() };
+        let out = ingest(&db, 1, send("신한카드 승인 홍*동님 9,000원 일시불 10/23 09:00 김밥천국"), today()).await.unwrap();
+        assert_eq!(out.transaction.payment_method_id, Some(1), "{:?}", out.warnings);
+        let by_last4 = ingest(&db, 1, send("신한카드(5555)승인 홍*동님 9,000원 일시불 10/23 09:10 김밥천국"), today()).await.unwrap();
+        assert_eq!(by_last4.transaction.payment_method_id, Some(family.id), "{:?}", by_last4.warnings);
+    }
+
+    #[tokio::test]
     async fn category_must_belong_to_given_ledger() {
         let db = setup().await;
         let now = Utc::now();
         let allowance = ledger::ActiveModel {
+            user_id: Set(1),
             name: Set("용돈".into()),
             description: Set(None),
             is_default: Set(false),
@@ -1003,6 +1057,7 @@ mod tests {
         .unwrap();
         let out = ingest(
             &db,
+            1,
             IngestInput {
                 amount: Some(9_000),
                 description: Some("분식".into()),
@@ -1024,19 +1079,21 @@ mod tests {
         let db = setup().await;
         let out = ingest(
             &db,
+            1,
             IngestInput { amount: Some(12_000), description: Some("쿠팡".into()), cancel: Some(true), ..Default::default() },
             today(),
         )
         .await
         .unwrap();
         assert_eq!(out.transaction.amount, -12_000);
-        assert!(ingest(&db, IngestInput::default(), today()).await.is_err());
+        assert!(ingest(&db, 1, IngestInput::default(), today()).await.is_err());
     }
 
     #[tokio::test]
     async fn options_list_active_names_default_ledger_first() {
         let db = setup().await;
         let allowance = ledger::ActiveModel {
+            user_id: Set(1),
             name: Set("용돈".into()),
             description: Set(None),
             is_default: Set(false),
@@ -1051,6 +1108,7 @@ mod tests {
             [("월급", CategoryKind::Income, false), ("간식", CategoryKind::Expense, false), ("옛날", CategoryKind::Expense, true)]
         {
             category::ActiveModel {
+                user_id: Set(1),
                 ledger_id: Set(if name == "월급" { 1 } else { allowance.id }),
                 name: Set(name.into()),
                 kind: Set(kind),
@@ -1070,7 +1128,7 @@ mod tests {
         sky.archived = Set(true);
         sky.update(&db).await.unwrap();
 
-        let o = options(&db).await.unwrap();
+        let o = options(&db, 1).await.unwrap();
         // 기본 장부가 sort_order보다 먼저
         assert_eq!(o.ledgers.iter().map(|l| (l.name.as_str(), l.is_default)).collect::<Vec<_>>(), [("가계부", true), ("용돈", false)]);
         // 장부 순서 → 지출 먼저 → sort_order, 보관한 것은 빠짐

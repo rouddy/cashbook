@@ -55,12 +55,30 @@ spec:
                 secretKeyRef:
                   name: cashbook-secret
                   key: DATABASE_URL
-            # 외부(0.0.0.0)로 열려면 반드시 필요. Secret이 없으면 Pod가 시작하지 않는다.
-            - name: CASHBOOK_PASSWORD
+            # Google 로그인 (외부 0.0.0.0으로 열려면 반드시 필요). 키가 없으면 Pod가 시작하지 않는다.
+            - name: CASHBOOK_GOOGLE_CLIENT_ID
               valueFrom:
                 secretKeyRef:
                   name: cashbook-secret
-                  key: CASHBOOK_PASSWORD
+                  key: CASHBOOK_GOOGLE_CLIENT_ID
+            - name: CASHBOOK_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: cashbook-secret
+                  key: CASHBOOK_GOOGLE_CLIENT_SECRET
+            # 기존 데이터(계정 id 1)를 넘겨받을 Google 계정, 카드 상품 관리자 (개인 정보라 Secret, 없어도 시작한다)
+            - name: CASHBOOK_OWNER_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: cashbook-secret
+                  key: CASHBOOK_OWNER_EMAIL
+                  optional: true
+            - name: CASHBOOK_ADMIN_EMAILS
+              valueFrom:
+                secretKeyRef:
+                  name: cashbook-secret
+                  key: CASHBOOK_ADMIN_EMAILS
+                  optional: true
           volumeMounts:
             - name: data
               mountPath: /data

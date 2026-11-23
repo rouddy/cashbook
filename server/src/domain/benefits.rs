@@ -369,7 +369,7 @@ mod tests {
     fn stacking_conflict_allows_one_exclusive() {
         let b = |id: i32, name: &str, stackable: bool| card_benefit::Model {
             id,
-            payment_method_id: 1,
+            card_product_id: 1,
             name: name.into(),
             kind: BenefitKind::Discount,
             rate: 0.01,

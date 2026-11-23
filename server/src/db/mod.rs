@@ -32,10 +32,22 @@ pub async fn connect(database_url: &str) -> Result<DatabaseConnection, DbErr> {
         std::fs::create_dir_all(parent)
             .map_err(|e| DbErr::Custom(format!("DB 디렉터리 생성 실패 {}: {e}", parent.display())))?;
     }
+    let file = sqlite_file_path(database_url).is_some();
+    if file {
+        // `PRAGMA foreign_keys`는 연결마다 따로라, 외래 키를 끄고 테이블을 다시 만드는 마이그레이션이
+        // 같은 연결에서 돌도록 SQLite 파일은 연결 하나로 마이그레이션한다.
+        let mut opts = ConnectOptions::new(database_url.to_owned());
+        opts.max_connections(1).min_connections(1).sqlx_logging(false);
+        let single = Database::connect(opts).await?;
+        Migrator::up(&single, None).await?;
+        single.close().await?;
+    }
     let mut opts = ConnectOptions::new(database_url.to_owned());
     opts.sqlx_logging(false);
     let db = Database::connect(opts).await?;
-    Migrator::up(&db, None).await?;
+    if !file {
+        Migrator::up(&db, None).await?;
+    }
     Ok(db)
 }
 

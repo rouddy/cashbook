@@ -6,6 +6,7 @@
 //! - 체크카드/계좌이체/현금(연결 계좌가 있는 경우): 계좌 기준일 이후의 확정 거래를 뺀다.
 //! - 이번 달까지의 예정 거래는 "예정 반영 후" 금액에만 반영한다.
 //! - 장부 이체는 장부 사이에서 몫을 옮기는 기록이라 계좌 잔고에 반영하지 않는다.
+//! - 가족카드 대금은 본인 카드 청구서에 합쳐 청구되므로 본인 카드 대금에 넣고 가족카드는 따로 세지 않는다.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -89,14 +90,13 @@ pub struct FundsInput<'a> {
     pub transactions: &'a [transaction::Model],
 }
 
+/// `txs`는 청구서에 넣을 카드 거래만 (본인 카드 청구서면 가족카드 거래도).
 fn card_charges(
-    pm: &payment_method::Model,
     txs: &[&transaction::Model],
     categories: &HashMap<i32, category::Model>,
     planned_until: Option<NaiveDate>,
 ) -> Vec<Charge> {
     txs.iter()
-        .filter(|t| t.payment_method_id == Some(pm.id))
         .filter(|t| match t.status {
             TxStatus::Confirmed => true,
             TxStatus::Planned => planned_until.is_none_or(|until| t.date <= until),
@@ -135,24 +135,22 @@ fn statement_info(cycle: &BillingCycle, parts: &[ChargePart], m: YearMonth, toda
     }
 }
 
-/// 카드 한 장의 청구서 목록. 거래가 있는 결제월과 다음 결제월을 포함한다.
+/// 카드 한 장의 청구서 목록. 거래가 있는 결제월과 다음 결제월을 포함한다. `txs`는 그 청구서에 넣을 거래.
 pub fn card_statements(
-    pm: &payment_method::Model,
     cycle: &BillingCycle,
     txs: &[&transaction::Model],
     categories: &HashMap<i32, category::Model>,
     today: NaiveDate,
     planned_until: Option<NaiveDate>,
 ) -> Vec<StatementInfo> {
-    let parts = charge_parts(cycle, &card_charges(pm, txs, categories, planned_until));
+    let parts = charge_parts(cycle, &card_charges(txs, categories, planned_until));
     let mut months: BTreeSet<YearMonth> = parts.iter().map(|p| p.statement).collect();
     months.insert(cycle.next_statement(today));
     months.into_iter().map(|m| statement_info(cycle, &parts, m, today)).collect()
 }
 
-/// 지정한 결제월 범위의 청구서 (거래가 없는 달도 포함).
+/// 지정한 결제월 범위의 청구서 (거래가 없는 달도 포함). `txs`는 그 청구서에 넣을 거래.
 pub fn statement_range(
-    pm: &payment_method::Model,
     cycle: &BillingCycle,
     txs: &[&transaction::Model],
     categories: &HashMap<i32, category::Model>,
@@ -160,19 +158,18 @@ pub fn statement_range(
     from: YearMonth,
     to: YearMonth,
 ) -> Vec<StatementInfo> {
-    let parts = charge_parts(cycle, &card_charges(pm, txs, categories, None));
+    let parts = charge_parts(cycle, &card_charges(txs, categories, None));
     from.range_inclusive(to).map(|m| statement_info(cycle, &parts, m, today)).collect()
 }
 
-/// 결제월 `month` 청구서에 들어가는 회차들.
+/// 결제월 `month` 청구서에 들어가는 회차들. `txs`는 그 청구서에 넣을 거래.
 pub fn statement_parts(
-    pm: &payment_method::Model,
     cycle: &BillingCycle,
     txs: &[&transaction::Model],
     categories: &HashMap<i32, category::Model>,
     month: YearMonth,
 ) -> Vec<ChargePart> {
-    charge_parts(cycle, &card_charges(pm, txs, categories, None))
+    charge_parts(cycle, &card_charges(txs, categories, None))
         .into_iter()
         .filter(|p| p.statement == month)
         .collect()
@@ -191,11 +188,13 @@ pub fn compute(input: &FundsInput) -> AvailableFunds {
     let balance_date = included.values().filter_map(|a| a.balance_date).max();
     let default_cutoff = balance_date.unwrap_or(today);
     let pms: HashMap<i32, &payment_method::Model> = input.payment_methods.iter().map(|p| (p.id, p)).collect();
+    // 가족카드 대금은 본인 카드로 청구된다 (본인 카드가 없으면 자기 자신)
+    let billed_to = |id: i32| pms.get(&id).and_then(|p| p.parent_id).filter(|pid| pms.contains_key(pid)).unwrap_or(id);
 
     let mut by_pm: HashMap<i32, Vec<&transaction::Model>> = HashMap::new();
     for t in input.transactions {
         if let Some(pid) = t.payment_method_id {
-            by_pm.entry(pid).or_default().push(t);
+            by_pm.entry(billed_to(pid)).or_default().push(t);
         }
     }
 
@@ -204,8 +203,11 @@ pub fn compute(input: &FundsInput) -> AvailableFunds {
     let (mut card_due, mut card_due_planned) = (0i64, 0i64);
     // 출금 계좌를 지정하지 않은 결제수단은 여유자금 계좌에서 나간다고 본다.
     let counts = |pm: &payment_method::Model| pm.account_id.is_none_or(|id| included.contains_key(&id));
-    let mut credit_cards: Vec<&payment_method::Model> =
-        input.payment_methods.iter().filter(|p| p.kind == PaymentKind::CreditCard).collect();
+    let mut credit_cards: Vec<&payment_method::Model> = input
+        .payment_methods
+        .iter()
+        .filter(|p| p.kind == PaymentKind::CreditCard && billed_to(p.id) == p.id)
+        .collect();
     credit_cards.sort_by_key(|p| (p.archived, p.sort_order, p.id));
     for pm in credit_cards {
         let counted = counts(pm);
@@ -217,7 +219,7 @@ pub fn compute(input: &FundsInput) -> AvailableFunds {
             .unwrap_or(default_cutoff);
         match BillingCycle::from_model(pm) {
             Some(cycle) => {
-                let all = card_statements(pm, &cycle, txs, input.categories, today, Some(month_end));
+                let all = card_statements(&cycle, txs, input.categories, today, Some(month_end));
                 let unpaid: Vec<StatementInfo> = all.into_iter().filter(|s| s.payment_date > cutoff).collect();
                 let due: i64 = unpaid.iter().map(|s| s.confirmed_amount).sum();
                 let due_planned: i64 = unpaid.iter().map(|s| s.planned_amount).sum();
@@ -326,6 +328,7 @@ mod tests {
     fn acct(id: i32, balance: i64, date: Option<NaiveDate>) -> account::Model {
         account::Model {
             id,
+            user_id: 1,
             name: format!("a{id}"),
             bank: None,
             kind: AccountKind::Checking,
@@ -346,23 +349,23 @@ mod tests {
     fn pm(id: i32, kind: PaymentKind, account_id: Option<i32>, cycle: Option<(i32, i32, i32)>) -> payment_method::Model {
         payment_method::Model {
             id,
+            user_id: 1,
             name: format!("p{id}"),
             kind,
             issuer: None,
-            product_name: None,
             last4: None,
             aliases: None,
             account_id,
             payment_day: cycle.map(|c| c.0),
             closing_day: cycle.map(|c| c.1),
             closing_month_offset: cycle.map(|c| c.2),
-            monthly_target: None,
-            annual_fee: None,
             expires_on: None,
             color: None,
             memo: None,
             sort_order: id,
             archived: false,
+            parent_id: None,
+            card_product_id: None,
             created_at: Utc::now(),
         }
     }
@@ -370,6 +373,7 @@ mod tests {
     fn tx(id: i32, pm: i32, date: NaiveDate, amount: i64, status: TxStatus) -> transaction::Model {
         transaction::Model {
             id,
+            user_id: 1,
             ledger_id: 1,
             date,
             amount,
@@ -407,6 +411,7 @@ mod tests {
             1,
             category::Model {
                 id: 1,
+                user_id: 1,
                 ledger_id: 1,
                 name: "외식".into(),
                 kind: CategoryKind::Expense,
@@ -479,5 +484,25 @@ mod tests {
         let card = f.cards.iter().find(|c| c.payment_method_id == 10).unwrap();
         assert!(!card.counted);
         assert_eq!(card.due, 100_000);
+    }
+
+    #[test]
+    fn family_card_is_billed_with_parent() {
+        let categories = HashMap::new();
+        let accounts = vec![acct(1, 5_000_000, Some(d(10, 20)))];
+        let mut family = pm(20, PaymentKind::CreditCard, Some(1), Some((25, 11, 0)));
+        family.parent_id = Some(10);
+        let pms = vec![pm(10, PaymentKind::CreditCard, Some(1), Some((25, 11, 0))), family];
+        let txs = vec![
+            tx(1, 10, d(9, 15), 100_000, TxStatus::Confirmed),
+            tx(2, 20, d(9, 20), 40_000, TxStatus::Confirmed),
+            tx(3, 20, d(10, 28), 5_000, TxStatus::Planned),
+        ];
+        let f = compute(&FundsInput { today: d(10, 23), accounts: &accounts, payment_methods: &pms, categories: &categories, transactions: &txs });
+        // 가족카드 이용은 본인 카드 청구서에 합쳐지고, 가족카드는 따로 세지 않는다 (두 번 빼지 않음)
+        assert_eq!((f.card_due, f.card_due_planned), (140_000, 5_000));
+        assert_eq!(f.cards.iter().map(|c| c.payment_method_id).collect::<Vec<_>>(), vec![10]);
+        let next = f.cards[0].next_payment.as_ref().unwrap();
+        assert_eq!((next.payment_date, next.confirmed_amount), (d(10, 26), 140_000));
     }
 }

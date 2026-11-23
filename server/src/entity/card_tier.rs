@@ -7,7 +7,8 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    pub payment_method_id: i32,
+    /// 카드 상품 (`card_products.id`)
+    pub card_product_id: i32,
     pub min_spending: i64,
     pub benefit_limit: i64,
 }

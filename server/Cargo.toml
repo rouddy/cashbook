@@ -1,6 +1,6 @@
 [package]
 name = "cashbook-server"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 description = "가계부 서비스 백엔드 (Rocket + async-graphql + SeaORM, SQLite/MySQL)"
 
@@ -11,12 +11,14 @@ path = "src/main.rs"
 [dependencies]
 async-graphql = { version = "7.2.1", features = ["chrono"] }
 async-graphql-rocket = "7.2.1"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 dotenvy = "0.15"
 hex = "0.4"
 rand = "0.9"
 regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rocket = { version = "0.5.1", features = ["json", "secrets"] }
 sea-orm = { version = "2.0.4", features = ["sqlx-sqlite", "sqlx-mysql", "runtime-tokio-rustls", "macros", "with-chrono", "with-json"] }
 sea-orm-migration = { version = "2.0.4", features = ["sqlx-sqlite", "sqlx-mysql", "runtime-tokio-rustls"] }
