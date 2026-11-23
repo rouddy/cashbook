@@ -103,9 +103,10 @@ impl AppConfig {
                     client_id,
                     client_secret,
                     redirect_uri: format!("{base}/api/auth/google/callback"),
-                    auth_url: GoogleConfig::AUTH_URL.into(),
-                    token_url: GoogleConfig::TOKEN_URL.into(),
-                    userinfo_url: GoogleConfig::USERINFO_URL.into(),
+                    // 시험용(가짜 Google 서버)으로만 바꾼다
+                    auth_url: var("CASHBOOK_GOOGLE_AUTH_URL").unwrap_or_else(|| GoogleConfig::AUTH_URL.into()),
+                    token_url: var("CASHBOOK_GOOGLE_TOKEN_URL").unwrap_or_else(|| GoogleConfig::TOKEN_URL.into()),
+                    userinfo_url: var("CASHBOOK_GOOGLE_USERINFO_URL").unwrap_or_else(|| GoogleConfig::USERINFO_URL.into()),
                 })
             }
             _ => return Err("CASHBOOK_GOOGLE_CLIENT_ID와 CASHBOOK_GOOGLE_CLIENT_SECRET을 함께 설정하세요".into()),
