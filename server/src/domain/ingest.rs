@@ -730,10 +730,10 @@ pub async fn ingest<C: ConnectionTrait>(
     .insert(db)
     .await?;
 
-    // 가족카드는 본인 카드의 혜택을 쓴다
-    if let (Some(s), Some(card)) = (&suggestion, pm.map(|p| p.benefit_card_id())) {
+    // 추천의 혜택 중 이 카드 상품의 것만 (가족카드는 본인 카드의 상품)
+    if let (Some(s), Some(product)) = (&suggestion, pm.and_then(|p| p.card_product_id)) {
         let valid: Vec<i32> = crate::entity::card_benefit::Entity::find()
-            .filter(crate::entity::card_benefit::Column::PaymentMethodId.eq(card))
+            .filter(crate::entity::card_benefit::Column::CardProductId.eq(product))
             .filter(crate::entity::card_benefit::Column::Id.is_in(s.benefit_ids.clone()))
             .all(db)
             .await?
@@ -796,15 +796,12 @@ mod tests {
                 name: Set(name.into()),
                 kind: Set(PaymentKind::CreditCard),
                 issuer: Set(Some(issuer.into())),
-                product_name: Set(None),
                 last4: Set(last4.map(str::to_string)),
                 aliases: Set(aliases.map(str::to_string)),
                 account_id: Set(None),
                 payment_day: Set(None),
                 closing_day: Set(None),
                 closing_month_offset: Set(None),
-                monthly_target: Set(None),
-                annual_fee: Set(None),
                 expires_on: Set(None),
                 color: Set(None),
                 memo: Set(None),

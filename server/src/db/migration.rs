@@ -22,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261122_000011_drop_api_token_scope::Migration),
             Box::new(m20261122_000012_family_cards::Migration),
             Box::new(m20261123_000013_users::Migration),
+            Box::new(m20261123_000014_card_products::Migration),
         ]
     }
 }
@@ -1947,4 +1948,360 @@ async fn sqlite_foreign_key_check<C: sea_orm::ConnectionTrait>(db: &C) -> Result
         return Err(DbErr::Migration(format!("외래 키가 맞지 않는 행이 {}개 있습니다", rows.len())));
     }
     Ok(())
+}
+
+/// 카드 상품: 전월실적 목표·구간·혜택·연회비를 계정 공통인 `card_products`로 옮긴다.
+/// - 상품명·목표·연회비·구간·혜택 중 하나라도 있는 카드(가족카드 제외)마다 상품을 하나 만들고(이름은 상품명, 없으면 카드 이름,
+///   만든 계정은 카드의 계정), 카드와 그 가족카드가 상품을 가리키게 한다.
+/// - 구간·혜택은 카드 대신 상품에 딸린다(id는 그대로라 거래·반복 규칙의 혜택 지정이 유지된다).
+/// - 가족카드에 따로 적은 연회비는 상품에 둘 곳이 없어 카드 메모 끝에 남긴다.
+/// SQLite는 외래 키를 바꿀 수 없어 card_benefits·card_tiers를 외래 키를 끈 한 트랜잭션에서 다시 만든다 (앞 마이그레이션과 같은 방식).
+mod m20261123_000014_card_products {
+    use std::collections::HashSet;
+
+    use super::*;
+    use chrono::Utc;
+    use sea_orm::{ConnectionTrait, DbBackend, QueryResult, TransactionTrait};
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261123_000014_card_products"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum CardProducts {
+        Table,
+        Id,
+        Issuer,
+        Name,
+        AnnualFee,
+        MonthlyTarget,
+        Memo,
+        CreatedBy,
+        CreatedAt,
+        UpdatedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum PaymentMethods {
+        Table,
+        Id,
+        UserId,
+        Name,
+        Issuer,
+        ProductName,
+        MonthlyTarget,
+        AnnualFee,
+        Memo,
+        ParentId,
+        CardProductId,
+    }
+
+    #[derive(DeriveIden)]
+    enum CardBenefits {
+        Table,
+        Id,
+        PaymentMethodId,
+        CardProductId,
+        Name,
+        Kind,
+        Rate,
+        MinAmount,
+        PerTxMax,
+        MonthlyCap,
+        SharesCardLimit,
+        ExcludesPerformance,
+        Stackable,
+        SortOrder,
+    }
+
+    #[derive(DeriveIden)]
+    enum CardTiers {
+        Table,
+        Id,
+        PaymentMethodId,
+        CardProductId,
+        MinSpending,
+        BenefitLimit,
+    }
+
+    #[derive(DeriveIden)]
+    enum Users {
+        Table,
+        Id,
+    }
+
+    fn get<T: sea_orm::TryGetable>(row: &QueryResult, col: &str) -> Result<T, DbErr> {
+        row.try_get("", col)
+    }
+
+    fn product_fk(name: &str, from: impl IntoIden, col: impl IntoIden, on_delete: ForeignKeyAction) -> ForeignKeyCreateStatement {
+        ForeignKey::create()
+            .name(name)
+            .from(from, col)
+            .to(CardProducts::Table, CardProducts::Id)
+            .on_delete(on_delete)
+            .on_update(ForeignKeyAction::Cascade)
+            .to_owned()
+    }
+
+    async fn create_products_table(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        m.create_table(
+            Table::create()
+                .table(CardProducts::Table)
+                .col(pk_auto(CardProducts::Id))
+                .col(string_null(CardProducts::Issuer))
+                .col(string(CardProducts::Name))
+                .col(big_integer_null(CardProducts::AnnualFee))
+                .col(big_integer_null(CardProducts::MonthlyTarget))
+                .col(text_null(CardProducts::Memo))
+                .col(integer_null(CardProducts::CreatedBy))
+                .col(timestamp_with_time_zone(CardProducts::CreatedAt))
+                .col(timestamp_with_time_zone(CardProducts::UpdatedAt))
+                .foreign_key(
+                    ForeignKey::create()
+                        .name("fk_card_products_created_by")
+                        .from(CardProducts::Table, CardProducts::CreatedBy)
+                        .to(Users::Table, Users::Id)
+                        .on_delete(ForeignKeyAction::SetNull)
+                        .on_update(ForeignKeyAction::Cascade),
+                )
+                .to_owned(),
+        )
+        .await?;
+        m.create_index(Index::create().name("ix_card_products_name").table(CardProducts::Table).col(CardProducts::Name).to_owned())
+            .await
+    }
+
+    fn non_empty(s: Option<String>) -> Option<String> {
+        s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    /// 카드마다 상품을 만들고 `payment_methods.card_product_id`를 채운다 (컬럼은 미리 더해 둔다).
+    async fn fill_products<C: ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+        let mut with_children: HashSet<i32> = HashSet::new();
+        for (table, col) in [(CardBenefits::Table.into_iden(), CardBenefits::PaymentMethodId.into_iden()), (CardTiers::Table.into_iden(), CardTiers::PaymentMethodId.into_iden())] {
+            for row in db.query_all(&Query::select().column(col).from(table).to_owned()).await? {
+                with_children.insert(get(&row, "payment_method_id")?);
+            }
+        }
+        let rows = db
+            .query_all(
+                &Query::select()
+                    .columns([
+                        PaymentMethods::Id,
+                        PaymentMethods::UserId,
+                        PaymentMethods::Name,
+                        PaymentMethods::Issuer,
+                        PaymentMethods::ProductName,
+                        PaymentMethods::MonthlyTarget,
+                        PaymentMethods::AnnualFee,
+                        PaymentMethods::Memo,
+                        PaymentMethods::ParentId,
+                    ])
+                    .from(PaymentMethods::Table)
+                    .order_by(PaymentMethods::Id, Order::Asc)
+                    .to_owned(),
+            )
+            .await?;
+        let now = Utc::now();
+        for row in &rows {
+            let id: i32 = get(row, "id")?;
+            let product_name = non_empty(get(row, "product_name")?);
+            let target: Option<i64> = get(row, "monthly_target")?;
+            let fee: Option<i64> = get(row, "annual_fee")?;
+            if get::<Option<i32>>(row, "parent_id")?.is_some() {
+                // 가족카드 연회비는 메모에 남긴다
+                if let Some(fee) = fee {
+                    let memo = non_empty(get(row, "memo")?);
+                    let note = format!("가족카드 연회비 {fee}원");
+                    let memo = match memo {
+                        Some(m) => format!("{m} / {note}"),
+                        None => note,
+                    };
+                    db.execute(
+                        &Query::update()
+                            .table(PaymentMethods::Table)
+                            .value(PaymentMethods::Memo, memo)
+                            .and_where(Expr::col(PaymentMethods::Id).eq(id))
+                            .to_owned(),
+                    )
+                    .await?;
+                }
+                continue;
+            }
+            if product_name.is_none() && target.is_none() && fee.is_none() && !with_children.contains(&id) {
+                continue;
+            }
+            let name: String = product_name.unwrap_or(get(row, "name")?);
+            let res = db
+                .execute(
+                    &Query::insert()
+                        .into_table(CardProducts::Table)
+                        .columns([
+                            CardProducts::Issuer,
+                            CardProducts::Name,
+                            CardProducts::AnnualFee,
+                            CardProducts::MonthlyTarget,
+                            CardProducts::CreatedBy,
+                            CardProducts::CreatedAt,
+                            CardProducts::UpdatedAt,
+                        ])
+                        .values_panic([
+                            non_empty(get(row, "issuer")?).into(),
+                            name.into(),
+                            fee.into(),
+                            target.filter(|t| *t > 0).into(),
+                            get::<i32>(row, "user_id")?.into(),
+                            now.into(),
+                            now.into(),
+                        ])
+                        .to_owned(),
+                )
+                .await?;
+            let product = res.last_insert_id() as i32;
+            db.execute(
+                &Query::update()
+                    .table(PaymentMethods::Table)
+                    .value(PaymentMethods::CardProductId, product)
+                    .cond_where(Condition::any().add(Expr::col(PaymentMethods::Id).eq(id)).add(Expr::col(PaymentMethods::ParentId).eq(id)))
+                    .to_owned(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// 혜택·구간이 가리킬 상품: 카드의 상품 (`payment_methods`를 거쳐)
+    const PRODUCT_OF_CARD: &str = "(SELECT p.card_product_id FROM payment_methods p WHERE p.id = payment_method_id)";
+
+    async fn up_sqlite(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        let db = m.get_connection();
+        create_products_table(m).await?;
+        db.execute_unprepared(
+            "ALTER TABLE payment_methods ADD COLUMN card_product_id integer NULL REFERENCES card_products (id) ON DELETE SET NULL ON UPDATE CASCADE",
+        )
+        .await?;
+        fill_products(db).await?;
+
+        m.create_table(
+            Table::create()
+                .table(Alias::new("card_benefits_new"))
+                .col(pk_auto(CardBenefits::Id))
+                .col(integer(CardBenefits::CardProductId))
+                .col(string(CardBenefits::Name))
+                .col(double(CardBenefits::Rate))
+                .col(big_integer_null(CardBenefits::MinAmount))
+                .col(big_integer_null(CardBenefits::PerTxMax))
+                .col(big_integer_null(CardBenefits::MonthlyCap))
+                .col(boolean(CardBenefits::SharesCardLimit))
+                .col(boolean(CardBenefits::ExcludesPerformance))
+                .col(integer(CardBenefits::SortOrder))
+                .col(string(CardBenefits::Kind).default("DISCOUNT"))
+                .col(boolean(CardBenefits::Stackable).default(false))
+                .foreign_key(&mut product_fk("fk_card_benefits_product", Alias::new("card_benefits_new"), CardBenefits::CardProductId, ForeignKeyAction::Cascade))
+                .to_owned(),
+        )
+        .await?;
+        db.execute_unprepared(&format!(
+            "INSERT INTO card_benefits_new (id, card_product_id, name, rate, min_amount, per_tx_max, monthly_cap, shares_card_limit, \
+             excludes_performance, sort_order, kind, stackable) SELECT id, {PRODUCT_OF_CARD}, name, rate, min_amount, per_tx_max, monthly_cap, \
+             shares_card_limit, excludes_performance, sort_order, kind, stackable FROM card_benefits"
+        ))
+        .await?;
+        db.execute_unprepared("DROP TABLE card_benefits").await?;
+        db.execute_unprepared("ALTER TABLE card_benefits_new RENAME TO card_benefits").await?;
+
+        m.create_table(
+            Table::create()
+                .table(Alias::new("card_tiers_new"))
+                .col(pk_auto(CardTiers::Id))
+                .col(integer(CardTiers::CardProductId))
+                .col(big_integer(CardTiers::MinSpending))
+                .col(big_integer(CardTiers::BenefitLimit))
+                .foreign_key(&mut product_fk("fk_card_tiers_product", Alias::new("card_tiers_new"), CardTiers::CardProductId, ForeignKeyAction::Cascade))
+                .to_owned(),
+        )
+        .await?;
+        db.execute_unprepared(&format!(
+            "INSERT INTO card_tiers_new (id, card_product_id, min_spending, benefit_limit) \
+             SELECT id, {PRODUCT_OF_CARD}, min_spending, benefit_limit FROM card_tiers"
+        ))
+        .await?;
+        db.execute_unprepared("DROP TABLE card_tiers").await?;
+        db.execute_unprepared("ALTER TABLE card_tiers_new RENAME TO card_tiers").await?;
+
+        for col in [PaymentMethods::ProductName, PaymentMethods::MonthlyTarget, PaymentMethods::AnnualFee] {
+            m.alter_table(Table::alter().table(PaymentMethods::Table).drop_column(col).to_owned()).await?;
+        }
+        create_indexes(m).await
+    }
+
+    async fn create_indexes(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        m.create_index(
+            Index::create().name("ix_payment_methods_card_product").table(PaymentMethods::Table).col(PaymentMethods::CardProductId).to_owned(),
+        )
+        .await?;
+        m.create_index(Index::create().name("ix_card_benefits_product").table(CardBenefits::Table).col(CardBenefits::CardProductId).to_owned())
+            .await?;
+        m.create_index(Index::create().name("ix_card_tiers_product").table(CardTiers::Table).col(CardTiers::CardProductId).to_owned()).await
+    }
+
+    async fn up_mysql(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        let db = m.get_connection();
+        create_products_table(m).await?;
+        m.alter_table(Table::alter().table(PaymentMethods::Table).add_column(integer_null(PaymentMethods::CardProductId)).to_owned()).await?;
+        fill_products(db).await?;
+        for (table, fk, product_fk_name) in [
+            ("card_benefits", "fk_card_benefits_payment_method", "fk_card_benefits_product"),
+            ("card_tiers", "fk_card_tiers_payment_method", "fk_card_tiers_product"),
+        ] {
+            m.alter_table(Table::alter().table(Alias::new(table)).add_column(integer_null(CardBenefits::CardProductId)).to_owned()).await?;
+            db.execute_unprepared(&format!(
+                "UPDATE {table} b JOIN payment_methods p ON p.id = b.payment_method_id SET b.card_product_id = p.card_product_id"
+            ))
+            .await?;
+            m.drop_foreign_key(ForeignKey::drop().name(fk).table(Alias::new(table)).to_owned()).await?;
+            m.alter_table(Table::alter().table(Alias::new(table)).drop_column(CardBenefits::PaymentMethodId).to_owned()).await?;
+            m.alter_table(Table::alter().table(Alias::new(table)).modify_column(integer(CardBenefits::CardProductId)).to_owned()).await?;
+            m.create_foreign_key(product_fk(product_fk_name, Alias::new(table), CardBenefits::CardProductId, ForeignKeyAction::Cascade)).await?;
+        }
+        for col in [PaymentMethods::ProductName, PaymentMethods::MonthlyTarget, PaymentMethods::AnnualFee] {
+            m.alter_table(Table::alter().table(PaymentMethods::Table).drop_column(col).to_owned()).await?;
+        }
+        create_indexes(m).await?;
+        m.create_foreign_key(product_fk(
+            "fk_payment_methods_card_product",
+            PaymentMethods::Table,
+            PaymentMethods::CardProductId,
+            ForeignKeyAction::SetNull,
+        ))
+        .await
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            match manager.get_database_backend() {
+                DbBackend::Sqlite => {
+                    let conn = manager.get_connection();
+                    conn.execute_unprepared("PRAGMA foreign_keys = OFF").await?;
+                    let result = async {
+                        let txn = conn.begin().await?;
+                        super::sqlite_foreign_keys_off(&txn).await?;
+                        up_sqlite(&SchemaManager::new(&txn)).await?;
+                        super::sqlite_foreign_key_check(&txn).await?;
+                        txn.commit().await
+                    }
+                    .await;
+                    conn.execute_unprepared("PRAGMA foreign_keys = ON").await?;
+                    result
+                }
+                _ => up_mysql(manager).await,
+            }
+        }
+    }
 }

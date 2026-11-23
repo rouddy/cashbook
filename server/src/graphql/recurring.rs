@@ -283,11 +283,9 @@ mod tests {
         .unwrap()
         .id;
         let schema = crate::graphql::build_schema(db.clone(), crate::config::AppConfig::for_tests());
-        let card = |name: &str, benefits: &str| {
-            format!(r#"mutation {{ createPaymentMethod(input: {{name: "{name}", kind: CREDIT_CARD, benefits: [{benefits}]}}) {{ id benefits {{ id }} }} }}"#)
-        };
-        let a = gql(&schema, &card("A", r#"{name: "10%", rate: 0.1}, {name: "5%", rate: 0.05}, {name: "+1%", rate: 0.01, stackable: true}"#)).await;
-        let b = gql(&schema, &card("B", r#"{name: "B 2%", rate: 0.02}"#)).await;
+        let card = |name: &'static str, benefits: &'static str| crate::graphql::create_card_with_benefits(&schema, name, benefits);
+        let a = card("A", r#"{name: "10%", rate: 0.1}, {name: "5%", rate: 0.05}, {name: "+1%", rate: 0.01, stackable: true}"#).await;
+        let b = card("B", r#"{name: "B 2%", rate: 0.02}"#).await;
         let id = |v: &Value| v.as_i64().unwrap();
         let (pm_a, pm_b) = (id(&a["createPaymentMethod"]["id"]), id(&b["createPaymentMethod"]["id"]));
         let ab: Vec<i64> = a["createPaymentMethod"]["benefits"].as_array().unwrap().iter().map(|x| id(&x["id"])).collect();

@@ -1,6 +1,7 @@
 //! 결제수단(카드) API: 목록/상세, 정산 일정, 청구서, 실적·혜택 리포트, 추가/수정/삭제.
-//! 가족카드(`parent_id`)는 본인 카드의 혜택·구간·목표를 쓰고 실적을 본인 카드와 합쳐 계산한다.
-//! 종류·결제 계좌·정산 일정은 본인 카드 것을 복사해 두고 본인 카드를 고칠 때 같이 맞춘다.
+//! 전월실적 목표·구간·혜택·연회비는 계정 공통인 카드 상품(`card_product`)에 있고 카드는 상품을 고른다.
+//! 가족카드(`parent_id`)는 본인 카드의 상품을 쓰고 실적을 본인 카드와 합쳐 계산한다.
+//! 종류·결제 계좌·정산 일정·카드 상품은 본인 카드 것을 복사해 두고 본인 카드를 고칠 때 같이 맞춘다.
 //! 가족카드 대금은 본인 카드 청구서에 합쳐 청구되므로 본인 카드 청구서는 가족카드 이용까지, 가족카드 청구서는 그 카드 이용분만 담는다.
 
 use std::collections::{HashMap, HashSet};
@@ -18,8 +19,8 @@ use crate::domain::card_report::{CardMonthReport, CardReportInput, month_report}
 use crate::domain::dates::YearMonth;
 use crate::domain::funds::{CardDue, StatementInfo, statement_parts, statement_range};
 use crate::entity::{
-    OfUser, account, card_benefit, card_tier,
-    enums::{BenefitKind, PaymentKind, TxStatus},
+    OfUser, account, card_benefit, card_product, card_tier,
+    enums::{PaymentKind, TxStatus},
     payment_method, recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
 };
 
@@ -98,16 +99,18 @@ async fn report_for(ctx: &Context<'_>, pm: &payment_method::Model, month: YearMo
         .all(db)
         .await?;
     let categories = lookup.categories().await?;
-    let benefits = lookup.card_benefits_of(head.id).await?;
-    let tiers = lookup.tiers().await?;
+    let products = lookup.products().await?;
+    let product = head.card_product_id.and_then(|id| products.get(&id));
+    let benefits = lookup.card_benefits_of(head.card_product_id).await?;
+    let tiers = lookup.tiers_of(head.card_product_id).await?;
     let tx_benefits = lookup.tx_benefits().await?;
     Ok(month_report(
         &CardReportInput {
             payment_method: pm,
-            monthly_target: head.monthly_target,
+            monthly_target: product.and_then(|p| p.monthly_target),
             group_ids: &group_ids,
             benefits: &benefits,
-            tiers: tiers.get(&head.id).map(Vec::as_slice).unwrap_or(&[]),
+            tiers: &tiers,
             categories: &categories,
             transactions: &txs,
             tx_benefits: &tx_benefits,
@@ -143,14 +146,35 @@ impl payment_method::Model {
         Ok(lookup(ctx).accounts().await?.get(&id).cloned())
     }
 
-    /// 카드 혜택. 가족카드는 본인 카드의 혜택 (거래에 고르는 혜택도 이것)
-    async fn benefits(&self, ctx: &Context<'_>) -> Result<Vec<card_benefit::Model>> {
-        Ok(lookup(ctx).card_benefits_of(self.benefit_card_id()).await?)
+    /// 카드 상품 (계정 공통: 전월실적 목표·구간·혜택·연회비). 가족카드는 본인 카드의 상품
+    async fn card_product(&self, ctx: &Context<'_>) -> Result<Option<card_product::Model>> {
+        let Some(id) = self.card_product_id else { return Ok(None) };
+        Ok(lookup(ctx).products().await?.get(&id).cloned())
     }
 
-    /// 전월실적 구간. 가족카드는 본인 카드의 구간
+    /// 카드 상품 이름
+    async fn product_name(&self, ctx: &Context<'_>) -> Result<Option<String>> {
+        Ok(self.card_product(ctx).await?.map(|p| p.name))
+    }
+
+    /// 카드 상품의 전월실적 목표
+    async fn monthly_target(&self, ctx: &Context<'_>) -> Result<Option<i64>> {
+        Ok(self.card_product(ctx).await?.and_then(|p| p.monthly_target))
+    }
+
+    /// 카드 상품의 연회비
+    async fn annual_fee(&self, ctx: &Context<'_>) -> Result<Option<i64>> {
+        Ok(self.card_product(ctx).await?.and_then(|p| p.annual_fee))
+    }
+
+    /// 카드 혜택 (카드 상품의 혜택, 거래에 고르는 혜택도 이것)
+    async fn benefits(&self, ctx: &Context<'_>) -> Result<Vec<card_benefit::Model>> {
+        Ok(lookup(ctx).card_benefits_of(self.card_product_id).await?)
+    }
+
+    /// 전월실적 구간 (카드 상품의 구간)
     async fn tiers(&self, ctx: &Context<'_>) -> Result<Vec<card_tier::Model>> {
-        Ok(lookup(ctx).tiers().await?.get(&self.benefit_card_id()).cloned().unwrap_or_default())
+        Ok(lookup(ctx).tiers_of(self.card_product_id).await?)
     }
 
     /// 가족카드의 본인 카드
@@ -380,59 +404,27 @@ impl PaymentQuery {
     }
 }
 
-#[derive(InputObject, Clone)]
-pub struct CardBenefitInput {
-    /// 기존 혜택을 수정할 때 id
-    pub id: Option<i32>,
-    pub name: String,
-    #[graphql(default)]
-    pub kind: BenefitKind,
-    /// 이용금액 1원당 혜택 (할인·포인트 0.1 = 10%, 마일리지 1/1500 = 1,500원당 1마일)
-    pub rate: f64,
-    pub min_amount: Option<i64>,
-    pub per_tx_max: Option<i64>,
-    pub monthly_cap: Option<i64>,
-    #[graphql(default = true)]
-    pub shares_card_limit: bool,
-    #[graphql(default = false)]
-    pub excludes_performance: bool,
-    /// 다른 혜택과 함께 받을 수 있는 혜택
-    #[graphql(default = false)]
-    pub stackable: bool,
-}
-
-#[derive(InputObject, Clone)]
-pub struct CardTierInput {
-    pub min_spending: i64,
-    pub benefit_limit: i64,
-}
-
 #[derive(InputObject)]
 pub struct PaymentMethodInput {
-    /// 가족카드면 본인 카드 id. 종류·결제 계좌·정산 일정은 본인 카드를 따르고, 실적 목표·혜택·구간은 본인 카드 것을 쓴다
-    /// (이 카드의 값은 무시하고 비운다). 수정할 때 빼면 가족카드가 아니게 된다.
+    /// 가족카드면 본인 카드 id. 종류·결제 계좌·정산 일정·카드 상품은 본인 카드를 따른다 (이 카드의 값은 무시한다).
+    /// 수정할 때 빼면 가족카드가 아니게 된다.
     pub parent_id: Option<i32>,
     pub name: String,
     pub kind: PaymentKind,
     pub issuer: Option<String>,
-    pub product_name: Option<String>,
+    /// 카드 상품 (전월실적 목표·구간·혜택·연회비). 비우면 실적·혜택을 계산하지 않는다.
+    pub card_product_id: Option<i32>,
     pub last4: Option<String>,
     pub aliases: Option<Vec<String>>,
     pub account_id: Option<i32>,
     pub payment_day: Option<i32>,
     pub closing_day: Option<i32>,
     pub closing_month_offset: Option<i32>,
-    pub monthly_target: Option<i64>,
-    pub annual_fee: Option<i64>,
     /// 유효기간 YYYY-MM
     pub expires_on: Option<String>,
     pub color: Option<String>,
     pub memo: Option<String>,
     pub archived: Option<bool>,
-    /// 주면 혜택 목록을 이 내용으로 맞춘다 (id 있는 항목은 수정, 없는 항목은 추가, 빠진 항목은 삭제)
-    pub benefits: Option<Vec<CardBenefitInput>>,
-    /// 주면 전월실적 구간을 이 내용으로 바꾼다
-    pub tiers: Option<Vec<CardTierInput>>,
 }
 
 struct Validated {
@@ -477,16 +469,6 @@ fn validate(input: &PaymentMethodInput) -> Result<Validated> {
         && YearMonth::parse(e).is_none() {
             return Err(user_error("유효기간은 YYYY-MM 형식입니다"));
         }
-    if let Some(benefits) = &input.benefits {
-        for b in benefits {
-            if b.name.trim().is_empty() {
-                return Err(user_error("혜택 이름을 입력하세요"));
-            }
-            if !(0.0..=1.0).contains(&b.rate) {
-                return Err(user_error("혜택률은 0~1 사이(예: 0.1 = 10%)입니다"));
-            }
-        }
-    }
     Ok(Validated { name, last4, aliases: aliases.filter(|a| !a.is_empty()), billing, expires_on })
 }
 
@@ -502,7 +484,7 @@ async fn has_family<C: ConnectionTrait>(db: &C, uid: i32, id: i32) -> Result<boo
     Ok(payment_method::Entity::find().of_user(uid).filter(payment_method::Column::ParentId.eq(id)).count(db).await? > 0)
 }
 
-/// 가족카드 입력을 본인 카드에 맞춘다: 종류·결제 계좌·정산 일정은 본인 카드 것, 실적 목표·혜택·구간은 비운다.
+/// 가족카드 입력을 본인 카드에 맞춘다: 종류·결제 계좌·정산 일정·카드 상품은 본인 카드 것.
 /// `found`는 수정하는 카드(추가면 None).
 async fn apply_parent<C: ConnectionTrait>(
     db: &C,
@@ -534,41 +516,49 @@ async fn apply_parent<C: ConnectionTrait>(
     input.payment_day = parent.payment_day;
     input.closing_day = parent.closing_day;
     input.closing_month_offset = parent.closing_month_offset;
-    input.monthly_target = None;
-    input.benefits = Some(vec![]);
-    input.tiers = Some(vec![]);
+    input.card_product_id = parent.card_product_id;
     if trim_opt(input.issuer.clone()).is_none() {
         input.issuer = parent.issuer;
     }
     Ok(())
 }
 
-/// 본인 카드의 종류·결제 계좌·정산 일정을 가족카드에 복사한다.
+/// 본인 카드의 종류·결제 계좌·정산 일정·카드 상품을 가족카드에 복사한다. 상품이 바뀐 가족카드는 쓸 수 없게 된 혜택 지정을 지운다.
 async fn sync_family<C: ConnectionTrait>(db: &C, parent: &payment_method::Model) -> Result<(), DbErr> {
     let family =
         payment_method::Entity::find().of_user(parent.user_id).filter(payment_method::Column::ParentId.eq(parent.id)).all(db).await?;
     for f in family {
+        let product_changed = f.card_product_id != parent.card_product_id;
         let mut active: payment_method::ActiveModel = f.into();
+        active.card_product_id = Set(parent.card_product_id);
         active.kind = Set(parent.kind);
         active.account_id = Set(parent.account_id);
         active.payment_day = Set(parent.payment_day);
         active.closing_day = Set(parent.closing_day);
         active.closing_month_offset = Set(parent.closing_month_offset);
-        active.update(db).await?;
+        let saved = active.update(db).await?;
+        if product_changed {
+            prune_foreign_benefits(db, &saved).await?;
+        }
     }
     Ok(())
 }
 
-/// 카드의 거래·반복 규칙에 붙은 혜택 중 지금 혜택 카드(가족카드면 본인 카드)의 것이 아닌 것을 지운다.
-/// 가족카드로 바꾸거나 본인 카드를 바꾸거나 가족카드에서 풀 때 쓴다.
-async fn prune_foreign_benefits<C: ConnectionTrait>(db: &C, pm: &payment_method::Model) -> Result<(), DbErr> {
-    let valid: Vec<i32> = card_benefit::Entity::find()
-        .select_only()
-        .column(card_benefit::Column::Id)
-        .filter(card_benefit::Column::PaymentMethodId.eq(pm.benefit_card_id()))
-        .into_tuple()
-        .all(db)
-        .await?;
+/// 카드의 거래·반복 규칙에 붙은 혜택 중 지금 카드 상품의 것이 아닌 것을 지운다.
+/// 카드 상품을 바꾸거나, 가족카드로 바꾸거나 본인 카드를 바꾸거나 가족카드에서 풀 때 쓴다.
+pub(super) async fn prune_foreign_benefits<C: ConnectionTrait>(db: &C, pm: &payment_method::Model) -> Result<(), DbErr> {
+    let valid: Vec<i32> = match pm.card_product_id {
+        Some(product) => {
+            card_benefit::Entity::find()
+                .select_only()
+                .column(card_benefit::Column::Id)
+                .filter(card_benefit::Column::CardProductId.eq(product))
+                .into_tuple()
+                .all(db)
+                .await?
+        }
+        None => vec![],
+    };
     let txs = Query::select()
         .column(transaction::Column::Id)
         .from(transaction::Entity)
@@ -619,52 +609,10 @@ async fn archive<C: ConnectionTrait>(db: &C, pm: payment_method::Model, today: N
     Ok(())
 }
 
-async fn save_children<C: ConnectionTrait>(
-    db: &C,
-    pm_id: i32,
-    benefits: Option<Vec<CardBenefitInput>>,
-    tiers: Option<Vec<CardTierInput>>,
-) -> Result<()> {
-    if let Some(list) = benefits {
-        let existing = card_benefit::Entity::find()
-            .filter(card_benefit::Column::PaymentMethodId.eq(pm_id))
-            .all(db)
-            .await?;
-        let keep: HashSet<i32> = list.iter().filter_map(|b| b.id).collect();
-        let remove: Vec<i32> = existing.iter().map(|b| b.id).filter(|id| !keep.contains(id)).collect();
-        if !remove.is_empty() {
-            card_benefit::Entity::delete_many().filter(card_benefit::Column::Id.is_in(remove)).exec(db).await?;
-        }
-        for (i, b) in list.into_iter().enumerate() {
-            let mut active = match b.id.and_then(|id| existing.iter().find(|e| e.id == id)) {
-                Some(e) => card_benefit::ActiveModel::from(e.clone()),
-                None => card_benefit::ActiveModel { payment_method_id: Set(pm_id), ..Default::default() },
-            };
-            active.name = Set(b.name.trim().to_string());
-            active.kind = Set(b.kind);
-            active.rate = Set(b.rate);
-            active.min_amount = Set(b.min_amount.filter(|v| *v > 0));
-            active.per_tx_max = Set(b.per_tx_max.filter(|v| *v > 0));
-            active.monthly_cap = Set(b.monthly_cap.filter(|v| *v >= 0));
-            active.shares_card_limit = Set(b.shares_card_limit);
-            active.excludes_performance = Set(b.excludes_performance);
-            active.stackable = Set(b.stackable);
-            active.sort_order = Set(i as i32);
-            active.save(db).await?;
-        }
-    }
-    if let Some(list) = tiers {
-        card_tier::Entity::delete_many().filter(card_tier::Column::PaymentMethodId.eq(pm_id)).exec(db).await?;
-        for t in list {
-            card_tier::ActiveModel {
-                payment_method_id: Set(pm_id),
-                min_spending: Set(t.min_spending),
-                benefit_limit: Set(t.benefit_limit),
-                ..Default::default()
-            }
-            .insert(db)
-            .await?;
-        }
+/// 카드 상품이 있는지
+async fn check_product<C: ConnectionTrait>(db: &C, id: Option<i32>) -> Result<()> {
+    if let Some(id) = id {
+        card_product::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("카드 상품이 없습니다"))?;
     }
     Ok(())
 }
@@ -681,6 +629,7 @@ impl PaymentMutation {
         let mut input = input;
         apply_parent(db, uid, None, &mut input).await?;
         check_account(db, uid, input.account_id).await?;
+        check_product(db, input.card_product_id).await?;
         let v = validate(&input)?;
         if payment_method::Entity::find().of_user(uid).filter(payment_method::Column::Name.eq(v.name.as_str())).one(db).await?.is_some() {
             return Err(user_error("같은 이름의 결제수단이 이미 있습니다"));
@@ -692,15 +641,13 @@ impl PaymentMutation {
             name: Set(v.name),
             kind: Set(input.kind),
             issuer: Set(trim_opt(input.issuer)),
-            product_name: Set(trim_opt(input.product_name)),
+            card_product_id: Set(input.card_product_id),
             last4: Set(v.last4),
             aliases: Set(v.aliases),
             account_id: Set(input.account_id),
             payment_day: Set(v.billing.0),
             closing_day: Set(v.billing.1),
             closing_month_offset: Set(v.billing.2),
-            monthly_target: Set(input.monthly_target.filter(|t| *t > 0)),
-            annual_fee: Set(input.annual_fee),
             expires_on: Set(v.expires_on),
             color: Set(trim_opt(input.color)),
             memo: Set(trim_opt(input.memo)),
@@ -712,7 +659,6 @@ impl PaymentMutation {
         }
         .insert(&txn)
         .await?;
-        save_children(&txn, saved.id, input.benefits, input.tiers).await?;
         txn.commit().await?;
         lookup(ctx).invalidate();
         Ok(saved)
@@ -731,6 +677,7 @@ impl PaymentMutation {
         let mut input = input;
         apply_parent(db, uid, Some(&found), &mut input).await?;
         check_account(db, uid, input.account_id).await?;
+        check_product(db, input.card_product_id).await?;
         if !input.kind.is_card() && has_family(db, uid, id).await? {
             return Err(user_error("가족카드가 있는 카드는 카드가 아닌 종류로 바꿀 수 없습니다"));
         }
@@ -745,13 +692,13 @@ impl PaymentMutation {
             return Err(user_error(format!("'{}' 이름은 이미 쓰고 있습니다", other.name)));
         }
         let txn = db.begin().await?;
-        let old_parent = found.parent_id;
+        let (old_parent, old_product) = (found.parent_id, found.card_product_id);
         let mut active: payment_method::ActiveModel = found.into();
         active.parent_id = Set(input.parent_id);
         active.name = Set(v.name);
         active.kind = Set(input.kind);
         active.issuer = Set(trim_opt(input.issuer));
-        active.product_name = Set(trim_opt(input.product_name));
+        active.card_product_id = Set(input.card_product_id);
         active.last4 = Set(v.last4);
         if input.aliases.is_some() {
             active.aliases = Set(v.aliases);
@@ -760,8 +707,6 @@ impl PaymentMutation {
         active.payment_day = Set(v.billing.0);
         active.closing_day = Set(v.billing.1);
         active.closing_month_offset = Set(v.billing.2);
-        active.monthly_target = Set(input.monthly_target.filter(|t| *t > 0));
-        active.annual_fee = Set(input.annual_fee);
         active.expires_on = Set(v.expires_on);
         active.color = Set(trim_opt(input.color));
         active.memo = Set(trim_opt(input.memo));
@@ -769,8 +714,7 @@ impl PaymentMutation {
             active.archived = Set(a);
         }
         let saved = active.update(&txn).await?;
-        save_children(&txn, saved.id, input.benefits, input.tiers).await?;
-        if saved.parent_id != old_parent {
+        if saved.parent_id != old_parent || saved.card_product_id != old_product {
             prune_foreign_benefits(&txn, &saved).await?;
         }
         sync_family(&txn, &saved).await?;
@@ -876,14 +820,19 @@ mod tests {
         .id;
         let schema = crate::graphql::build_schema(db.clone(), crate::config::AppConfig::for_tests());
         let id = |v: &Value| v.as_i64().unwrap();
-        let fields = "id kind parentId issuer paymentDay closingDay closingMonthOffset monthlyTarget annualFee benefits { id } tiers { minSpending }";
+        let fields = "id kind parentId issuer cardProductId paymentDay closingDay closingMonthOffset monthlyTarget annualFee benefits { id } tiers { minSpending }";
 
+        let product = id(&gql(
+            &schema,
+            r#"mutation { createCardProduct(input: {issuer: "신한", name: "본인 상품", monthlyTarget: 300000, annualFee: 15000,
+            benefits: [{name: "10%", rate: 0.1, sharesCardLimit: false}], tiers: [{minSpending: 300000, benefitLimit: 10000}]}) { id } }"#,
+        )
+        .await["createCardProduct"]["id"]);
         let parent = gql(
             &schema,
             &format!(
                 r#"mutation {{ createPaymentMethod(input: {{name: "본인", kind: CREDIT_CARD, issuer: "신한", paymentDay: 25, closingDay: 11,
-                closingMonthOffset: 0, monthlyTarget: 300000, benefits: [{{name: "10%", rate: 0.1, sharesCardLimit: false}}],
-                tiers: [{{minSpending: 300000, benefitLimit: 10000}}]}}) {{ {fields} }} }}"#
+                closingMonthOffset: 0, cardProductId: {product}}}) {{ {fields} }} }}"#
             ),
         )
         .await["createPaymentMethod"]
@@ -891,12 +840,13 @@ mod tests {
         let p = id(&parent["id"]);
         let benefit = id(&parent["benefits"][0]["id"]);
 
-        // 종류·정산 일정·카드사는 본인 카드를 따르고, 실적 목표·혜택·구간은 본인 카드 것을 쓴다. 연회비는 따로
+        // 종류·정산 일정·카드사·카드 상품(실적 목표·혜택·구간·연회비)은 본인 카드를 따른다
+        let other_product = id(&gql(&schema, r#"mutation { createCardProduct(input: {name: "무시"}) { id } }"#).await["createCardProduct"]["id"]);
         let family = gql(
             &schema,
             &format!(
-                r#"mutation {{ createPaymentMethod(input: {{parentId: {p}, name: "가족", kind: CHECK_CARD, last4: "1234", annualFee: 5000,
-                monthlyTarget: 999, benefits: [{{name: "무시", rate: 0.5}}], tiers: [{{minSpending: 1, benefitLimit: 1}}]}}) {{ {fields} }} }}"#
+                r#"mutation {{ createPaymentMethod(input: {{parentId: {p}, name: "가족", kind: CHECK_CARD, last4: "1234",
+                cardProductId: {other_product}}}) {{ {fields} }} }}"#
             ),
         )
         .await["createPaymentMethod"]
@@ -906,11 +856,11 @@ mod tests {
         assert_eq!(family["parentId"], p);
         assert_eq!(family["issuer"], "신한");
         assert_eq!((family["paymentDay"].clone(), family["closingDay"].clone(), family["closingMonthOffset"].clone()), (json!(25), json!(11), json!(0)));
-        assert_eq!(family["monthlyTarget"], Value::Null);
-        assert_eq!(family["annualFee"], 5000);
+        assert_eq!(family["cardProductId"], product);
+        assert_eq!((family["monthlyTarget"].clone(), family["annualFee"].clone()), (json!(300000), json!(15000)));
         assert_eq!(family["benefits"], parent["benefits"]);
         assert_eq!(family["tiers"], json!([{"minSpending": 300000}]));
-        assert_eq!(card_benefit::Entity::find().count(&db).await.unwrap(), 1, "가족카드는 혜택을 따로 두지 않는다");
+        assert_eq!(card_benefit::Entity::find().count(&db).await.unwrap(), 1, "혜택은 상품에만 있다");
 
         // 가족카드 거래에 본인 카드 혜택을 고를 수 있다
         let tx = |pm: i64, amount: i64| {
@@ -963,12 +913,12 @@ mod tests {
         let msg = gql_error(&schema, &format!(r#"mutation {{ updatePaymentMethod(id: {p}, input: {{name: "본인", kind: CASH}}) {{ id }} }}"#)).await;
         assert!(msg.contains("카드가 아닌 종류"), "{msg}");
 
-        // 본인 카드의 정산 일정을 고치면 가족카드도 따라간다 (혜택은 그대로 두려고 목록을 빼고 보낸다)
+        // 본인 카드의 정산 일정을 고치면 가족카드도 따라간다 (같은 상품이라 혜택 지정은 그대로)
         gql(
             &schema,
             &format!(
                 r#"mutation {{ updatePaymentMethod(id: {p}, input: {{name: "본인", kind: CREDIT_CARD, issuer: "신한", paymentDay: 14, closingDay: 31,
-                closingMonthOffset: -1, monthlyTarget: 300000}}) {{ id }} }}"#
+                closingMonthOffset: -1, cardProductId: {product}}}) {{ id }} }}"#
             ),
         )
         .await;

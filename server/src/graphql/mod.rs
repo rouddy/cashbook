@@ -1,6 +1,7 @@
 //! GraphQL 스키마. 도메인별 Query/Mutation을 MergedObject로 합친다.
 
 mod account;
+mod card_product;
 mod ledger;
 mod payment;
 mod recurring;
@@ -17,7 +18,7 @@ use sea_orm::{ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, 
 
 use crate::config::AppConfig;
 use crate::entity::{
-    OfUser, account as account_entity, card_benefit, card_tier, category, ledger as ledger_entity, payment_method,
+    OfUser, account as account_entity, card_benefit, card_product as card_product_entity, card_tier, category, ledger as ledger_entity, payment_method,
     recurring_rule, recurring_rule_benefit, transaction as transaction_entity, transaction_benefit,
 };
 use sea_orm::sea_query::Query as SqlQuery;
@@ -26,6 +27,7 @@ use sea_orm::sea_query::Query as SqlQuery;
 pub struct Query(
     ledger::LedgerQuery,
     payment::PaymentQuery,
+    card_product::CardProductQuery,
     account::AccountQuery,
     transaction::TransactionQuery,
     recurring::RecurringQuery,
@@ -37,6 +39,7 @@ pub struct Query(
 pub struct Mutation(
     ledger::LedgerMutation,
     payment::PaymentMutation,
+    card_product::CardProductMutation,
     account::AccountMutation,
     transaction::TransactionMutation,
     recurring::RecurringMutation,
@@ -70,6 +73,7 @@ pub struct Lookup {
     categories: Slot<HashMap<i32, category::Model>>,
     payment_methods: Slot<HashMap<i32, payment_method::Model>>,
     accounts: Slot<HashMap<i32, account_entity::Model>>,
+    products: Slot<HashMap<i32, card_product_entity::Model>>,
     benefits: Slot<HashMap<i32, card_benefit::Model>>,
     tiers: Slot<HashMap<i32, Vec<card_tier::Model>>>,
     tx_benefits: Slot<HashMap<i32, Vec<i32>>>,
@@ -101,6 +105,7 @@ impl Lookup {
             categories: Mutex::default(),
             payment_methods: Mutex::default(),
             accounts: Mutex::default(),
+            products: Mutex::default(),
             benefits: Mutex::default(),
             tiers: Mutex::default(),
             tx_benefits: Mutex::default(),
@@ -115,6 +120,7 @@ impl Lookup {
         *self.categories.lock().unwrap() = None;
         *self.payment_methods.lock().unwrap() = None;
         *self.accounts.lock().unwrap() = None;
+        *self.products.lock().unwrap() = None;
         *self.benefits.lock().unwrap() = None;
         *self.tiers.lock().unwrap() = None;
         *self.tx_benefits.lock().unwrap() = None;
@@ -150,6 +156,15 @@ impl Lookup {
         .await
     }
 
+    /// 카드 상품 (계정 공통)
+    pub async fn products(&self) -> Result<Arc<HashMap<i32, card_product_entity::Model>>, DbErr> {
+        cached(&self.products, || async {
+            Ok(card_product_entity::Entity::find().all(&self.db).await?.into_iter().map(|m| (m.id, m)).collect())
+        })
+        .await
+    }
+
+    /// 카드 혜택 (계정 공통인 카드 상품의 혜택)
     pub async fn benefits(&self) -> Result<Arc<HashMap<i32, card_benefit::Model>>, DbErr> {
         cached(&self.benefits, || async {
             Ok(card_benefit::Entity::find().all(&self.db).await?.into_iter().map(|m| (m.id, m)).collect())
@@ -157,12 +172,12 @@ impl Lookup {
         .await
     }
 
-    /// 결제수단 id → 전월실적 구간 목록
+    /// 카드 상품 id → 전월실적 구간 목록
     pub async fn tiers(&self) -> Result<Arc<HashMap<i32, Vec<card_tier::Model>>>, DbErr> {
         cached(&self.tiers, || async {
             let mut map: HashMap<i32, Vec<card_tier::Model>> = HashMap::new();
             for t in card_tier::Entity::find().all(&self.db).await? {
-                map.entry(t.payment_method_id).or_default().push(t);
+                map.entry(t.card_product_id).or_default().push(t);
             }
             for v in map.values_mut() {
                 v.sort_by_key(|t| t.min_spending);
@@ -248,16 +263,24 @@ impl Lookup {
         .await
     }
 
-    pub async fn card_benefits_of(&self, payment_method_id: i32) -> Result<Vec<card_benefit::Model>, DbErr> {
+    /// 카드 상품의 혜택 (상품이 없으면 빈 목록)
+    pub async fn card_benefits_of(&self, card_product_id: Option<i32>) -> Result<Vec<card_benefit::Model>, DbErr> {
+        let Some(product) = card_product_id else { return Ok(Vec::new()) };
         let mut v: Vec<card_benefit::Model> = self
             .benefits()
             .await?
             .values()
-            .filter(|b| b.payment_method_id == payment_method_id)
+            .filter(|b| b.card_product_id == product)
             .cloned()
             .collect();
         v.sort_by_key(|b| (b.sort_order, b.id));
         Ok(v)
+    }
+
+    /// 카드 상품의 전월실적 구간 (최소 실적 순, 상품이 없으면 빈 목록)
+    pub async fn tiers_of(&self, card_product_id: Option<i32>) -> Result<Vec<card_tier::Model>, DbErr> {
+        let Some(id) = card_product_id else { return Ok(Vec::new()) };
+        Ok(self.tiers().await?.get(&id).cloned().unwrap_or_default())
     }
 }
 
@@ -434,4 +457,21 @@ mod tests {
         let res = schema.execute("{ ledgers { id } }").await;
         assert_eq!(res.errors[0].message, "로그인이 필요합니다");
     }
+}
+
+/// 테스트: 혜택(`benefits`는 GraphQL `CardBenefitInput` 목록 안쪽)을 가진 카드 상품과 그 상품을 고른 신용카드를 계정 1에 만든다.
+/// `{"createPaymentMethod": {"id": .., "benefits": [{"id": ..}]}}`를 돌려준다.
+#[cfg(test)]
+pub(crate) async fn create_card_with_benefits(schema: &CashbookSchema, name: &str, benefits: &str) -> serde_json::Value {
+    let run = |q: String| async move {
+        let res = schema.execute(as_user(&q, crate::entity::user::LEGACY_USER_ID)).await;
+        assert!(res.errors.is_empty(), "{q}: {:?}", res.errors);
+        res.data.into_json().unwrap()
+    };
+    let product = run(format!(r#"mutation {{ createCardProduct(input: {{name: "{name} 상품", benefits: [{benefits}]}}) {{ id }} }}"#)).await;
+    let product = product["createCardProduct"]["id"].as_i64().unwrap();
+    run(format!(
+        r#"mutation {{ createPaymentMethod(input: {{name: "{name}", kind: CREDIT_CARD, cardProductId: {product}}}) {{ id benefits {{ id }} }} }}"#
+    ))
+    .await
 }

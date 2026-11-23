@@ -15,7 +15,7 @@ use serde::Deserialize;
 use super::dates::YearMonth;
 use super::legacy_plan::{self, Conversion, LedgerInfo, LegacyItem, LegacyKind};
 use crate::entity::{
-    OfUser, account, account_balance, card_benefit, card_tier, category,
+    OfUser, account, account_balance, card_benefit, card_product, card_tier, category,
     enums::{AccountKind, BenefitKind, CategoryKind, PaymentKind, PlanItemKind, TxSource, TxStatus},
     ledger, payment_method, plan_item, recurring_rule, transaction, transaction_benefit,
 };
@@ -366,20 +366,45 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
     let mut benefit_ids: HashMap<(i32, String), i32> = HashMap::new();
     for p in &data.payment_methods {
         let aliases = p.aliases.iter().map(|a| a.trim()).filter(|a| !a.is_empty()).collect::<Vec<_>>().join(",");
+        // 상품명·목표·연회비·구간·혜택이 있으면 카드 상품을 만든다 (계정 공통, 만든 계정은 가져오는 계정)
+        let product_name = p.product_name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let has_product = product_name.is_some()
+            || p.monthly_target.is_some()
+            || p.annual_fee.is_some()
+            || !p.benefits.is_empty()
+            || !p.tiers.is_empty();
+        let product = if has_product {
+            Some(
+                card_product::ActiveModel {
+                    issuer: Set(p.issuer.clone()),
+                    name: Set(product_name.unwrap_or(&p.name).to_string()),
+                    annual_fee: Set(p.annual_fee),
+                    monthly_target: Set(p.monthly_target.filter(|t| *t > 0)),
+                    memo: Set(None),
+                    created_by: Set(Some(uid)),
+                    created_at: Set(now),
+                    updated_at: Set(now),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?
+                .id,
+            )
+        } else {
+            None
+        };
         let saved = payment_method::ActiveModel {
             user_id: Set(uid),
             name: Set(p.name.clone()),
             kind: Set(p.kind),
             issuer: Set(p.issuer.clone()),
-            product_name: Set(p.product_name.clone()),
+            card_product_id: Set(product),
             last4: Set(p.last4.clone()),
             aliases: Set((!aliases.is_empty()).then_some(aliases)),
             account_id: Set(None),
             payment_day: Set(None),
             closing_day: Set(None),
             closing_month_offset: Set(None),
-            monthly_target: Set(p.monthly_target),
-            annual_fee: Set(p.annual_fee),
             expires_on: Set(p.expires_on.clone()),
             color: Set(None),
             memo: Set(p.memo.clone()),
@@ -390,34 +415,36 @@ pub async fn run<C: ConnectionTrait + TransactionTrait>(
         }
         .insert(&txn)
         .await?;
-        for (i, b) in p.benefits.iter().enumerate() {
-            let benefit = card_benefit::ActiveModel {
-                payment_method_id: Set(saved.id),
-                name: Set(b.name.clone()),
-                kind: Set(b.kind),
-                rate: Set(b.rate),
-                min_amount: Set(b.min_amount),
-                per_tx_max: Set(b.per_tx_max),
-                monthly_cap: Set(b.monthly_cap),
-                shares_card_limit: Set(b.shares_card_limit),
-                excludes_performance: Set(b.excludes_performance),
-                stackable: Set(b.stackable),
-                sort_order: Set(i as i32),
-                ..Default::default()
+        if let Some(product) = product {
+            for (i, b) in p.benefits.iter().enumerate() {
+                let benefit = card_benefit::ActiveModel {
+                    card_product_id: Set(product),
+                    name: Set(b.name.clone()),
+                    kind: Set(b.kind),
+                    rate: Set(b.rate),
+                    min_amount: Set(b.min_amount),
+                    per_tx_max: Set(b.per_tx_max),
+                    monthly_cap: Set(b.monthly_cap),
+                    shares_card_limit: Set(b.shares_card_limit),
+                    excludes_performance: Set(b.excludes_performance),
+                    stackable: Set(b.stackable),
+                    sort_order: Set(i as i32),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?;
+                benefit_ids.insert((saved.id, b.name.clone()), benefit.id);
             }
-            .insert(&txn)
-            .await?;
-            benefit_ids.insert((saved.id, b.name.clone()), benefit.id);
-        }
-        for t in &p.tiers {
-            card_tier::ActiveModel {
-                payment_method_id: Set(saved.id),
-                min_spending: Set(t.min_spending),
-                benefit_limit: Set(t.benefit_limit),
-                ..Default::default()
+            for t in &p.tiers {
+                card_tier::ActiveModel {
+                    card_product_id: Set(product),
+                    min_spending: Set(t.min_spending),
+                    benefit_limit: Set(t.benefit_limit),
+                    ..Default::default()
+                }
+                .insert(&txn)
+                .await?;
             }
-            .insert(&txn)
-            .await?;
         }
         pm_ids.insert(p.name.clone(), saved.id);
         stats.payment_methods += 1;

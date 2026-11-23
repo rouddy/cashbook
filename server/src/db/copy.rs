@@ -13,7 +13,7 @@ use sea_orm::{
 
 use super::connect;
 use crate::entity::{
-    account, account_balance, api_token, card_benefit, card_tier, category, ledger, payment_method, plan_item,
+    account, account_balance, api_token, card_benefit, card_product, card_tier, category, ledger, payment_method, plan_item,
     recurring_rule, recurring_rule_benefit, transaction, transaction_benefit, user,
 };
 
@@ -48,6 +48,7 @@ macro_rules! for_each_table {
         $m!(category, "categories");
         $m!(account, "accounts");
         $m!(account_balance, "account_balances");
+        $m!(card_product, "card_products");
         $m!(payment_method, "payment_methods");
         $m!(card_benefit, "card_benefits");
         $m!(card_tier, "card_tiers");

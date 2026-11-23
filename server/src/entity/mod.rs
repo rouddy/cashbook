@@ -8,6 +8,7 @@ pub mod account;
 pub mod account_balance;
 pub mod api_token;
 pub mod card_benefit;
+pub mod card_product;
 pub mod card_tier;
 pub mod category;
 pub mod enums;
