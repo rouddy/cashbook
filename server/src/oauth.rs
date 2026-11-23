@@ -48,11 +48,23 @@ pub fn challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
-/// 로그인 뒤 돌아갈 경로. 이 사이트 안의 경로만 (다른 사이트로 보내는 열린 리디렉션 방지)
+/// 로그인 뒤 돌아갈 경로. 이 사이트 안의 경로만 (다른 사이트로 보내는 열린 리디렉션 방지).
+/// 한글 검색어처럼 URI에 그대로 못 쓰는 글자는 퍼센트 인코딩한다 (Location 헤더로 보낼 수 있게).
 pub fn safe_next(next: Option<&str>) -> String {
     match next.map(str::trim) {
         Some(n) if n.starts_with('/') && !n.starts_with("//") && !n.contains('\\') && !n.starts_with("/api/") && n.len() <= 512 => {
-            n.to_string()
+            let mut out = String::with_capacity(n.len());
+            for c in n.chars() {
+                if c.is_ascii_graphic() && !"\"<>^`{|}".contains(c) {
+                    out.push(c);
+                } else {
+                    let mut buf = [0u8; 4];
+                    for b in c.encode_utf8(&mut buf).bytes() {
+                        out.push_str(&format!("%{b:02X}"));
+                    }
+                }
+            }
+            out
         }
         _ => "/".into(),
     }
@@ -136,6 +148,11 @@ mod tests {
             assert_eq!(safe_next(Some(bad)), "/", "{bad}");
         }
         assert_eq!(safe_next(None), "/");
+        // Location 헤더로 보낼 수 있게 인코딩한다
+        let encoded = safe_next(Some("/transactions?search=점심 값&ledger=1"));
+        assert_eq!(encoded, "/transactions?search=%EC%A0%90%EC%8B%AC%20%EA%B0%92&ledger=1");
+        assert!(rocket::http::uri::Reference::parse(&encoded).is_ok());
+        assert_eq!(safe_next(Some("/cards?month=2026-11&q=%EC%A0%90")), "/cards?month=2026-11&q=%EC%A0%90");
     }
 
     #[test]

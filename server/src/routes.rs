@@ -542,5 +542,8 @@ mod tests {
         let c = client(&base, db).await;
         let state = start_login(&c, "https://evil.example").await;
         assert_eq!(callback(&c, "good", &state).await, "/");
+        // 한글 검색어가 있는 화면으로도 돌아간다 (Location에 쓸 수 있게 인코딩)
+        let state = start_login(&c, "%2Ftransactions%3Fsearch%3D%EC%A0%90%EC%8B%AC").await;
+        assert_eq!(callback(&c, "good", &state).await, "/transactions?search=%EC%A0%90%EC%8B%AC");
     }
 }
