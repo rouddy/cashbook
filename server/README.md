@@ -21,17 +21,19 @@ server/
 └── src/
     ├── main.rs             CLI 분기(serve / import / generate-planned), Rocket 기동, 매시간 예정 거래 작업
     ├── config.rs           AppConfig: 환경 변수, "오늘"(CASHBOOK_TZ 기준)
-    ├── auth.rs             비밀번호 세션·API 토큰, Auth 가드, Origin·Host 검사, 로그인 시도 제한
-    ├── routes.rs           REST 라우트, /api 오류 catcher(JSON), SPA 서빙
+    ├── auth.rs             계정 세션·API 토큰, Auth 가드(계정 id·관리자), Origin·Host 검사
+    ├── oauth.rs            Google 로그인: Authorization Code + PKCE, 코드 교환·userinfo
+    ├── routes.rs           REST 라우트(세션·Google 로그인·자동 입력), /api 오류 catcher(JSON), SPA 서빙
     ├── db/
     │   ├── mod.rs          연결 + 마이그레이션 자동 적용, SQLite·MySQL 차이를 감추는 SQL 조각(sql), 테스트용 인메모리 DB
     │   ├── migration.rs    손으로 쓴 마이그레이션
     │   └── copy.rs         copy-db: DB 사이 데이터 복사 (SQLite ↔ MySQL)
     ├── entity/             테이블당 SeaORM 엔티티 하나 (대부분 GraphQL 타입 겸용)
+    │   ├── mod.rs          계정별 테이블의 범위(UserOwned·OfUser), user_id 없는 저장 거절(user_owned!)
     │   ├── enums.rs        문자열로 저장하는 enum (DeriveActiveEnum + graphql Enum)
-    │   └── *.rs            ledger, category, plan_item, payment_method, card_benefit, card_tier,
+    │   └── *.rs            user, ledger, category, plan_item, payment_method, card_product, card_benefit, card_tier,
     │                       account, account_balance, transaction, transaction_benefit,
-    │                       recurring_rule, api_token
+    │                       recurring_rule, recurring_rule_benefit, api_token
     ├── domain/             GraphQL과 분리된 계산·처리 (단위 테스트 포함)
     │   ├── dates.rs        "YYYY-MM" 월 계산 도우미
     │   ├── billing.rs      카드 정산 주기, 결제일 주말 보정, 할부 분할
@@ -44,11 +46,13 @@ server/
     │   ├── ingest.rs       자동 입력 (중복 방지 → 결제수단 해석 → 분류 추천 → 예정 매칭)
     │   ├── split.rs        거래 분할 (한 결제를 두 장부에)
     │   ├── legacy_plan.rs  예전 지출계획(월 수입·배분)을 정기수익·장부 이체 반복으로 옮기는 규칙
-    │   └── import.rs       정규화 JSON 가져오기
+    │   ├── users.rs        Google 로그인 계정 찾기·만들기 (소유자 이메일은 기존 데이터 계정을 넘겨받음, 새 계정 기본 장부)
+    │   └── import.rs       정규화 JSON 가져오기 (계정 하나에)
     └── graphql/            도메인별 Query / Mutation → MergedObject
-        ├── mod.rs          스키마 빌드, 요청 단위 캐시 Lookup, 공용 도우미
+        ├── mod.rs          스키마 빌드, 요청 계정(CurrentUser)·요청 단위 캐시 Lookup, 공용 도우미, 계정 격리 테스트
         ├── ledger.rs       장부·카테고리·지출계획 항목·구성원
-        ├── payment.rs      결제수단(카드)·혜택·구간·청구서·실적 리포트
+        ├── payment.rs      결제수단(카드)·청구서·실적 리포트 (혜택·구간은 카드 상품 것)
+        ├── card_product.rs 카드 상품(전월실적 목표·구간·혜택·연회비, 모든 계정 공용)
         ├── account.rs      계좌·잔고·여유자금
         ├── transaction.rs  거래, 확정/건너뛰기/복원, 자동 입력, 추천
         ├── recurring.rs    반복 규칙 (지출·수입·장부 이체)
@@ -80,15 +84,16 @@ flowchart LR
 
 ### GraphQL 요청
 
-1. `POST /api/graphql`: `Auth` 가드를 통과해야 합니다 (로그인 세션 또는 API 토큰).
-2. 요청마다 `Lookup::new(db)`를 `request.data`로 넣습니다. 장부·카테고리·결제수단·계좌·혜택·구간·거래-혜택처럼 작은 테이블을 요청당 한 번만 읽어서, 거래 목록의 하위 필드(`category`, `paymentMethod`, `benefits` …)가 N+1 쿼리를 내지 않게 합니다.
-3. 리졸버는 `db(ctx)`, `config(ctx)`, `lookup(ctx)`로 꺼내 쓰고, 뮤테이션 후에는 `lookup(ctx).invalidate()`를 호출합니다.
+1. `POST /api/graphql`: `Auth` 가드를 통과해야 합니다 (로그인 세션 또는 API 토큰). 가드가 정한 계정을 `CurrentUser`(계정 id·관리자)로 `request.data`에 넣습니다.
+2. 요청마다 그 계정의 `Lookup::new(db, user_id)`를 넣습니다. 장부·카테고리·결제수단·계좌·거래-혜택처럼 작은 테이블은 그 계정 것만, 카드 상품·혜택·구간은 공용이라 전부, 요청당 한 번만 읽어서 거래 목록의 하위 필드(`category`, `paymentMethod`, `benefits` …)가 N+1 쿼리를 내지 않게 합니다.
+3. 리졸버는 `uid(ctx)`(계정 id), `db(ctx)`, `config(ctx)`, `lookup(ctx)`로 꺼내 쓰고, 계정별 테이블은 항상 `.of_user(uid)`로 범위를 겁니다(모델의 하위 필드는 `self.user_id`). 뮤테이션 후에는 `lookup(ctx).invalidate()`를 호출합니다.
 4. 입력 오류는 `user_error()`로 `code: BAD_USER_INPUT`을 붙여 돌려줍니다.
 
 | 파일 | Query | Mutation | 타입의 계산 필드 (`#[ComplexObject]`) |
 |---|---|---|---|
 | `ledger.rs` | `ledgers` `categories(ledgerId)` `planItems(ledgerId)` `members` | 장부·카테고리·계획 항목 create/update/delete, `reorderCategories` | — |
-| `payment.rs` | `paymentMethods(cardsOnly)` `paymentMethod(id)` `cardsMonthly(month)` `statementLines(paymentMethodId, month)` `suggestedBilling(paymentDay)` | create/update/delete/`restorePaymentMethod` (create/update는 혜택·구간 포함), `reorderPaymentMethods` | `PaymentMethod`: `aliases` `isCard` `billingConfigured` `usagePeriodLabel` `account` `benefits` `tiers` `transactionCount` `lastUsedOn` `statements` `nextPayment` `monthReport(month)` |
+| `payment.rs` | `paymentMethods(cardsOnly)` `paymentMethod(id)` `cardsMonthly(month)` `statementLines(paymentMethodId, month)` `suggestedBilling(paymentDay)` | create/update/delete/`restorePaymentMethod` (카드 상품은 `cardProductId`로 고름), `reorderPaymentMethods` | `PaymentMethod`: `aliases` `isCard` `billingConfigured` `usagePeriodLabel` `account` `cardProduct` `productName` `monthlyTarget` `annualFee` `benefits` `tiers`(뒤의 다섯은 카드 상품 값) `transactionCount` `lastUsedOn` `statements` `nextPayment` `monthReport(month)` |
+| `card_product.rs` | `cardProducts(search)` `cardProduct(id)` | create/update/`deleteCardProduct` (혜택·구간 포함, 고치기·지우기는 만든 계정·관리자) | `CardProduct`: `label` `benefits` `tiers` `canEdit` `createdByMe` `cardCount` |
 | `account.rs` | `accounts` `account(id)` `availableFunds` | create/update/`deleteAccount`, `updateAccountBalance` `deleteAccountBalance` `reorderAccounts` | `Account`: `history` `paymentMethods` |
 | `transaction.rs` | `transactions(filter, sort)` (장부 필터는 받은 이체 포함, `transfers` 필터, 이체 합계 별도) `transaction(id)` `descriptionSuggestions(query)` `suggestCategory(description)` `parseMessage(text)` | create/update/`deleteTransaction`, `deleteTransactions`(일괄, 한 트랜잭션), `createTransactions`(일괄), `confirm`/`skip`/`restoreTransaction`, `ingestTransaction` | `Transaction`: `ledger` `category` `paymentMethod` `benefitIds` `benefits` `isIncome` `statementMonth` `paymentDate` |
 | `recurring.rs` | `recurringRules(ledgerId)` (그 장부로 보내는 이체 규칙 포함) | create/update/`deleteRecurringRule`, `generatePlanned` | `RecurringRule`: `category` `paymentMethod` `nextDate` |
@@ -101,12 +106,22 @@ flowchart LR
 
 ### 인증 가드 (`auth.rs`)
 
-`Auth`는 아래 순서로 판정합니다. GraphQL과 자동 입력이 같은 가드를 쓰고, 토큰에는 권한 구분이 없습니다.
+`Auth`는 아래 순서로 판정하고 계정 id와 관리자 여부를 돌려줍니다. GraphQL과 자동 입력이 같은 가드를 쓰고, 토큰에는 권한 구분이 없습니다.
 
 1. `Origin`이 `Host`(또는 `X-Forwarded-Host`, `CASHBOOK_ALLOWED_ORIGINS`)와 다르면 403
-2. `CASHBOOK_PASSWORD`가 없으면 localhost Host(+ `CASHBOOK_ALLOWED_HOSTS`)일 때만 `Auth::Disabled`, 아니면 403
-3. `Authorization: Bearer` / `X-Api-Key` 토큰이 있으면 SHA-256 해시로 조회 → `Auth::Token` 또는 401
-4. 암호화 세션 쿠키가 현재 비밀번호와 맞으면 `Auth::Session`, 아니면 401
+2. Google 로그인을 설정하지 않았으면 localhost Host(+ `CASHBOOK_ALLOWED_HOSTS`)일 때만 계정 id 1(관리자), 아니면 403
+3. `Authorization: Bearer` / `X-Api-Key` 토큰이 있으면 SHA-256 해시로 조회 → 토큰 주인 계정 또는 401
+4. 암호화 세션 쿠키(`v2:계정id:로그인 시각`, 30일)의 계정이 있으면 그 계정, 아니면 401
+5. 관리자: 계정 이메일이 `CASHBOOK_ADMIN_EMAILS` 또는 `CASHBOOK_OWNER_EMAIL`
+
+### Google 로그인 (`oauth.rs`, `domain/users.rs`)
+
+1. `GET /api/auth/google?next=/경로` — state·PKCE 검증값·돌아갈 경로를 10분짜리 암호화 쿠키(`cashbook_oauth`, SameSite=Lax, path `/api/auth`)에 넣고 Google 로그인 화면으로 보냅니다.
+2. `GET /api/auth/google/callback?code&state` — 쿠키의 state와 맞는지 확인하고, 코드를 토큰으로 바꿔(`code_verifier` 포함) userinfo(sub·이메일·이름·사진)를 받습니다.
+3. `users::login_google`: 같은 Google 계정(`sub`) → 이메일이 `CASHBOOK_OWNER_EMAIL`이고 계정 id 1을 아무도 넘겨받지 않았으면 그 계정 → 아니면 새 계정과 기본 장부(가계부)·항목. 이메일이 확인되지 않은 계정은 가입하지 못합니다.
+4. 세션 쿠키를 만들고 `next`(이 사이트 안의 경로만)로 보냅니다. 실패하면 `/login?error=이유`.
+
+시험은 `routes.rs`의 가짜 Google 서버(토큰·userinfo를 흉내 내는 TCP 서버)로 전체 흐름을 돌립니다.
 
 403 사유는 `ForbiddenReason`으로 요청 로컬 캐시에 남기고, `/api` catcher가 `{"ok": false, "error": "..."}`로 돌려줍니다.
 
@@ -120,8 +135,16 @@ flowchart LR
 
 타입은 마이그레이션 기준입니다 (`bigint` = 원 단위 금액 `i64`, `timestamptz` = `DateTimeUtc`). enum 타입 컬럼은 DB에 문자열로 저장됩니다. 주석의 `null`은 NULL 허용 컬럼입니다.
 
+계정별 테이블(`ledgers`, `categories`, `plan_items`, `accounts`, `payment_methods`, `recurring_rules`, `transactions`, `api_tokens`)에는 모두
+`int user_id FK`(users, 기본값 0이라 빠뜨리면 외래 키 오류)가 있어 아래 그림에서는 줄였습니다. `card_products`·`card_benefits`·`card_tiers`는 모든 계정 공용입니다.
+
 ```mermaid
 erDiagram
+    users ||--o{ ledgers : "계정별 데이터 (user_id)"
+    users |o--o{ card_products : "만든 계정"
+    card_products |o--o{ payment_methods : "카드 상품"
+    card_products ||--o{ card_benefits : "혜택 항목"
+    card_products ||--o{ card_tiers : "전월실적 구간"
     ledgers ||--o{ categories : "항목"
     ledgers ||--o{ plan_items : "지출계획"
     ledgers ||--o{ recurring_rules : "반복 규칙"
@@ -132,17 +155,38 @@ erDiagram
     categories |o--o{ recurring_rules : "분류"
     payment_methods |o--o{ transactions : "결제수단"
     payment_methods |o--o{ recurring_rules : "결제수단"
-    payment_methods ||--o{ card_benefits : "혜택 항목"
-    payment_methods ||--o{ card_tiers : "전월실적 구간"
+    payment_methods |o--o{ payment_methods : "가족카드 (parent_id)"
     accounts |o--o{ payment_methods : "결제 계좌"
     accounts ||--o{ account_balances : "잔고 이력"
     recurring_rules |o--o{ transactions : "생성한 예정분"
     transactions ||--o{ transaction_benefits : "적용 혜택"
     card_benefits ||--o{ transaction_benefits : "적용 거래"
 
+    users {
+        int id PK "1 = 계정 기능 이전 데이터"
+        string google_sub UK "null, Google 계정 id (아무도 안 넘겨받으면 null)"
+        string email "null, 소문자"
+        string name "null"
+        text picture "null"
+        timestamptz created_at
+        timestamptz last_login_at "null"
+    }
+
+    card_products {
+        int id PK
+        string issuer "null, 카드사"
+        string name "상품명"
+        bigint annual_fee "null"
+        bigint monthly_target "null, 전월실적 목표"
+        text memo "null"
+        int created_by FK "null, 만든 계정"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
     ledgers {
         int id PK
-        string name UK
+        string name "계정 안에서 유일"
         string description "null"
         bool is_default "기본 장부"
         int sort_order
@@ -200,18 +244,17 @@ erDiagram
 
     payment_methods {
         int id PK
-        string name UK
+        string name "계정 안에서 유일"
         PaymentKind kind
         string issuer "null, 카드사/은행"
-        string product_name "null"
+        int card_product_id FK "null, 카드 상품 (가족카드는 본인 카드 것)"
+        int parent_id "null, 가족카드면 본인 카드"
         string last4 "null, 카드번호 끝 4자리"
         string aliases "null, 쉼표 구분 별칭"
         int account_id FK "null, 결제 계좌"
         int payment_day "null, 결제일 1~31"
         int closing_day "null, 마감일 (31=말일)"
         int closing_month_offset "null, 0 당월 / -1 전월 / -2 전전월"
-        bigint monthly_target "null, 전월실적 목표"
-        bigint annual_fee "null"
         string expires_on "null, YYYY-MM"
         string color "null"
         string memo "null"
@@ -222,7 +265,7 @@ erDiagram
 
     card_benefits {
         int id PK
-        int payment_method_id FK
+        int card_product_id FK
         string name
         string kind "DISCOUNT/POINT/MILEAGE"
         double rate "1원당 혜택, 0.1 = 10%, 마일리지 1/1500 = 1,500원당 1마일"
@@ -237,7 +280,7 @@ erDiagram
 
     card_tiers {
         int id PK
-        int payment_method_id FK
+        int card_product_id FK
         bigint min_spending "전월실적 이상이면"
         bigint benefit_limit "월 통합 혜택 한도"
     }
@@ -279,7 +322,7 @@ erDiagram
         int recurring_rule_id FK "null"
         string recurring_month "null, 규칙 대상 월 YYYY-MM"
         TxSource source
-        string external_id UK "null, 자동 입력 중복 방지 키"
+        string external_id "null, 자동 입력 중복 방지 키 (계정 안에서 유일)"
         string raw_text "null, 자동 입력 원문 (text 그대로, 없으면 받은 필드 JSON)"
         int split_parent_id "null, 분할해 옮긴 거래면 원래 거래"
         int transfer_ledger_id "null, 장부 이체면 받는 장부 (ledger_id가 보내는 장부)"
@@ -302,7 +345,7 @@ erDiagram
     }
 ```
 
-`api_tokens`는 다른 테이블과 관계가 없습니다.
+`api_tokens`는 계정(`user_id`) 말고는 다른 테이블과 관계가 없습니다.
 
 ### 외래 키 삭제 동작
 
@@ -310,13 +353,16 @@ erDiagram
 
 | 컬럼 | 참조 | ON DELETE |
 |---|---|---|
+| 계정별 테이블의 `user_id` | `users` | CASCADE (계정을 지우면 그 계정 데이터도) |
+| `card_products.created_by` | `users` | SET NULL (그 뒤로는 관리자만 고침) |
+| `payment_methods.card_product_id` | `card_products` | SET NULL (앱은 고른 카드가 있는 상품을 지우지 않음) |
 | `categories.ledger_id`, `plan_items.ledger_id`, `recurring_rules.ledger_id` | `ledgers` | CASCADE |
 | `transactions.ledger_id` | `ledgers` | **RESTRICT** (거래가 있는 장부는 지울 수 없음) |
 | `transactions.category_id`, `recurring_rules.category_id` | `categories` | SET NULL |
 | `transactions.payment_method_id`, `recurring_rules.payment_method_id` | `payment_methods` | SET NULL |
 | `transactions.recurring_rule_id` | `recurring_rules` | SET NULL |
 | `transactions.split_parent_id`, `transactions.transfer_ledger_id`, `recurring_rules.transfer_ledger_id` | `transactions` / `ledgers` | (외래 키 없음, 인덱스만 — SQLite는 ALTER TABLE로 외래 키를 붙일 수 없음. 장부 삭제는 받은 이체·이체 규칙이 있으면 앱이 거절) |
-| `card_benefits.payment_method_id`, `card_tiers.payment_method_id` | `payment_methods` | CASCADE |
+| `card_benefits.card_product_id`, `card_tiers.card_product_id` | `card_products` | CASCADE (혜택을 지우면 모든 계정의 거래·반복 규칙 혜택 지정도) |
 | `payment_methods.account_id` | `accounts` | SET NULL |
 | `account_balances.account_id` | `accounts` | CASCADE |
 | `transaction_benefits.transaction_id` / `.card_benefit_id` | `transactions` / `card_benefits` | CASCADE |
@@ -327,10 +373,14 @@ erDiagram
 
 | 이름 | 컬럼 | 용도 |
 |---|---|---|
-| (컬럼 UNIQUE) | `ledgers.name`, `payment_methods.name`, `api_tokens.token_hash` | 이름·토큰 조회 |
+| (컬럼 UNIQUE) | `api_tokens.token_hash` | 토큰 조회 |
+| `uq_users_google_sub` | `users (google_sub)` | Google 계정 하나에 계정 하나 |
+| `uq_ledgers_user_name`, `uq_payment_methods_user_name` | `(user_id, name)` | 계정 안 장부·결제수단 이름 중복 방지 |
+| `ix_*_user` | `categories`·`plan_items`·`accounts`·`recurring_rules`·`api_tokens (user_id)`, `transactions (user_id, date)` | 계정별 조회 |
 | `uq_categories_ledger_name` | `categories (ledger_id, name)` | 장부 안 카테고리 이름 중복 방지 |
 | `uq_transactions_recurring_occurrence` | `transactions (recurring_rule_id, recurring_month)` | 규칙 하나당 한 달에 한 건. 일반 거래는 둘 다 NULL이라 영향 없음 |
-| `uq_transactions_external_id` | `transactions (external_id)` | 자동 입력 중복 방지 |
+| `uq_transactions_user_external` | `transactions (user_id, external_id)` | 자동 입력 중복 방지 (계정마다) |
+| `ix_card_*_product`, `ix_payment_methods_card_product` | `card_benefits`·`card_tiers`·`payment_methods (card_product_id)` | 상품별 혜택·구간·사용 카드 |
 | `ix_transactions_*` | `(date)`, `(ledger_id, date)`, `(payment_method_id, date)`, `(status, date)`, `(description)`, `(split_parent_id)`, `(transfer_ledger_id, date)` | 월별·카드별·상태별 조회, 가맹점 자동완성, 분할 묶음, 받은 이체 |
 | `ix_account_balances_account_date` | `account_balances (account_id, balance_date)` | 잔고 이력 |
 | `ix_transaction_benefits_card_benefit` | `transaction_benefits (card_benefit_id)` | 혜택별 거래 조회 |

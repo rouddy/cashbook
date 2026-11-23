@@ -122,30 +122,44 @@ done
 
 (PV는 PVC가 바인딩된 뒤, 즉 서버 Pod가 한 번 뜬 뒤에 생깁니다.)
 
-## 3. Secret (비밀번호·DB 연결)
+## 3. Secret (Google 로그인·DB 연결)
 
-`cashbook-secret`에 두 값이 모두 있어야 합니다. 하나라도 없으면 Pod가 `CreateContainerConfigError`로 시작하지 않습니다.
+`cashbook-secret`에 아래 필수 키가 모두 있어야 합니다. 하나라도 없으면 Pod가 `CreateContainerConfigError`로 시작하지 않습니다.
+Google OAuth 클라이언트는 [루트 README의 계정과 Google 로그인](../README.md#계정과-google-로그인)대로 만들고,
+승인된 리디렉션 URI에 `https://cashbook.ster.pe.kr/api/auth/google/callback`(ConfigMap의 `CASHBOOK_PUBLIC_URL` + `/api/auth/google/callback`)을 넣습니다.
 
 | 키 | 값 |
 |---|---|
-| `CASHBOOK_PASSWORD` | 웹 로그인 비밀번호. 외부 주소(`0.0.0.0`)로 열려면 필수 |
+| `CASHBOOK_GOOGLE_CLIENT_ID` | Google OAuth 클라이언트 ID. 필수 |
+| `CASHBOOK_GOOGLE_CLIENT_SECRET` | Google OAuth 클라이언트 보안 비밀. 필수 |
+| `CASHBOOK_OWNER_EMAIL` | 기존 데이터(계정 id 1)를 넘겨받을 Google 계정 이메일. 관리자이기도 함 (선택) |
+| `CASHBOOK_ADMIN_EMAILS` | 쉼표 구분, 모든 카드 상품을 고칠 수 있는 계정 (선택) |
 | `DATABASE_URL` | SQLite: `sqlite:///data/cashbook.db?mode=rwc` (데이터 PVC, 스크립트가 이 경로를 씀)<br>MySQL: `mysql://사용자:비밀번호@호스트:3306/DB이름` (7장) |
 
 ```bash
 # SQLite
 kubectl -n cashbook create secret generic cashbook-secret \
-  --from-literal=CASHBOOK_PASSWORD='긴-비밀번호' \
+  --from-literal=CASHBOOK_GOOGLE_CLIENT_ID='....apps.googleusercontent.com' \
+  --from-literal=CASHBOOK_GOOGLE_CLIENT_SECRET='GOCSPX-...' \
+  --from-literal=CASHBOOK_OWNER_EMAIL='me@gmail.com' \
   --from-literal=DATABASE_URL='sqlite:///data/cashbook.db?mode=rwc'
 
 # MySQL (비밀번호의 @ : / ? # % 공백 등은 URL 인코딩: python3 -c 'import sys,urllib.parse as u;print(u.quote(sys.argv[1],safe=""))' '비밀번호')
 kubectl -n cashbook create secret generic cashbook-secret \
-  --from-literal=CASHBOOK_PASSWORD='긴-비밀번호' \
+  --from-literal=CASHBOOK_GOOGLE_CLIENT_ID='....apps.googleusercontent.com' \
+  --from-literal=CASHBOOK_GOOGLE_CLIENT_SECRET='GOCSPX-...' \
+  --from-literal=CASHBOOK_OWNER_EMAIL='me@gmail.com' \
   --from-literal=DATABASE_URL='mysql://cashbook:URL인코딩한-비밀번호@mysql.db.svc.cluster.local:3306/cashbook'
 ```
 
+**비밀번호 로그인에서 옮길 때**: 예전 Secret의 `CASHBOOK_PASSWORD`는 더 쓰지 않습니다(남아 있으면 로그에 알림만).
+위 키를 더한 Secret으로 바꾸고 새 이미지로 배포하면, 시작할 때 마이그레이션이 기존 데이터를 계정 id 1로 옮기고
+`CASHBOOK_OWNER_EMAIL` 계정으로 처음 로그인할 때 그 데이터를 넘겨받습니다. 기존 API 토큰은 그 계정 것이라 휴대폰 앱은 그대로 동작합니다.
+배포 전에 `k8s/scripts/backup-db.sh before-accounts.db`로 백업을 받아 두세요.
+
 값을 바꿀 때는 같은 명령에 `--dry-run=client -o yaml | kubectl apply -f -`를 붙이고 `kubectl -n cashbook rollout restart deployment/cashbook`으로 다시 띄웁니다
 (처음 한 번 나오는 `last-applied-configuration` 경고는 무시해도 됩니다).
-비밀번호를 바꾸면 기존 로그인 세션은 무효가 되고, API 토큰은 그대로 씁니다.
+로그인 세션은 계정마다 30일 유지되고, `secret.key`를 바꾸면 모두 다시 로그인합니다. API 토큰은 그대로 씁니다.
 
 세션 쿠키 암호화 키는 처음 시작할 때 `/data/secret.key`(데이터 PVC)에 만들어 두므로 재시작해도 로그인이 유지됩니다. MySQL을 써도 이 PVC는 그대로 둡니다.
 
@@ -420,7 +434,9 @@ k8s/scripts/backup-db.sh before-mysql.db                       # 만약을 위�
 kubectl -n cashbook scale deployment/cashbook --replicas=0
 
 kubectl -n cashbook create secret generic cashbook-secret \
-  --from-literal=CASHBOOK_PASSWORD='긴-비밀번호' \
+  --from-literal=CASHBOOK_GOOGLE_CLIENT_ID='....apps.googleusercontent.com' \
+  --from-literal=CASHBOOK_GOOGLE_CLIENT_SECRET='GOCSPX-...' \
+  --from-literal=CASHBOOK_OWNER_EMAIL='me@gmail.com' \
   --from-literal=DATABASE_URL='mysql://cashbook:...@mysql.db.svc.cluster.local:3306/cashbook' \
   --dry-run=client -o yaml | kubectl apply -f -
 
@@ -470,10 +486,12 @@ SKIP_BUILD=1 WEB_DIST=<푼 디렉터리> k8s/scripts/deploy-web.sh
 | `CASHBOOK_WEB_DIR` | `/web/current` | 웹 빌드 PVC의 현재 릴리스 |
 | `CASHBOOK_TZ` | `Asia/Seoul` | "오늘" 기준 |
 | `CASHBOOK_PLAN_MONTHS` | `2` | 반복 규칙 예정 거래 개월 수 |
+| `CASHBOOK_PUBLIC_URL` | `https://cashbook.ster.pe.kr` | 접속 주소, Google 로그인 리디렉션 URI의 앞부분 |
 | `CASHBOOK_SECURE_COOKIE` | `1` | HTTPS Ingress 뒤 |
 | `CASHBOOK_ALLOWED_ORIGINS` | `https://cashbook.ster.pe.kr` | 브라우저 요청 Origin 허용 (앞단 프록시가 Host를 바꿔도 통과) |
 | `ROCKET_ADDRESS`, `ROCKET_PORT` | `0.0.0.0`, `8000` | |
-| `CASHBOOK_PASSWORD` | Secret `cashbook-secret` | 필수 |
+| `CASHBOOK_GOOGLE_CLIENT_ID`, `CASHBOOK_GOOGLE_CLIENT_SECRET` | Secret `cashbook-secret` | 필수 |
+| `CASHBOOK_OWNER_EMAIL`, `CASHBOOK_ADMIN_EMAILS` | Secret `cashbook-secret` | 선택 |
 | `DATABASE_URL` | Secret `cashbook-secret` | 필수. `sqlite:///data/cashbook.db?mode=rwc` 또는 `mysql://...` (3장) |
 
 나머지 변수와 의미는 [루트 README의 설정](../README.md#설정-환경-변수).
@@ -481,19 +499,18 @@ SKIP_BUILD=1 WEB_DIST=<푼 디렉터리> k8s/scripts/deploy-web.sh
 보안 관련 동작
 - 서버는 브라우저 요청의 `Origin`이 `Host`와 다르면 403으로 막습니다. Ingress가 Host를 그대로 넘기면 문제없고,
   바꾸는 구성이면 `X-Forwarded-Host`를 넘기거나 `CASHBOOK_ALLOWED_ORIGINS`에 공개 주소를 넣습니다.
-- 로그인 실패 제한은 `X-Real-IP` 헤더(ingress-nginx·Traefik이 붙임)로 클라이언트를 구분합니다.
-  servicelb나 앞단 nginx(stream)를 거치면 Traefik이 실제 클라이언트 IP 대신 중간 주소를 보게 되어 모든 접속이 한 IP로 묶입니다
-  (그래도 동작은 하지만 다른 곳의 실패가 내 로그인을 10분 막을 수 있음). 실제 IP가 필요하면 Traefik Service의
-  `externalTrafficPolicy: Local`, 앞단 nginx면 PROXY protocol(`proxy_protocol on` + Traefik `proxyProtocol.trustedIPs`)을 씁니다.
+- 서버는 Google(`oauth2.googleapis.com`, `openidconnect.googleapis.com`)에 HTTPS로 나가야 로그인을 마칠 수 있습니다.
+  이그레스를 막는 NetworkPolicy를 쓰면 이 두 곳을 열어 둡니다. 인증서는 서버에 내장된 루트 인증서로 확인합니다.
 - Pod는 root가 아닌 uid 10001, 읽기 전용 루트 파일시스템, 모든 capability 제거로 실행합니다. 쓰는 곳은 `/data`, `/tmp`뿐입니다.
-- 이미지에는 DB·비밀번호가 들어가지 않습니다(비밀번호·DB 연결 정보는 Secret, 데이터는 PVC 또는 MySQL).
+- 이미지에는 DB·비밀 값이 들어가지 않습니다(Google 클라이언트·DB 연결 정보는 Secret, 데이터는 PVC 또는 MySQL).
 
 ## 문제 해결
 
 | 증상 | 확인 |
 |---|---|
 | Pod `Pending` | `kubectl -n cashbook describe pod` — PVC가 Bound인지, StorageClass가 있는지 |
-| `CreateContainerConfigError` | Secret `cashbook-secret` 또는 키 `CASHBOOK_PASSWORD`·`DATABASE_URL`이 없음 (3장) |
+| `CreateContainerConfigError` | Secret `cashbook-secret` 또는 키 `CASHBOOK_GOOGLE_CLIENT_ID`·`CASHBOOK_GOOGLE_CLIENT_SECRET`·`DATABASE_URL`이 없음 (3장) |
+| 로그인 화면에서 Google이 `redirect_uri_mismatch` | Google 콘솔의 승인된 리디렉션 URI가 `CASHBOOK_PUBLIC_URL` + `/api/auth/google/callback`과 정확히 같은지 (서버 시작 로그에 출력) |
 | `CrashLoopBackOff`, 로그에 DB 연결 오류 | `DATABASE_URL`(호스트·포트·사용자·URL 인코딩한 비밀번호), MySQL 권한(`GRANT ALL ON cashbook.*`), 네트워크 |
 | `ImagePullBackOff` | 이미지 이름·태그(`docker buildx imagetools inspect rouddy/cashbook:<태그>`), 비공개 저장소면 `imagePullSecrets`, 노드 아키텍처(amd64/arm64) |
 | 작업용 Pod·Job이 `ContainerCreating`에서 멈춤, `Multi-Attach error` | RWO 볼륨이 다른 노드의 서버에 붙어 있음. 같은 노드에 뜨도록 podAffinity가 있지만 노드 자원이 부족하면 실패 — 서버를 잠시 0개로 내린 뒤 다시 |
