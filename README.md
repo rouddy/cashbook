@@ -28,7 +28,7 @@ Google 계정으로 로그인하고, 장부·거래 등은 계정마다 따로 �
 | 카드별 내역 `/card-transactions` | 카드별 월 이용 내역과 혜택액 (이용월/결제월 기준). 내용 자동완성은 최근 3개월 내역에서 찾고, 같은 내용이라도 항목이 다르면 따로 보여 줌 |
 | 은행 잔고 `/accounts` | 계좌, 잔고 기록과 이력, 여유자금 포함 여부 |
 | 지출 계획 `/plan` | 카테고리 예산, 배분·구성원 용돈, 반복 지출·수입(정기수익)·장부 이체 규칙 |
-| 설정 `/settings` | 로그인한 계정, 장부, 카드 외 결제수단, API 토큰과 자동 입력 사용법 |
+| 설정 `/settings` | 로그인한 계정, 장부, 카드 외 결제수단, API 토큰, AI 연결(MCP)과 자동 입력 사용법 |
 | 로그인 `/login` | Google로 로그인 (Google 로그인을 설정한 서버) |
 
 화면별 구성, URL 파라미터, 쓰는 API는 [web/README.md](web/README.md#화면-명세)에 있습니다.
@@ -122,7 +122,7 @@ CASHBOOK_OWNER_EMAIL=me@gmail.com ROCKET_ADDRESS=0.0.0.0 ./target/release/cashbo
 |---|---|---|
 | `DATABASE_URL` | `sqlite://data/cashbook.db?mode=rwc` | SQLite 파일 (실행 위치 기준) 또는 MySQL `mysql://사용자:비밀번호@호스트:3306/DB` (비밀번호 특수문자는 URL 인코딩) |
 | `CASHBOOK_GOOGLE_CLIENT_ID`, `CASHBOOK_GOOGLE_CLIENT_SECRET` | (없음) | Google OAuth 클라이언트. 설정하면 Google 로그인과 API 토큰 인증을 요구 (없으면 로그인 없이 기본 계정, localhost 전용) |
-| `CASHBOOK_PUBLIC_URL` | (없음) | 사용자가 접속하는 주소 (예: `https://cashbook.example.com`). Google 로그인에 필요, 리디렉션 URI는 이 주소 + `/api/auth/google/callback`. https면 쿠키에 Secure |
+| `CASHBOOK_PUBLIC_URL` | (없음) | 사용자가 접속하는 주소 (예: `https://cashbook.example.com`). Google 로그인에 필요, 리디렉션 URI는 이 주소 + `/api/auth/google/callback`. MCP OAuth의 발급자·리소스 주소도 이 값 기준. https면 쿠키에 Secure |
 | `CASHBOOK_OWNER_EMAIL` | (없음) | 이 Google 계정이 처음 로그인하면 기존 데이터(계정 id 1)를 넘겨받는다. 관리자이기도 하다 |
 | `CASHBOOK_ADMIN_EMAILS` | (없음) | 쉼표 구분. 모든 카드 상품을 고칠 수 있는 계정 |
 | `CASHBOOK_TZ` | `Asia/Seoul` | "오늘" 기준 시간대 |
@@ -272,12 +272,35 @@ curl -X POST https://<서버>/api/ingest -H 'Authorization: Bearer cb_...' \
 
 GraphQL로도 같은 기능을 씁니다 (로그인 세션 또는 API 토큰): `mutation { ingestTransaction(input: {text: "..."}) { created duplicate transaction { id } } }`
 
+## AI 연결 (MCP)
+
+`POST /api/mcp` — AI 앱이 이 계정의 가계부를 **조회만** 하는 MCP 서버(Streamable HTTP, 세션 없는 JSON-RPC).
+
+| 도구 | 내용 |
+|---|---|
+| `get_context` | 오늘 날짜, 장부·카테고리·결제수단·계좌·구성원 (다른 도구에 넘길 id) |
+| `search_transactions` | 기간·장부·카테고리·결제수단·구성원·검색어로 거래와 합계 (기본 확정 거래, 최신순 50건) |
+| `get_monthly_summary` | 월 소비·수입·카테고리별 예산/평균 비교·추이, 장부를 정하면 이체·월잔액 |
+| `get_available_funds` | 여유자금과 카드별 다음 결제 |
+| `get_card_performance` | 카드 전월실적·구간·혜택 |
+| `get_card_statement` | 카드 한 장의 결제월 청구서 |
+| `list_recurring_rules` | 반복 규칙과 다음 날짜 |
+
+거래마다 `kind`를 붙입니다: 지출 카테고리의 − 금액은 **카드면 환불**, 현금·계좌이체 등 **카드가 아니면 정산**(남의 몫을 대신 내거나 회사 물건을 사고 돌려받은 돈)으로 봅니다. 계산은 둘 다 같아서(소비에서 빠짐, 카드면 실적도) 따로 저장하지 않고 결제수단으로 정합니다.
+
+연결:
+- **OpenAI Dots · ChatGPT**: 설정 → 플러그인 → 커스텀 MCP 서버 추가 → 주소 `https://<서버>/api/mcp`, 인증 OAuth. 이 앱들은 정적 토큰을 보내지 못하므로 서버가 OAuth 인가 서버 역할을 합니다 — 동적 클라이언트 등록(`/api/oauth/register`), 승인 화면(`/oauth/authorize`, 기존 Google 로그인 세션으로 계정 확인), 토큰(`/api/oauth/token`, PKCE S256 필수), 메타데이터(`/.well-known/oauth-protected-resource/api/mcp`, `/.well-known/oauth-authorization-server`). 액세스 토큰은 1시간, 리프레시 토큰은 쓸 때마다 바뀌고 90일 동안 쓰지 않으면 만료됩니다. OAuth 토큰은 `cashbook:read` 범위로 MCP에만 쓰고 GraphQL·자동 입력에는 못 씁니다. 연결은 설정 → AI 연결에서 끊습니다.
+- **Claude Code 등 헤더를 넣을 수 있는 클라이언트**: API 토큰도 받습니다. `claude mcp add --transport http cashbook https://<서버>/api/mcp --header "Authorization: Bearer cb_..."`
+- **로컬 실행(Google 로그인 미설정)**: `http://localhost:8000/api/mcp`에 인증 없이 기본 계정으로 연결됩니다.
+
+인가 코드는 서버 메모리에 5분만 두므로(replicas 1 전제) 승인 도중 서버가 재시작되면 다시 연결합니다.
+
 ## GraphQL API
 
 엔드포인트 `POST /api/graphql` (`Content-Type: application/json`, 로그인 세션 또는 API 토큰).
 전체 스키마는 `/api/graphiql`에서 확인하세요. Query·Mutation 목록과 리졸버 위치는 [server/README.md](server/README.md#graphql-요청)에 있습니다.
 
-그 밖의 REST: `GET /api/session`(로그인한 계정), `POST /api/logout`, `GET /api/auth/google?next=/경로`(Google 로그인 시작) → `GET /api/auth/google/callback`, `GET /api/health`.
+그 밖의 REST: MCP·OAuth는 위 'AI 연결 (MCP)', `GET /api/session`(로그인한 계정), `POST /api/logout`, `GET /api/auth/google?next=/경로`(Google 로그인 시작) → `GET /api/auth/google/callback`, `GET /api/health`.
 
 ## 데이터베이스
 
