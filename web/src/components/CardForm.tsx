@@ -1,37 +1,13 @@
 import { useState, type FormEvent } from 'react'
 
 import { gql } from '../api/client'
-import { type RefMaps, useMutate } from '../api/hooks'
-import { CREATE_PM, SUGGEST_BILLING, UPDATE_PM } from '../api/queries'
-import type { BenefitKind, PaymentKind, PaymentMethod } from '../api/types'
-import { BENEFIT_KIND_LABEL, BENEFIT_KINDS, BENEFIT_UNIT, rateToWonPerMile, wonPerMileToRate } from '../lib/benefits'
-import { familyCardsOf } from '../lib/cards'
-import { PAYMENT_KIND_LABEL, parseAmount, percentToRate, rateToPercent, won } from '../lib/format'
+import { type RefMaps, useGql, useMutate } from '../api/hooks'
+import { CARD_PRODUCTS_QUERY, CREATE_PM, SUGGEST_BILLING, UPDATE_PM } from '../api/queries'
+import type { CardProduct, PaymentKind, PaymentMethod } from '../api/types'
+import { familyCardsOf, ISSUERS } from '../lib/cards'
+import { PAYMENT_KIND_LABEL, won } from '../lib/format'
+import CardProductForm from './CardProductForm'
 import { useToast } from './Toast'
-
-const ISSUERS = ['KB국민', '신한', '현대', '삼성', '롯데', '하나', '우리', 'BC', 'NH농협', 'IBK기업', '씨티', '카카오뱅크', '토스']
-
-interface BenefitRow {
-  id?: number
-  name: string
-  kind: BenefitKind
-  /** 할인·포인트는 %, 마일리지는 "N원당 1마일"의 N */
-  rateInput: string
-  minAmount: string
-  perTxMax: string
-  monthlyCap: string
-  sharesCardLimit: boolean
-  excludesPerformance: boolean
-  stackable: boolean
-}
-
-const rateToInput = (kind: BenefitKind, rate: number) => (kind === 'MILEAGE' ? rateToWonPerMile(rate) : rateToPercent(rate))
-const inputToRate = (kind: BenefitKind, input: string) => (kind === 'MILEAGE' ? wonPerMileToRate(input) : percentToRate(input))
-
-interface TierRow {
-  minSpending: string
-  benefitLimit: string
-}
 
 const numStr = (v: number | null | undefined) => (v == null ? '' : String(v))
 
@@ -73,36 +49,25 @@ export default function CardForm({
   const [name, setName] = useState(card?.name ?? (preset ? `${preset.name} 가족` : ''))
   const [kind, setKind] = useState<PaymentKind>(card?.kind ?? kinds[0])
   const [issuer, setIssuer] = useState(card?.issuer ?? preset?.issuer ?? '')
-  const [productName, setProductName] = useState(card?.productName ?? preset?.productName ?? '')
   const [last4, setLast4] = useState(card?.last4 ?? '')
   const [aliases, setAliases] = useState((card?.aliases ?? []).join(', '))
   const [accountId, setAccountId] = useState(numStr(card?.accountId))
   const [paymentDay, setPaymentDay] = useState(numStr(card?.paymentDay))
   const [closingDay, setClosingDay] = useState(numStr(card?.closingDay))
   const [closingOffset, setClosingOffset] = useState(card?.closingMonthOffset != null ? String(card.closingMonthOffset) : '-1')
-  const [monthlyTarget, setMonthlyTarget] = useState(numStr(card?.monthlyTarget))
-  const [annualFee, setAnnualFee] = useState(numStr(card?.annualFee))
   const [expiresOn, setExpiresOn] = useState(card?.expiresOn ?? '')
   const [memo, setMemo] = useState(card?.memo ?? '')
-  // 가족카드의 혜택·구간은 본인 카드 것이라 id 없이 담는다 (가족카드에서 풀면 이 카드 설정으로 복사)
-  const ownBenefits = card?.parentId == null
-  const [benefits, setBenefits] = useState<BenefitRow[]>(
-    (card?.benefits ?? []).map((b) => ({
-      id: ownBenefits ? b.id : undefined,
-      name: b.name,
-      kind: b.kind,
-      rateInput: rateToInput(b.kind, b.rate),
-      minAmount: numStr(b.minAmount),
-      perTxMax: numStr(b.perTxMax),
-      monthlyCap: numStr(b.monthlyCap),
-      sharesCardLimit: b.sharesCardLimit,
-      excludesPerformance: b.excludesPerformance,
-      stackable: b.stackable,
-    })),
-  )
-  const [tiers, setTiers] = useState<TierRow[]>((card?.tiers ?? []).map((t) => ({ minSpending: String(t.minSpending), benefitLimit: String(t.benefitLimit) })))
+  // 카드 상품(전월실적 목표·구간·혜택·연회비)은 모든 계정이 함께 쓴다. 가족카드는 본인 카드의 상품
+  const products = useGql<{ cardProducts: CardProduct[] }>(['cardProducts'], CARD_PRODUCTS_QUERY)
+  const productList = products.data?.cardProducts ?? []
+  const [productId, setProductId] = useState(numStr(card ? card.cardProductId : preset?.cardProductId))
+  const [productFilter, setProductFilter] = useState('')
+  const [editingProduct, setEditingProduct] = useState<'new' | CardProduct | null>(null)
+  const selectedProduct = productList.find((p) => String(p.id) === productId)
+  const norm = (t: string) => t.replace(/\s/g, '').toLowerCase()
+  const visibleProducts = productList.filter((p) => String(p.id) === productId || norm(p.label).includes(norm(productFilter)))
 
-  // 가족카드는 종류·결제 계좌·정산 일정이 본인 카드를 따르고 실적 목표·혜택·구간을 따로 두지 않는다
+  // 가족카드는 종류·결제 계좌·정산 일정·카드 상품이 본인 카드를 따른다
   const effectiveKind = family && parent ? parent.kind : kind
   const isCredit = !family && effectiveKind === 'CREDIT_CARD'
   const isCard = effectiveKind === 'CREDIT_CARD' || effectiveKind === 'CHECK_CARD'
@@ -114,8 +79,9 @@ export default function CardForm({
     const p = refMaps.paymentMethodById.get(Number(value) || -1)
     if (!p) return
     if (!issuer.trim()) setIssuer(p.issuer ?? '')
-    if (!productName.trim()) setProductName(p.productName ?? '')
     if (!name.trim()) setName(`${p.name} 가족`)
+    // 가족카드에서 풀 때 본인 카드의 상품을 그대로 쓰도록 미리 맞춰 둔다
+    setProductId(numStr(p.cardProductId))
   }
 
   const toggleFamily = (on: boolean) => {
@@ -135,7 +101,6 @@ export default function CardForm({
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    const amountOrNull = (s: string) => (s.trim() === '' ? null : parseAmount(s))
     if (family && !parent) {
       toast('가족카드의 본인 카드를 고르세요', 'error')
       return
@@ -145,58 +110,32 @@ export default function CardForm({
       name: name.trim(),
       kind: effectiveKind,
       issuer: issuer || null,
-      productName: productName || null,
+      // 가족카드는 서버가 본인 카드의 상품으로 맞춘다
+      cardProductId: ownSettings && productId ? Number(productId) : null,
       last4: last4 || null,
       aliases: aliases.split(',').map((a) => a.trim()).filter(Boolean),
       accountId: !family && accountId ? Number(accountId) : null,
       paymentDay: isCredit && billingFilled ? Number(paymentDay) : null,
       closingDay: isCredit && billingFilled ? Number(closingDay) : null,
       closingMonthOffset: isCredit && billingFilled ? Number(closingOffset) : null,
-      monthlyTarget: family ? null : amountOrNull(monthlyTarget),
-      annualFee: amountOrNull(annualFee),
       expiresOn: expiresOn || null,
       memo: memo || null,
-      benefits: ownSettings
-        ? benefits
-            .filter((b) => b.name.trim())
-            .map((b) => ({
-              id: b.id ?? null,
-              name: b.name.trim(),
-              kind: b.kind,
-              rate: inputToRate(b.kind, b.rateInput),
-              minAmount: amountOrNull(b.minAmount),
-              perTxMax: amountOrNull(b.perTxMax),
-              monthlyCap: amountOrNull(b.monthlyCap),
-              sharesCardLimit: b.sharesCardLimit,
-              excludesPerformance: b.excludesPerformance,
-              stackable: b.stackable,
-            }))
-        : [],
-      tiers: ownSettings
-        ? tiers
-            .filter((t) => t.minSpending.trim() && t.benefitLimit.trim())
-            .map((t) => ({ minSpending: parseAmount(t.minSpending) ?? 0, benefitLimit: parseAmount(t.benefitLimit) ?? 0 }))
-        : [],
     }
     if (!input.name) {
       toast('이름을 입력하세요', 'error')
-      return
-    }
-    // 이름만 지운 기존 혜택이 조용히 삭제되지 않게 막는다 (지우려면 행의 삭제 버튼)
-    if (ownSettings && benefits.some((b) => !b.name.trim() && (b.id != null || b.rateInput.trim() !== ''))) {
-      toast('혜택 이름을 입력하세요. 혜택을 없애려면 그 행의 삭제를 누르세요', 'error')
       return
     }
     if (isCredit && (paymentDay === '') !== (closingDay === '')) {
       toast('정산 일정은 결제일과 마감일을 모두 입력하세요', 'error')
       return
     }
-    if (card && card.parentId == null && family && (card.benefits.length > 0 || card.tiers.length > 0)) {
-      const msg = '가족카드로 바꾸면 이 카드의 혜택·전월실적 구간 설정과 거래에 고른 혜택이 지워지고, 본인 카드의 실적·혜택을 함께 씁니다. 계속할까요?'
+    // 카드 상품이 바뀌면 이 카드 거래·반복 규칙에 고른 이전 상품의 혜택 표시를 서버가 지운다
+    const nextProduct = family ? (parent?.cardProductId ?? null) : input.cardProductId
+    if (card && card.cardProductId != null && nextProduct !== card.cardProductId) {
+      const msg = family
+        ? '가족카드로 바꾸면 본인 카드의 상품으로 실적·혜택을 함께 계산하고, 이 카드 거래에 고른 이전 상품의 혜택 표시가 지워집니다. 계속할까요?'
+        : '카드 상품을 바꾸면 이 카드 거래·반복 규칙에 고른 이전 상품의 혜택 표시가 지워집니다. 계속할까요?'
       if (!window.confirm(msg)) return
-    }
-    if (card && card.parentId != null && !family) {
-      if (!window.confirm('가족카드에서 풀면 이 카드 거래에 고른 본인 카드 혜택이 지워집니다. 계속할까요?')) return
     }
     if (card) {
       if (!(await run(UPDATE_PM, { id: card.id, input }))) return
@@ -208,6 +147,25 @@ export default function CardForm({
       toast('추가했습니다')
       onDone(r.createPaymentMethod.id)
     }
+  }
+
+  if (editingProduct) {
+    const editing = editingProduct === 'new' ? undefined : editingProduct
+    return (
+      <div className="stack">
+        <h3>{editing ? `카드 상품 수정 · ${editing.label}` : '새 카드 상품'}</h3>
+        <CardProductForm
+          product={editing}
+          initialIssuer={issuer}
+          onDone={(id) => {
+            setProductId(String(id))
+            setProductFilter('')
+            setEditingProduct(null)
+          }}
+          onCancel={() => setEditingProduct(null)}
+        />
+      </div>
+    )
   }
 
   return (
@@ -267,12 +225,6 @@ export default function CardForm({
             ))}
           </datalist>
         </label>
-        {isCard && (
-          <label className="field">
-            상품명
-            <input className="input" value={productName} onChange={(e) => setProductName(e.target.value)} placeholder="예: MG+ S 하나카드" />
-          </label>
-        )}
         {isCard && (
           <label className="field">
             카드번호 끝 4자리
@@ -345,20 +297,41 @@ export default function CardForm({
         </fieldset>
       )}
 
+      {ownSettings && (
+        <fieldset className="panel" style={{ padding: 14, border: '1px solid var(--border)' }}>
+          <legend style={{ fontWeight: 650, padding: '0 6px' }}>카드 상품</legend>
+          <div className="row" style={{ flexWrap: 'wrap', alignItems: 'end' }}>
+            {productList.length > 8 && (
+              <input className="input" placeholder="상품 검색" value={productFilter} onChange={(e) => setProductFilter(e.target.value)} style={{ width: 160 }} aria-label="카드 상품 검색" />
+            )}
+            <select className="input" value={productId} onChange={(e) => setProductId(e.target.value)} aria-label="카드 상품" style={{ minWidth: 220 }}>
+              <option value="">선택 안 함 (실적·혜택 계산 안 함)</option>
+              {visibleProducts.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="btn" onClick={() => setEditingProduct('new')}>
+              새 상품
+            </button>
+            {selectedProduct?.canEdit && (
+              <button type="button" className="btn ghost" onClick={() => setEditingProduct(selectedProduct)}>
+                상품 수정
+              </button>
+            )}
+          </div>
+          {selectedProduct ? (
+            <ProductSummary product={selectedProduct} />
+          ) : (
+            <p className="small text-2" style={{ margin: '10px 0 0' }}>
+              전월실적 목표·구간·혜택·연회비는 카드 상품에 있고 모든 계정이 함께 씁니다. 목록에 없으면 새 상품을 만드세요.
+            </p>
+          )}
+        </fieldset>
+      )}
+
       <div className="form-grid">
-        {ownSettings && (
-          <label className="field">
-            전월실적 목표
-            <input className="input num" inputMode="numeric" value={monthlyTarget} onChange={(e) => setMonthlyTarget(e.target.value)} placeholder="예: 300000" />
-          </label>
-        )}
-        {isCard && (
-          <label className="field">
-            연회비
-            <input className="input num" inputMode="numeric" value={annualFee} onChange={(e) => setAnnualFee(e.target.value)} />
-            {family && <span className="hint">가족카드 발급·갱신 때 청구되는 연회비</span>}
-          </label>
-        )}
         {isCard && (
           <label className="field">
             유효기간
@@ -379,167 +352,11 @@ export default function CardForm({
         <div className="notice info">
           <span className="notice-icon">i</span>
           <span>
-            {parent.name}의 결제 계좌·정산 일정({parent.billingConfigured ? `매월 ${parent.paymentDay}일 결제` : '미설정'})을 따르고, 전월실적은 {parent.name} 이용과
-            합쳐 계산합니다. 거래에는 {parent.name}의 혜택{parent.benefits.length ? `(${parent.benefits.map((b) => b.name).join(', ')})` : ''}을 고릅니다.
+            {parent.name}의 결제 계좌·정산 일정({parent.billingConfigured ? `매월 ${parent.paymentDay}일 결제` : '미설정'})과 카드 상품
+            {parent.productName ? `(${parent.productName})` : ''}을 따르고, 전월실적은 {parent.name} 이용과 합쳐 계산합니다. 거래에는 {parent.name}의 혜택
+            {parent.benefits.length ? `(${parent.benefits.map((b) => b.name).join(', ')})` : ''}을 고릅니다.
           </span>
         </div>
-      )}
-
-      {ownSettings && (
-        <>
-          <div>
-            <div className="row" style={{ marginBottom: 6 }}>
-              <h3>혜택</h3>
-              <span className="small muted">카드 명세의 할인/적립 항목. 거래에 혜택을 표시하면 혜택액과 남은 한도를 계산합니다.</span>
-            </div>
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>이름</th>
-                    <th>종류</th>
-                    <th className="num">혜택률</th>
-                    <th className="num">건당 최소결제</th>
-                    <th className="num">건당 최대</th>
-                    <th className="num">항목 월한도</th>
-                    <th>통합한도 차감</th>
-                    <th>중복 적용</th>
-                    <th>실적 제외</th>
-                    <th />
-                  </tr>
-                </thead>
-                <tbody>
-                  {benefits.map((b, i) => {
-                    const upd = (patch: Partial<BenefitRow>) => setBenefits((list) => list.map((x, j) => (j === i ? { ...x, ...patch } : x)))
-                    // 종류를 바꾸면 같은 혜택률을 새 단위로 다시 적는다 (% ↔ N원당 1마일)
-                    const changeKind = (kind: BenefitKind) =>
-                      upd({ kind, rateInput: b.rateInput.trim() === '' ? '' : rateToInput(kind, inputToRate(b.kind, b.rateInput)) })
-                    return (
-                      <tr key={b.id ?? `new-${i}`}>
-                        <td>
-                          <input className="input" value={b.name} onChange={(e) => upd({ name: e.target.value })} style={{ width: 130 }} />
-                        </td>
-                        <td>
-                          <select className="input" value={b.kind} onChange={(e) => changeKind(e.target.value as BenefitKind)} aria-label="혜택 종류">
-                            {BENEFIT_KINDS.map((k) => (
-                              <option key={k} value={k}>
-                                {BENEFIT_KIND_LABEL[k]}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td className="nowrap">
-                          <input
-                            className="input num"
-                            inputMode="decimal"
-                            value={b.rateInput}
-                            onChange={(e) => upd({ rateInput: e.target.value })}
-                            style={{ width: 70 }}
-                            aria-label={b.kind === 'MILEAGE' ? '1마일당 이용금액' : '혜택률(%)'}
-                          />{' '}
-                          <span className="small text-2">{b.kind === 'MILEAGE' ? '원당 1마일' : '%'}</span>
-                        </td>
-                        <td>
-                          <input className="input num" inputMode="numeric" value={b.minAmount} onChange={(e) => upd({ minAmount: e.target.value })} style={{ width: 90 }} />
-                        </td>
-                        <td>
-                          <input
-                            className="input num"
-                            inputMode="numeric"
-                            value={b.perTxMax}
-                            onChange={(e) => upd({ perTxMax: e.target.value })}
-                            style={{ width: 80 }}
-                            placeholder={BENEFIT_UNIT[b.kind]}
-                          />
-                        </td>
-                        <td>
-                          <input
-                            className="input num"
-                            inputMode="numeric"
-                            value={b.monthlyCap}
-                            onChange={(e) => upd({ monthlyCap: e.target.value })}
-                            style={{ width: 90 }}
-                            placeholder={BENEFIT_UNIT[b.kind]}
-                          />
-                        </td>
-                        <td>
-                          <input type="checkbox" checked={b.sharesCardLimit} onChange={(e) => upd({ sharesCardLimit: e.target.checked })} aria-label="통합한도 차감" />
-                        </td>
-                        <td>
-                          <input type="checkbox" checked={b.stackable} onChange={(e) => upd({ stackable: e.target.checked })} aria-label="다른 혜택과 중복 적용" />
-                        </td>
-                        <td>
-                          <input type="checkbox" checked={b.excludesPerformance} onChange={(e) => upd({ excludesPerformance: e.target.checked })} aria-label="혜택받은 금액 실적 제외" />
-                        </td>
-                        <td>
-                          <button type="button" className="btn sm ghost danger" onClick={() => setBenefits((list) => list.filter((_, j) => j !== i))}>
-                            삭제
-                          </button>
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <button
-              type="button"
-              className="btn sm"
-              style={{ marginTop: 6 }}
-              onClick={() =>
-                setBenefits((list) => [
-                  ...list,
-                  {
-                    name: '',
-                    kind: 'DISCOUNT',
-                    rateInput: '',
-                    minAmount: '',
-                    perTxMax: '',
-                    monthlyCap: '',
-                    sharesCardLimit: true,
-                    excludesPerformance: false,
-                    stackable: false,
-                  },
-                ])
-              }
-            >
-              + 혜택 추가
-            </button>
-            <ul className="small text-2" style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-              <li>
-                <b>통합한도 차감</b>: 전월실적 구간 한도에서 빠지는 혜택. 끄고 항목 월한도도 비우면 한도 없이 받습니다(예: 기본 0.8% 적립).
-              </li>
-              <li>
-                <b>중복 적용</b>: 다른 혜택과 함께 받는 혜택(예: 백화점 1% + 간편결제 3%). 중복 적용이 아닌 혜택은 거래당 하나만 고릅니다.
-              </li>
-              <li>건당 최대·항목 월한도는 혜택 단위(할인 원, 포인트 P, 마일리지 마일)로 적습니다.</li>
-            </ul>
-          </div>
-          <div>
-            <div className="row" style={{ marginBottom: 6 }}>
-              <h3>전월실적 구간</h3>
-              <span className="small muted">지난달 실적이 이 금액 이상이면 이번 달 통합 혜택 한도</span>
-            </div>
-            {tiers.map((t, i) => {
-              const upd = (patch: Partial<TierRow>) => setTiers((list) => list.map((x, j) => (j === i ? { ...x, ...patch } : x)))
-              return (
-                <div key={i} className="row" style={{ marginBottom: 6 }}>
-                  <input className="input num" inputMode="numeric" value={t.minSpending} onChange={(e) => upd({ minSpending: e.target.value })} style={{ width: 130 }} aria-label="전월실적 이상" />
-                  <span className="text-2">원 이상 →</span>
-                  <input className="input num" inputMode="numeric" value={t.benefitLimit} onChange={(e) => upd({ benefitLimit: e.target.value })} style={{ width: 110 }} aria-label="혜택 한도" />
-                  <span className="text-2">원 한도</span>
-                  <button type="button" className="btn sm ghost danger" onClick={() => setTiers((list) => list.filter((_, j) => j !== i))}>
-                    삭제
-                  </button>
-                  {parseAmount(t.minSpending) != null && <span className="small muted">({won(parseAmount(t.minSpending))}원)</span>}
-                </div>
-              )
-            })}
-            <button type="button" className="btn sm" onClick={() => setTiers((list) => [...list, { minSpending: '', benefitLimit: '' }])}>
-              + 구간 추가
-            </button>
-          </div>
-        </>
       )}
 
       <div className="row">
@@ -553,5 +370,33 @@ export default function CardForm({
         )}
       </div>
     </form>
+  )
+}
+
+/** 고른 카드 상품의 요약: 연회비·전월실적 목표·구간·혜택 */
+function ProductSummary({ product }: { product: CardProduct }) {
+  const tiers = [...product.tiers].sort((a, b) => a.minSpending - b.minSpending)
+  return (
+    <dl className="small text-2" style={{ margin: '10px 0 0', display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px' }}>
+      <dt>연회비</dt>
+      <dd style={{ margin: 0 }}>{product.annualFee != null ? `${won(product.annualFee)}원` : '-'}</dd>
+      <dt>전월실적</dt>
+      <dd style={{ margin: 0 }}>
+        {product.monthlyTarget != null ? `목표 ${won(product.monthlyTarget)}원` : '-'}
+        {tiers.length > 0 && ` · 구간 ${tiers.map((t) => `${won(t.minSpending)}원↑ ${won(t.benefitLimit)}원`).join(', ')}`}
+      </dd>
+      <dt>혜택</dt>
+      <dd style={{ margin: 0 }}>{product.benefits.length ? product.benefits.map((b) => b.name).join(', ') : '-'}</dd>
+      {product.memo && (
+        <>
+          <dt>메모</dt>
+          <dd style={{ margin: 0 }}>{product.memo}</dd>
+        </>
+      )}
+      <dt>공유</dt>
+      <dd style={{ margin: 0 }}>
+        카드 {product.cardCount}장이 사용 중 · {product.canEdit ? (product.createdByMe ? '내가 만든 상품' : '관리자로 수정 가능') : '만든 사람만 수정'}
+      </dd>
+    </dl>
   )
 }

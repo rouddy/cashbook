@@ -1,10 +1,15 @@
 // GraphQL 문서. 화면마다 필요한 필드만 가져온다.
 
-export const BENEFIT_FIELDS = `id paymentMethodId name kind rate minAmount perTxMax monthlyCap sharesCardLimit excludesPerformance stackable sortOrder`
+export const BENEFIT_FIELDS = `id cardProductId name kind rate minAmount perTxMax monthlyCap sharesCardLimit excludesPerformance stackable sortOrder`
 
-export const PAYMENT_METHOD_FIELDS = `id name kind issuer productName last4 aliases accountId paymentDay closingDay closingMonthOffset
+const TIER_FIELDS = `id cardProductId minSpending benefitLimit`
+
+export const PAYMENT_METHOD_FIELDS = `id name kind issuer cardProductId productName last4 aliases accountId paymentDay closingDay closingMonthOffset
   monthlyTarget annualFee expiresOn color memo sortOrder archived isCard billingConfigured usagePeriodLabel parentId
-  benefits { ${BENEFIT_FIELDS} } tiers { id paymentMethodId minSpending benefitLimit }`
+  benefits { ${BENEFIT_FIELDS} } tiers { ${TIER_FIELDS} }`
+
+export const CARD_PRODUCT_FIELDS = `id issuer name label annualFee monthlyTarget memo canEdit createdByMe cardCount
+  benefits { ${BENEFIT_FIELDS} } tiers { ${TIER_FIELDS} }`
 
 export const CATEGORY_FIELDS = `id ledgerId name kind monthlyBudget isFixed color sortOrder archived`
 
@@ -136,6 +141,11 @@ export const MOVE_TXS = `mutation MoveTxs($ids: [Int!]!, $ledgerId: Int!) { move
 export const CONFIRM_TX = `mutation ConfirmTx($id: Int!, $date: NaiveDate, $amount: Int) { confirmTransaction(id: $id, date: $date, amount: $amount) { id status } }`
 export const SKIP_TX = `mutation SkipTx($id: Int!) { skipTransaction(id: $id) { id status } }`
 export const RESTORE_TX = `mutation RestoreTx($id: Int!) { restoreTransaction(id: $id) { id status } }`
+
+export const CARD_PRODUCTS_QUERY = `query CardProducts { cardProducts { ${CARD_PRODUCT_FIELDS} } }`
+export const CREATE_CARD_PRODUCT = `mutation CreateCardProduct($input: CardProductInput!) { createCardProduct(input: $input) { id } }`
+export const UPDATE_CARD_PRODUCT = `mutation UpdateCardProduct($id: Int!, $input: CardProductInput!) { updateCardProduct(id: $id, input: $input) { id } }`
+export const DELETE_CARD_PRODUCT = `mutation DeleteCardProduct($id: Int!) { deleteCardProduct(id: $id) }`
 
 export const CREATE_PM = `mutation CreatePm($input: PaymentMethodInput!) { createPaymentMethod(input: $input) { id } }`
 export const UPDATE_PM = `mutation UpdatePm($id: Int!, $input: PaymentMethodInput!) { updatePaymentMethod(id: $id, input: $input) { id } }`

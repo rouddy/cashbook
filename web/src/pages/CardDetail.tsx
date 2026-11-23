@@ -130,8 +130,11 @@ export default function CardDetail() {
           <dl className="kv">
             <dt>카드사</dt>
             <dd>{c.issuer ?? '-'}</dd>
-            <dt>상품명</dt>
-            <dd>{c.productName ?? '-'}</dd>
+            <dt>카드 상품</dt>
+            <dd>
+              {c.productName ?? '-'}
+              {c.productName && <span className="muted"> · 모든 계정 공용</span>}
+            </dd>
             <dt>카드번호</dt>
             <dd>{c.last4 ? `•••• ${c.last4}` : '-'}</dd>
             {parent && (
