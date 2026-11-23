@@ -1,5 +1,7 @@
+import { useQuery } from '@tanstack/react-query'
 import { useState, type FormEvent } from 'react'
 
+import { fetchSession, signOut } from '../api/client'
 import { useGql, useMutate, useRefData, type RefMaps } from '../api/hooks'
 import { CREATE_LEDGER, CREATE_TOKEN, DELETE_LEDGER, DELETE_PM, DELETE_TOKEN, RESTORE_PM, TOKENS_QUERY, UPDATE_LEDGER } from '../api/queries'
 import type { ApiToken, Ledger, PaymentMethod } from '../api/types'
@@ -18,6 +20,7 @@ export default function Settings() {
       <div className="page-head">
         <h1>설정</h1>
       </div>
+      <Account />
       <div className="grid-2" style={{ alignItems: 'start' }}>
         <Ledgers refMaps={ref} />
         <OtherPaymentMethods refMaps={ref} />
@@ -25,6 +28,29 @@ export default function Settings() {
       <ApiTokens />
       <ApiGuide authEnabled={ref.appInfo.authEnabled} />
     </div>
+  )
+}
+
+/** 로그인한 Google 계정. 인증 없는 로컬 실행이면 보이지 않는다 */
+function Account() {
+  const session = useQuery({ queryKey: ['session'], queryFn: fetchSession, staleTime: Infinity })
+  const user = session.data?.authRequired ? session.data.user : null
+  if (!user) return null
+  return (
+    <Panel title="계정" sub="장부·카테고리·결제수단·계좌·거래·API 토큰은 계정마다 따로입니다. 카드 상품(전월실적·혜택·연회비)은 모든 계정이 함께 씁니다.">
+      <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+        <div className="row" style={{ gap: 10 }}>
+          {user.picture && <img src={user.picture} alt="" referrerPolicy="no-referrer" width={32} height={32} style={{ borderRadius: '50%' }} />}
+          <div>
+            <b>{user.name ?? user.email}</b> {user.isAdmin && <span className="badge planned">관리자</span>}
+            {user.name && user.email && <div className="small muted">{user.email}</div>}
+          </div>
+        </div>
+        <button className="btn" onClick={signOut}>
+          로그아웃
+        </button>
+      </div>
+    </Panel>
   )
 }
 
@@ -161,7 +187,7 @@ function ApiTokens() {
   return (
     <Panel
       title="API 토큰"
-      sub="휴대폰 자동화 앱·가계부 앱·스크립트가 쓰는 키. 자동 입력과 GraphQL(내역 읽기·쓰기)을 모두 쓸 수 있으니 기기·용도마다 따로 발급하고, 잃어버리거나 유출되면 바로 폐기하세요. 원문은 발급할 때 한 번만 보여줍니다."
+      sub="휴대폰 자동화 앱·가계부 앱·스크립트가 쓰는 키. 이 계정의 자동 입력과 GraphQL(내역 읽기·쓰기)을 모두 쓸 수 있으니 기기·용도마다 따로 발급하고, 잃어버리거나 유출되면 바로 폐기하세요. 원문은 발급할 때 한 번만 보여줍니다."
       flush
     >
       {q.error ? (
@@ -241,7 +267,7 @@ function ApiGuide({ authEnabled }: { authEnabled: boolean }) {
         <div className="notice" style={{ marginBottom: 12 }}>
           <span className="notice-icon">!</span>
           <span>
-            지금은 비밀번호(<code>CASHBOOK_PASSWORD</code>) 없이 로컬에서만 실행 중이라 토큰 없이 호출됩니다. 휴대폰 등 외부에서 보내려면 서버에 비밀번호를 설정하고 외부 주소로 열어야 하며, 그때부터는 토큰이 필요합니다.
+            지금은 Google 로그인 설정 없이 로컬에서만 실행 중이라 토큰 없이 호출됩니다. 휴대폰 등 외부에서 보내려면 서버에 Google 로그인(<code>CASHBOOK_GOOGLE_CLIENT_ID</code> 등)을 설정하고 외부 주소로 열어야 하며, 그때부터는 토큰이 필요합니다.
           </span>
         </div>
       )}

@@ -237,6 +237,25 @@ textarea {
   font-size: 12px;
   color: var(--muted);
 }
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  color: var(--text);
+  overflow: hidden;
+}
+.sidebar-user span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-user img {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  flex: none;
+}
 .main {
   padding: 22px 28px 60px;
   min-width: 0;
