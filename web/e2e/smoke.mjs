@@ -480,8 +480,12 @@ await step('가계부: 확정 거래의 상태 칸 혜택 버튼으로 카드 �
     await dialog.getByRole('checkbox', { name: /간편결제/ }).check()
     await dialog.getByRole('button', { name: '적용' }).click()
     await confirmed.getByRole('button', { name: /혜택: 백화점, 간편결제/ }).waitFor()
-    const saved = await gql(`query($id: Int!) { transaction(id: $id) { benefitIds } }`, { id: ids[0] })
-    assert.deepEqual([...saved.data.transaction.benefitIds].sort(), [id['백화점'], id['간편결제']].sort())
+    // 화면은 저장 전에 먼저 바뀌므로(낙관적 반영) 서버 값은 저장이 끝날 때까지 기다린다
+    const want = JSON.stringify([id['백화점'], id['간편결제']].sort((a, b) => a - b))
+    await waitUntil(async () => {
+      const saved = await gql(`query($id: Int!) { transaction(id: $id) { benefitIds } }`, { id: ids[0] })
+      return JSON.stringify([...saved.data.transaction.benefitIds].sort((a, b) => a - b)) === want
+    }, '혜택 저장')
     // 다시 열어 하나를 풀고 Esc로 닫으면 저장하지 않고 버튼으로 포커스가 돌아온다
     const button = confirmed.getByRole('button', { name: /혜택:/ })
     await button.click()
