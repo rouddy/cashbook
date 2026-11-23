@@ -35,8 +35,8 @@ fn api_error(status: Status, message: impl Into<String>) -> ApiError {
 }
 
 #[post("/graphql", data = "<request>", format = "json")]
-async fn graphql(schema: &State<CashbookSchema>, state: &State<AppState>, _auth: Auth, request: GraphQLRequest) -> GraphQLResponse {
-    request.data(Lookup::new(state.db.clone())).execute(schema.inner()).await
+async fn graphql(schema: &State<CashbookSchema>, state: &State<AppState>, auth: Auth, request: GraphQLRequest) -> GraphQLResponse {
+    request.data(Lookup::new(state.db.clone(), auth.user_id)).data(auth.current_user()).execute(schema.inner()).await
 }
 
 #[get("/graphiql")]
@@ -116,16 +116,16 @@ enum IngestBody {
     One(Box<IngestInput>),
 }
 
-async fn ingest_one(state: &AppState, input: IngestInput) -> Result<IngestOutcome, IngestError> {
+async fn ingest_one(state: &AppState, auth: Auth, input: IngestInput) -> Result<IngestOutcome, IngestError> {
     let txn = state.db.begin().await?;
-    let out = ingest::ingest(&txn, input, state.config.today()).await?;
+    let out = ingest::ingest(&txn, auth.user_id, input, state.config.today()).await?;
     txn.commit().await?;
     Ok(out)
 }
 
 /// 자동 입력 응답. 단축어/자동화 앱에서 쓰기 쉽게 이름까지 풀어서 돌려준다.
-async fn outcome_json(state: &AppState, out: &IngestOutcome) -> Value {
-    let lookup = Lookup::new(state.db.clone());
+async fn outcome_json(state: &AppState, auth: Auth, out: &IngestOutcome) -> Value {
+    let lookup = Lookup::new(state.db.clone(), auth.user_id);
     let tx = &out.transaction;
     let category = match tx.category_id {
         Some(id) => lookup.categories().await.ok().and_then(|m| m.get(&id).map(|c| c.name.clone())),
@@ -159,10 +159,10 @@ async fn outcome_json(state: &AppState, out: &IngestOutcome) -> Value {
 
 /// JSON 한 건 또는 배열. 배열이면 건별로 처리해 결과 목록을 돌려준다.
 #[post("/ingest", data = "<body>", format = "json")]
-async fn ingest_json(state: &State<AppState>, _auth: Auth, body: Json<IngestBody>) -> Result<Json<Value>, ApiError> {
+async fn ingest_json(state: &State<AppState>, auth: Auth, body: Json<IngestBody>) -> Result<Json<Value>, ApiError> {
     match body.into_inner() {
-        IngestBody::One(input) => match ingest_one(state, *input).await {
-            Ok(out) => Ok(Json(outcome_json(state, &out).await)),
+        IngestBody::One(input) => match ingest_one(state, auth, *input).await {
+            Ok(out) => Ok(Json(outcome_json(state, auth, &out).await)),
             Err(IngestError::Invalid(msg)) => Err(api_error(Status::UnprocessableEntity, msg)),
             Err(IngestError::Db(e)) => Err(api_error(Status::InternalServerError, e.to_string())),
         },
@@ -172,8 +172,8 @@ async fn ingest_json(state: &State<AppState>, _auth: Auth, body: Json<IngestBody
             }
             let mut results = Vec::with_capacity(inputs.len());
             for input in inputs {
-                results.push(match ingest_one(state, input).await {
-                    Ok(out) => outcome_json(state, &out).await,
+                results.push(match ingest_one(state, auth, input).await {
+                    Ok(out) => outcome_json(state, auth, &out).await,
                     Err(e) => json!({ "ok": false, "error": e.to_string() }),
                 });
             }
@@ -184,10 +184,10 @@ async fn ingest_json(state: &State<AppState>, _auth: Auth, body: Json<IngestBody
 
 /// 카드 승인 문자 원문을 그대로 보낼 때 (Content-Type: text/plain)
 #[post("/ingest", data = "<text>", format = "text/plain", rank = 2)]
-async fn ingest_text(state: &State<AppState>, _auth: Auth, text: String) -> Result<Json<Value>, ApiError> {
+async fn ingest_text(state: &State<AppState>, auth: Auth, text: String) -> Result<Json<Value>, ApiError> {
     let input = IngestInput { text: Some(text), ..Default::default() };
-    match ingest_one(state, input).await {
-        Ok(out) => Ok(Json(outcome_json(state, &out).await)),
+    match ingest_one(state, auth, input).await {
+        Ok(out) => Ok(Json(outcome_json(state, auth, &out).await)),
         Err(IngestError::Invalid(msg)) => Err(api_error(Status::UnprocessableEntity, msg)),
         Err(IngestError::Db(e)) => Err(api_error(Status::InternalServerError, e.to_string())),
     }
@@ -195,8 +195,8 @@ async fn ingest_text(state: &State<AppState>, _auth: Auth, text: String) -> Resu
 
 /// 자동 입력 규칙에서 고를 장부·카테고리·결제수단 이름 (안드로이드 앱 규칙 화면의 선택 목록).
 #[get("/ingest/options")]
-async fn ingest_options(state: &State<AppState>, _auth: Auth) -> Result<Json<Value>, ApiError> {
-    let options = ingest::options(&state.db).await.map_err(|e| api_error(Status::InternalServerError, e.to_string()))?;
+async fn ingest_options(state: &State<AppState>, auth: Auth) -> Result<Json<Value>, ApiError> {
+    let options = ingest::options(&state.db, auth.user_id).await.map_err(|e| api_error(Status::InternalServerError, e.to_string()))?;
     let mut body = serde_json::to_value(options).map_err(|e| api_error(Status::InternalServerError, e.to_string()))?;
     body["ok"] = json!(true);
     Ok(Json(body))

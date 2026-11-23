@@ -7,10 +7,11 @@ use sea_orm::{
 };
 
 use super::transaction::card_benefits_of;
-use super::{config, db, lookup, trim_opt, user_error};
+use super::{config, db, lookup, trim_opt, uid, user_error};
 use crate::domain::dates::YearMonth;
 use crate::domain::recurring::{self, occurs_in};
-use crate::entity::{category, ledger, payment_method, recurring_rule, recurring_rule_benefit};
+use crate::entity::{
+    OfUser, category, ledger, payment_method, recurring_rule, recurring_rule_benefit};
 
 #[ComplexObject]
 impl recurring_rule::Model {
@@ -51,7 +52,8 @@ pub struct RecurringQuery;
 impl RecurringQuery {
     /// 반복 규칙. `ledgerId`를 주면 그 장부의 규칙과 다른 장부에서 그 장부로 보내는 이체 규칙.
     async fn recurring_rules(&self, ctx: &Context<'_>, ledger_id: Option<i32>) -> Result<Vec<recurring_rule::Model>> {
-        let mut q = recurring_rule::Entity::find();
+        let uid = uid(ctx)?;
+        let mut q = recurring_rule::Entity::find().of_user(uid);
         if let Some(id) = ledger_id {
             q = q.filter(
                 Condition::any().add(recurring_rule::Column::LedgerId.eq(id)).add(recurring_rule::Column::TransferLedgerId.eq(id)),
@@ -97,6 +99,7 @@ pub struct RecurringRuleInput {
 }
 
 async fn validate(ctx: &Context<'_>, input: &RecurringRuleInput) -> Result<()> {
+    let uid = uid(ctx)?;
     let db = db(ctx);
     if input.description.trim().is_empty() {
         return Err(user_error("내용을 입력하세요"));
@@ -119,31 +122,31 @@ async fn validate(ctx: &Context<'_>, input: &RecurringRuleInput) -> Result<()> {
     {
         return Err(user_error("금액이 매칭 금액 범위 밖입니다"));
     }
-    ledger::Entity::find_by_id(input.ledger_id).one(db).await?.ok_or_else(|| user_error("장부가 없습니다"))?;
+    ledger::Entity::find_by_id(input.ledger_id).of_user(uid).one(db).await?.ok_or_else(|| user_error("장부가 없습니다"))?;
     if let Some(to) = input.transfer_ledger_id {
         if to == input.ledger_id {
             return Err(user_error("받는 장부는 보내는 장부와 달라야 합니다"));
         }
-        ledger::Entity::find_by_id(to).one(db).await?.ok_or_else(|| user_error("받는 장부가 없습니다"))?;
+        ledger::Entity::find_by_id(to).of_user(uid).one(db).await?.ok_or_else(|| user_error("받는 장부가 없습니다"))?;
         if input.category_id.is_some() || input.payment_method_id.is_some() {
             return Err(user_error("장부 이체에는 항목·결제수단을 지정하지 않습니다"));
         }
     }
     if let Some(cid) = input.category_id {
-        let c = category::Entity::find_by_id(cid).one(db).await?.ok_or_else(|| user_error("카테고리가 없습니다"))?;
+        let c = category::Entity::find_by_id(cid).of_user(uid).one(db).await?.ok_or_else(|| user_error("카테고리가 없습니다"))?;
         if c.ledger_id != input.ledger_id {
             return Err(user_error("카테고리가 다른 장부에 속해 있습니다"));
         }
     }
     if let Some(pid) = input.payment_method_id {
-        payment_method::Entity::find_by_id(pid).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
+        payment_method::Entity::find_by_id(pid).of_user(uid).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
     }
     Ok(())
 }
 
 /// 규칙의 혜택을 바꾼다 (결제수단이 없으면 비운다). 예정 거래는 뒤이어 `regenerate`가 다시 만든다.
 async fn set_rule_benefits<C: ConnectionTrait>(db: &C, rule: &recurring_rule::Model, ids: &[i32]) -> Result<()> {
-    let valid = card_benefits_of(db, rule.payment_method_id, ids).await?;
+    let valid = card_benefits_of(db, rule.user_id, rule.payment_method_id, ids).await?;
     recurring_rule_benefit::Entity::delete_many()
         .filter(recurring_rule_benefit::Column::RecurringRuleId.eq(rule.id))
         .exec(db)
@@ -188,7 +191,8 @@ impl RecurringMutation {
         let cfg = config(ctx);
         let txn = db.begin().await?;
         let benefit_ids = input.benefit_ids.clone().unwrap_or_default();
-        let mut active = recurring_rule::ActiveModel { created_at: Set(Utc::now()), ..Default::default() };
+        let mut active =
+            recurring_rule::ActiveModel { user_id: Set(uid(ctx)?), created_at: Set(Utc::now()), ..Default::default() };
         apply(&mut active, input);
         let saved = active.insert(&txn).await?;
         set_rule_benefits(&txn, &saved, &benefit_ids).await?;
@@ -199,10 +203,11 @@ impl RecurringMutation {
     }
 
     async fn update_recurring_rule(&self, ctx: &Context<'_>, id: i32, input: RecurringRuleInput) -> Result<recurring_rule::Model> {
+        let uid = uid(ctx)?;
         validate(ctx, &input).await?;
         let db = db(ctx);
         let cfg = config(ctx);
-        let found = recurring_rule::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("반복 규칙이 없습니다"))?;
+        let found = recurring_rule::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("반복 규칙이 없습니다"))?;
         let txn = db.begin().await?;
         let benefit_ids = input.benefit_ids.clone();
         let old_payment_method = found.payment_method_id;
@@ -231,10 +236,12 @@ impl RecurringMutation {
 
     /// 규칙 삭제. 이번 달 이후의 예정 항목도 지운다 (확정된 거래는 남는다).
     async fn delete_recurring_rule(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
+        recurring_rule::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("반복 규칙이 없습니다"))?;
         let txn = db.begin().await?;
         recurring::remove_future_planned(&txn, id, config(ctx).today()).await?;
-        let res = recurring_rule::Entity::delete_by_id(id).exec(&txn).await?;
+        let res = recurring_rule::Entity::delete_many().of_user(uid).filter(recurring_rule::Column::Id.eq(id)).exec(&txn).await?;
         txn.commit().await?;
         Ok(res.rows_affected > 0)
     }
@@ -254,7 +261,7 @@ mod tests {
     use super::*;
 
     async fn gql(schema: &crate::graphql::CashbookSchema, query: &str) -> Value {
-        let res = schema.execute(query).await;
+        let res = schema.execute(crate::graphql::as_user(query, 1)).await;
         assert!(res.errors.is_empty(), "{query}: {:?}", res.errors);
         res.data.into_json().unwrap()
     }
@@ -263,6 +270,7 @@ mod tests {
     async fn rule_benefits_follow_card_and_go_to_planned() {
         let db = crate::db::connect_in_memory().await;
         let home = ledger::ActiveModel {
+            user_id: Set(1),
             name: Set("가계부".into()),
             description: Set(None),
             is_default: Set(true),
@@ -321,7 +329,10 @@ mod tests {
 
         // 중복 적용이 아닌 혜택 둘은 함께 고를 수 없다
         let res = schema
-            .execute(format!("mutation {{ updateRecurringRule(id: {rule}, input: {}) {{ id }} }}", input(pm_a, Some(&[ab[0], ab[1]]))))
+            .execute(crate::graphql::as_user(
+                &format!("mutation {{ updateRecurringRule(id: {rule}, input: {}) {{ id }} }}", input(pm_a, Some(&[ab[0], ab[1]]))),
+                1,
+            ))
             .await;
         assert!(res.errors[0].message.contains("함께 받을 수 없습니다"), "{:?}", res.errors);
         assert_eq!(state(rule).await, json!([ab[0], ab[2]]));

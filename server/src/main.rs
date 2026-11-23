@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! cashbook [serve]                        서버 실행 (기본)
-//! cashbook import <file.json> [--replace] 스프레드시트 변환 JSON 가져오기
+//! cashbook import <file.json> [--replace] [--user <id|이메일>]  스프레드시트 변환 JSON 가져오기 (기본: 기존 데이터 계정)
 //! cashbook generate-planned               반복 규칙의 예정 거래 채우기
 //! cashbook copy-db <원본 URL> <대상 URL>    DB 데이터 복사 (SQLite ↔ MySQL, 대상은 빈 DB)
 //! ```
@@ -36,7 +36,8 @@ pub struct AppState {
 
 const USAGE: &str = "사용법:
   cashbook [serve]                        서버 실행
-  cashbook import <file.json> [--replace] 스프레드시트 변환 JSON 가져오기
+  cashbook import <file.json> [--replace] [--user <id|이메일>]
+                                          스프레드시트 변환 JSON 가져오기 (기본 계정: id 1)
   cashbook generate-planned               반복 규칙의 예정 거래 채우기
   cashbook copy-db <원본 URL> <대상 URL>    DB 데이터 복사 (SQLite ↔ MySQL, 대상은 빈 DB)
                                           예: copy-db sqlite://data/cashbook.db mysql://cash:pw@db:3306/cashbook";
@@ -81,16 +82,33 @@ async fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// `--user <id|이메일>`로 고른 계정 (없으면 기존 데이터 계정)
+async fn import_user(db: &sea_orm::DatabaseConnection, value: Option<&str>) -> Result<i32, Box<dyn Error>> {
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let Some(v) = value else { return Ok(entity::user::LEGACY_USER_ID) };
+    let found = match v.parse::<i32>() {
+        Ok(id) => entity::user::Entity::find_by_id(id).one(db).await?,
+        Err(_) => entity::user::Entity::find().filter(entity::user::Column::Email.eq(v.trim().to_lowercase())).one(db).await?,
+    };
+    Ok(found.ok_or_else(|| format!("계정 '{v}'를 찾을 수 없습니다"))?.id)
+}
+
 async fn import(config: AppConfig, args: &[String]) -> Result<(), Box<dyn Error>> {
     let replace = args.iter().any(|a| a == "--replace");
+    let user = args.iter().position(|a| a == "--user").map(|i| args.get(i + 1).map(String::as_str));
+    if user == Some(None) {
+        return Err(format!("--user 뒤에 계정 id나 이메일을 적으세요\n{USAGE}").into());
+    }
+    let user_value = user.flatten();
     let path = args
         .iter()
-        .find(|a| !a.starts_with("--"))
+        .find(|a| !a.starts_with("--") && Some(a.as_str()) != user_value)
         .ok_or_else(|| format!("가져올 JSON 파일을 지정하세요\n{USAGE}"))?;
     let raw = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let data: domain::import::ImportData = serde_json::from_str(&raw).map_err(|e| format!("{path}: JSON 형식 오류: {e}"))?;
     let db = db::connect(&config.database_url).await?;
-    let stats = domain::import::run(&db, data, replace, config.today()).await?;
+    let uid = import_user(&db, user_value).await?;
+    let stats = domain::import::run(&db, uid, data, replace, config.today()).await?;
     let planned = recurring::ensure_planned(&db, config.today(), config.plan_months_ahead, None).await?;
     println!(
         "가져오기 완료: 장부 {}, 카테고리 {}, 결제수단 {}, 계좌 {}, 계획항목 {}, 반복규칙 {}, 거래 {} (혜택 표시 {}), 새 예정 거래 {}",

@@ -12,13 +12,13 @@ use sea_orm::{
     QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Query,
 };
 
-use super::{DeleteResult, config, db, lookup, trim_opt, user_error};
+use super::{DeleteResult, config, db, lookup, trim_opt, uid, user_error};
 use crate::domain::billing::{BillingCycle, INSTALLMENT_LOOKBACK_DAYS};
 use crate::domain::card_report::{CardMonthReport, CardReportInput, month_report};
 use crate::domain::dates::YearMonth;
 use crate::domain::funds::{CardDue, StatementInfo, statement_parts, statement_range};
 use crate::entity::{
-    account, card_benefit, card_tier,
+    OfUser, account, card_benefit, card_tier,
     enums::{BenefitKind, PaymentKind, TxStatus},
     payment_method, recurring_rule, recurring_rule_benefit, transaction, transaction_benefit,
 };
@@ -56,11 +56,13 @@ async fn statement_card_ids(ctx: &Context<'_>, pm: &payment_method::Model) -> Re
 /// 카드의 청구서 계산에 필요한 거래 (최대 60개월 할부를 고려해 5년 전부터). `card_ids`는 `statement_card_ids`.
 async fn card_transactions(
     db: &DatabaseConnection,
+    uid: i32,
     card_ids: Vec<i32>,
     from: NaiveDate,
     to: NaiveDate,
 ) -> Result<Vec<transaction::Model>, sea_orm::DbErr> {
     transaction::Entity::find()
+        .of_user(uid)
         .filter(transaction::Column::PaymentMethodId.is_in(card_ids))
         .filter(transaction::Column::Status.ne(TxStatus::Skipped))
         .filter(transaction::Column::Date.gte(from - Duration::days(INSTALLMENT_LOOKBACK_DAYS)))
@@ -84,10 +86,12 @@ fn card_group(pms: &HashMap<i32, payment_method::Model>, pm: &payment_method::Mo
 }
 
 async fn report_for(ctx: &Context<'_>, pm: &payment_method::Model, month: YearMonth) -> Result<CardMonthReport> {
+    let uid = uid(ctx)?;
     let db = db(ctx);
     let lookup = lookup(ctx);
     let (head, group_ids) = card_group(&*lookup.payment_methods().await?, pm);
     let txs = transaction::Entity::find()
+        .of_user(uid)
         .filter(transaction::Column::PaymentMethodId.is_in(group_ids.clone()))
         .filter(transaction::Column::Date.gte(month.prev().first_day()))
         .filter(transaction::Column::Date.lte(month.last_day()))
@@ -156,7 +160,9 @@ impl payment_method::Model {
     }
 
     async fn transaction_count(&self, ctx: &Context<'_>) -> Result<i64> {
+        let uid = self.user_id;
         Ok(transaction::Entity::find()
+            .of_user(uid)
             .filter(transaction::Column::PaymentMethodId.eq(self.id))
             .filter(transaction::Column::Status.eq(TxStatus::Confirmed))
             .count(db(ctx))
@@ -164,7 +170,9 @@ impl payment_method::Model {
     }
 
     async fn last_used_on(&self, ctx: &Context<'_>) -> Result<Option<NaiveDate>> {
+        let uid = self.user_id;
         Ok(transaction::Entity::find()
+            .of_user(uid)
             .select_only()
             .column(transaction::Column::Date)
             .filter(transaction::Column::PaymentMethodId.eq(self.id))
@@ -183,6 +191,7 @@ impl payment_method::Model {
         from: Option<YearMonth>,
         to: Option<YearMonth>,
     ) -> Result<Vec<StatementInfo>> {
+        let uid = self.user_id;
         let Some(cycle) = BillingCycle::from_model(self) else { return Ok(vec![]) };
         let today = config(ctx).today();
         let next = cycle.next_statement(today);
@@ -192,7 +201,7 @@ impl payment_method::Model {
             return Err(user_error("한 번에 60개월까지 조회할 수 있습니다"));
         }
         let ids = statement_card_ids(ctx, self).await?;
-        let txs = card_transactions(db(ctx), ids, cycle.period(from).0, cycle.period(to).1).await?;
+        let txs = card_transactions(db(ctx), uid, ids, cycle.period(from).0, cycle.period(to).1).await?;
         let refs: Vec<&transaction::Model> = txs.iter().collect();
         let categories = lookup(ctx).categories().await?;
         Ok(statement_range(&cycle, &refs, &categories, today, from, to))
@@ -200,11 +209,12 @@ impl payment_method::Model {
 
     /// 다음 결제 예정 청구서 (본인 카드는 가족카드 이용 포함)
     async fn next_payment(&self, ctx: &Context<'_>) -> Result<Option<StatementInfo>> {
+        let uid = self.user_id;
         let Some(cycle) = BillingCycle::from_model(self) else { return Ok(None) };
         let today = config(ctx).today();
         let next = cycle.next_statement(today);
         let ids = statement_card_ids(ctx, self).await?;
-        let txs = card_transactions(db(ctx), ids, cycle.period(next).0, cycle.period(next).1).await?;
+        let txs = card_transactions(db(ctx), uid, ids, cycle.period(next).0, cycle.period(next).1).await?;
         let refs: Vec<&transaction::Model> = txs.iter().collect();
         let categories = lookup(ctx).categories().await?;
         Ok(statement_range(&cycle, &refs, &categories, today, next, next).pop())
@@ -254,7 +264,8 @@ impl PaymentQuery {
         #[graphql(default = false)] include_archived: bool,
         #[graphql(default = false)] cards_only: bool,
     ) -> Result<Vec<payment_method::Model>> {
-        let mut q = payment_method::Entity::find();
+        let uid = uid(ctx)?;
+        let mut q = payment_method::Entity::find().of_user(uid);
         if !include_archived {
             q = q.filter(payment_method::Column::Archived.eq(false));
         }
@@ -269,7 +280,8 @@ impl PaymentQuery {
     }
 
     async fn payment_method(&self, ctx: &Context<'_>, id: i32) -> Result<Option<payment_method::Model>> {
-        Ok(payment_method::Entity::find_by_id(id).one(db(ctx)).await?)
+        let uid = uid(ctx)?;
+        Ok(payment_method::Entity::find_by_id(id).of_user(uid).one(db(ctx)).await?)
     }
 
     /// 카드별 월 실적·혜택 요약 (카드별 지출내역 화면). 보관된 카드는 그 달 거래가 있을 때만.
@@ -280,8 +292,10 @@ impl PaymentQuery {
         month: YearMonth,
         #[graphql(default = false)] include_family: bool,
     ) -> Result<Vec<CardMonthReport>> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
         let used: HashSet<i32> = transaction::Entity::find()
+            .of_user(uid)
             .select_only()
             .column(transaction::Column::PaymentMethodId)
             .filter(transaction::Column::Date.gte(month.first_day()))
@@ -295,6 +309,7 @@ impl PaymentQuery {
             .flatten()
             .collect();
         let mut cards: Vec<payment_method::Model> = payment_method::Entity::find()
+            .of_user(uid)
             .filter(payment_method::Column::Kind.is_in([PaymentKind::CreditCard, PaymentKind::CheckCard]))
             .all(db)
             .await?
@@ -317,8 +332,10 @@ impl PaymentQuery {
         payment_method_id: i32,
         month: YearMonth,
     ) -> Result<Vec<StatementLine>> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
         let pm = payment_method::Entity::find_by_id(payment_method_id)
+            .of_user(uid)
             .one(db)
             .await?
             .ok_or_else(|| user_error("결제수단이 없습니다"))?;
@@ -327,7 +344,7 @@ impl PaymentQuery {
         };
         let (start, end) = cycle.period(month);
         let ids = statement_card_ids(ctx, &pm).await?;
-        let txs = card_transactions(db, ids, start, end).await?;
+        let txs = card_transactions(db, uid, ids, start, end).await?;
         let refs: Vec<&transaction::Model> = txs.iter().collect();
         let categories = lookup(ctx).categories().await?;
         let parts = statement_parts(&cycle, &refs, &categories, month);
@@ -473,14 +490,23 @@ fn validate(input: &PaymentMethodInput) -> Result<Validated> {
     Ok(Validated { name, last4, aliases: aliases.filter(|a| !a.is_empty()), billing, expires_on })
 }
 
-async fn has_family<C: ConnectionTrait>(db: &C, id: i32) -> Result<bool, DbErr> {
-    Ok(payment_method::Entity::find().filter(payment_method::Column::ParentId.eq(id)).count(db).await? > 0)
+/// 결제 계좌가 이 계정의 계좌인지
+async fn check_account<C: ConnectionTrait>(db: &C, uid: i32, id: Option<i32>) -> Result<()> {
+    if let Some(id) = id {
+        account::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("결제 계좌가 없습니다"))?;
+    }
+    Ok(())
+}
+
+async fn has_family<C: ConnectionTrait>(db: &C, uid: i32, id: i32) -> Result<bool, DbErr> {
+    Ok(payment_method::Entity::find().of_user(uid).filter(payment_method::Column::ParentId.eq(id)).count(db).await? > 0)
 }
 
 /// 가족카드 입력을 본인 카드에 맞춘다: 종류·결제 계좌·정산 일정은 본인 카드 것, 실적 목표·혜택·구간은 비운다.
 /// `found`는 수정하는 카드(추가면 None).
 async fn apply_parent<C: ConnectionTrait>(
     db: &C,
+    uid: i32,
     found: Option<&payment_method::Model>,
     input: &mut PaymentMethodInput,
 ) -> Result<()> {
@@ -488,7 +514,7 @@ async fn apply_parent<C: ConnectionTrait>(
     if found.is_some_and(|f| f.id == pid) {
         return Err(user_error("자기 자신을 본인 카드로 고를 수 없습니다"));
     }
-    let parent = payment_method::Entity::find_by_id(pid).one(db).await?.ok_or_else(|| user_error("본인 카드가 없습니다"))?;
+    let parent = payment_method::Entity::find_by_id(pid).of_user(uid).one(db).await?.ok_or_else(|| user_error("본인 카드가 없습니다"))?;
     if parent.parent_id.is_some() {
         return Err(user_error(format!("'{}'은(는) 가족카드라 본인 카드로 고를 수 없습니다", parent.name)));
     }
@@ -499,7 +525,7 @@ async fn apply_parent<C: ConnectionTrait>(
         return Err(user_error(format!("보관된 카드 '{}'에는 가족카드를 추가할 수 없습니다", parent.name)));
     }
     if let Some(f) = found
-        && has_family(db, f.id).await?
+        && has_family(db, uid, f.id).await?
     {
         return Err(user_error("가족카드가 있는 카드는 가족카드로 바꿀 수 없습니다"));
     }
@@ -519,7 +545,8 @@ async fn apply_parent<C: ConnectionTrait>(
 
 /// 본인 카드의 종류·결제 계좌·정산 일정을 가족카드에 복사한다.
 async fn sync_family<C: ConnectionTrait>(db: &C, parent: &payment_method::Model) -> Result<(), DbErr> {
-    let family = payment_method::Entity::find().filter(payment_method::Column::ParentId.eq(parent.id)).all(db).await?;
+    let family =
+        payment_method::Entity::find().of_user(parent.user_id).filter(payment_method::Column::ParentId.eq(parent.id)).all(db).await?;
     for f in family {
         let mut active: payment_method::ActiveModel = f.into();
         active.kind = Set(parent.kind);
@@ -568,11 +595,12 @@ async fn prune_foreign_benefits<C: ConnectionTrait>(db: &C, pm: &payment_method:
 
 /// 결제수단을 보관한다. 앞으로 생길 예정 항목이 보관된 카드로 잡히지 않게 반복 규칙은 끄고, 이미 만든 예정분도 지운다.
 async fn archive<C: ConnectionTrait>(db: &C, pm: payment_method::Model, today: NaiveDate) -> Result<(), DbErr> {
-    let id = pm.id;
+    let (id, uid) = (pm.id, pm.user_id);
     let mut active: payment_method::ActiveModel = pm.into();
     active.archived = Set(true);
     active.update(db).await?;
     let rule_ids: Vec<i32> = recurring_rule::Entity::find()
+        .of_user(uid)
         .filter(recurring_rule::Column::PaymentMethodId.eq(id))
         .all(db)
         .await?
@@ -580,6 +608,7 @@ async fn archive<C: ConnectionTrait>(db: &C, pm: payment_method::Model, today: N
         .map(|r| r.id)
         .collect();
     recurring_rule::Entity::update_many()
+        .of_user(uid)
         .col_expr(recurring_rule::Column::Active, false.into())
         .filter(recurring_rule::Column::PaymentMethodId.eq(id))
         .exec(db)
@@ -647,16 +676,19 @@ pub struct PaymentMutation;
 impl PaymentMutation {
     /// 카드/결제수단 추가
     async fn create_payment_method(&self, ctx: &Context<'_>, input: PaymentMethodInput) -> Result<payment_method::Model> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
         let mut input = input;
-        apply_parent(db, None, &mut input).await?;
+        apply_parent(db, uid, None, &mut input).await?;
+        check_account(db, uid, input.account_id).await?;
         let v = validate(&input)?;
-        if payment_method::Entity::find().filter(payment_method::Column::Name.eq(v.name.as_str())).one(db).await?.is_some() {
+        if payment_method::Entity::find().of_user(uid).filter(payment_method::Column::Name.eq(v.name.as_str())).one(db).await?.is_some() {
             return Err(user_error("같은 이름의 결제수단이 이미 있습니다"));
         }
-        let count = payment_method::Entity::find().count(db).await?;
+        let count = payment_method::Entity::find().of_user(uid).count(db).await?;
         let txn = db.begin().await?;
         let saved = payment_method::ActiveModel {
+            user_id: Set(uid),
             name: Set(v.name),
             kind: Set(input.kind),
             issuer: Set(trim_opt(input.issuer)),
@@ -693,15 +725,18 @@ impl PaymentMutation {
         id: i32,
         input: PaymentMethodInput,
     ) -> Result<payment_method::Model> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
-        let found = payment_method::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
+        let found = payment_method::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
         let mut input = input;
-        apply_parent(db, Some(&found), &mut input).await?;
-        if !input.kind.is_card() && has_family(db, id).await? {
+        apply_parent(db, uid, Some(&found), &mut input).await?;
+        check_account(db, uid, input.account_id).await?;
+        if !input.kind.is_card() && has_family(db, uid, id).await? {
             return Err(user_error("가족카드가 있는 카드는 카드가 아닌 종류로 바꿀 수 없습니다"));
         }
         let v = validate(&input)?;
         if let Some(other) = payment_method::Entity::find()
+            .of_user(uid)
             .filter(payment_method::Column::Name.eq(v.name.as_str()))
             .filter(payment_method::Column::Id.ne(id))
             .one(db)
@@ -747,10 +782,11 @@ impl PaymentMutation {
     /// 거래가 있는 결제수단은 보관 처리하고(내역 유지), 없으면 지운다.
     /// 가족카드가 있는 본인 카드도 지우지 않고 보관하며, 가족카드도 함께 보관한다.
     async fn delete_payment_method(&self, ctx: &Context<'_>, id: i32) -> Result<DeleteResult> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
-        let found = payment_method::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
-        let used = transaction::Entity::find().filter(transaction::Column::PaymentMethodId.eq(id)).count(db).await?;
-        let family = payment_method::Entity::find().filter(payment_method::Column::ParentId.eq(id)).all(db).await?;
+        let found = payment_method::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
+        let used = transaction::Entity::find().of_user(uid).filter(transaction::Column::PaymentMethodId.eq(id)).count(db).await?;
+        let family = payment_method::Entity::find().of_user(uid).filter(payment_method::Column::ParentId.eq(id)).all(db).await?;
         let result = if used > 0 || !family.is_empty() {
             let today = config(ctx).today();
             let txn = db.begin().await?;
@@ -761,7 +797,7 @@ impl PaymentMutation {
             txn.commit().await?;
             DeleteResult { deleted: false, archived: true }
         } else {
-            payment_method::Entity::delete_by_id(id).exec(db).await?;
+            payment_method::Entity::delete_many().of_user(uid).filter(payment_method::Column::Id.eq(id)).exec(db).await?;
             DeleteResult { deleted: true, archived: false }
         };
         lookup(ctx).invalidate();
@@ -770,10 +806,11 @@ impl PaymentMutation {
 
     /// 보관된 결제수단을 다시 사용
     async fn restore_payment_method(&self, ctx: &Context<'_>, id: i32) -> Result<payment_method::Model> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
-        let found = payment_method::Entity::find_by_id(id).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
+        let found = payment_method::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| user_error("결제수단이 없습니다"))?;
         if let Some(pid) = found.parent_id
-            && let Some(parent) = payment_method::Entity::find_by_id(pid).one(db).await?
+            && let Some(parent) = payment_method::Entity::find_by_id(pid).of_user(uid).one(db).await?
             && parent.archived
         {
             return Err(user_error(format!("본인 카드 '{}'가 보관되어 있습니다. 본인 카드를 먼저 다시 사용하세요", parent.name)));
@@ -786,10 +823,12 @@ impl PaymentMutation {
     }
 
     async fn reorder_payment_methods(&self, ctx: &Context<'_>, ids: Vec<i32>) -> Result<bool> {
+        let uid = uid(ctx)?;
         let db = db(ctx);
         let txn = db.begin().await?;
         for (i, id) in ids.iter().enumerate() {
             payment_method::Entity::update_many()
+                .of_user(uid)
                 .col_expr(payment_method::Column::SortOrder, (i as i32).into())
                 .filter(Condition::all().add(payment_method::Column::Id.eq(*id)))
                 .exec(&txn)
@@ -809,13 +848,13 @@ mod tests {
     use crate::entity::ledger;
 
     async fn gql(schema: &crate::graphql::CashbookSchema, query: &str) -> Value {
-        let res = schema.execute(query).await;
+        let res = schema.execute(crate::graphql::as_user(query, 1)).await;
         assert!(res.errors.is_empty(), "{query}: {:?}", res.errors);
         res.data.into_json().unwrap()
     }
 
     async fn gql_error(schema: &crate::graphql::CashbookSchema, query: &str) -> String {
-        let res = schema.execute(query).await;
+        let res = schema.execute(crate::graphql::as_user(query, 1)).await;
         res.errors.first().unwrap_or_else(|| panic!("{query}: 오류가 나야 합니다")).message.clone()
     }
 
@@ -823,6 +862,7 @@ mod tests {
     async fn family_card_shares_parent_performance_and_benefits() {
         let db = crate::db::connect_in_memory().await;
         let home = ledger::ActiveModel {
+            user_id: Set(1),
             name: Set("가계부".into()),
             description: Set(None),
             is_default: Set(true),

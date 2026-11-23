@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::config::AppConfig;
-use crate::entity::api_token;
+use crate::entity::{api_token, user};
 
 pub const SESSION_COOKIE: &str = "cashbook_session";
 pub const SESSION_DAYS: i64 = 30;
@@ -110,12 +110,17 @@ impl LoginLimiter {
     }
 }
 
-/// 인증된 요청 (로그인 세션 또는 API 토큰). 인증이 꺼져 있으면 항상 `Disabled`.
+/// 인증된 요청의 계정 (로그인 세션 또는 API 토큰). 인증이 꺼져 있으면 기존 데이터 계정(id 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Auth {
-    Disabled,
-    Session,
-    Token,
+pub struct Auth {
+    pub user_id: i32,
+    pub is_admin: bool,
+}
+
+impl Auth {
+    pub fn current_user(&self) -> crate::graphql::CurrentUser {
+        crate::graphql::CurrentUser { id: self.user_id, is_admin: self.is_admin }
+    }
 }
 
 /// 403 응답에 보여줄 이유 (요청 로컬 캐시에 남긴다)
@@ -191,11 +196,11 @@ impl<'r> FromRequest<'r> for Auth {
             if !host_allowed_without_auth(&state.config, host) {
                 return forbid(req, "비밀번호 없이 실행 중이라 localhost 주소로만 접속할 수 있습니다");
             }
-            return Outcome::Success(Auth::Disabled);
+            return Outcome::Success(Auth { user_id: user::LEGACY_USER_ID, is_admin: true });
         };
         if let Some(token) = bearer_token(req) {
             return match verify_token(&state.db, token).await {
-                Ok(Some(_)) => Outcome::Success(Auth::Token),
+                Ok(Some(t)) => Outcome::Success(Auth { user_id: t.user_id, is_admin: t.user_id == user::LEGACY_USER_ID }),
                 Ok(None) => Outcome::Error((Status::Unauthorized, "invalid api token")),
                 Err(_) => Outcome::Error((Status::InternalServerError, "database error")),
             };
@@ -203,7 +208,7 @@ impl<'r> FromRequest<'r> for Auth {
         if let Some(cookie) = req.cookies().get_private(SESSION_COOKIE)
             && session_valid(cookie.value(), password)
         {
-            return Outcome::Success(Auth::Session);
+            return Outcome::Success(Auth { user_id: user::LEGACY_USER_ID, is_admin: true });
         }
         Outcome::Error((Status::Unauthorized, "login required"))
     }

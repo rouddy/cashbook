@@ -21,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261120_000010_recurring_rule_benefits::Migration),
             Box::new(m20261122_000011_drop_api_token_scope::Migration),
             Box::new(m20261122_000012_family_cards::Migration),
+            Box::new(m20261123_000013_users::Migration),
         ]
     }
 }
@@ -1589,4 +1590,361 @@ mod m20261122_000012_family_cards {
                 .await
         }
     }
+}
+
+/// 계정: `users` 테이블과 계정별 데이터의 `user_id`. 기존 데이터는 모두 id 1 계정의 것이 된다
+/// (아직 아무도 넘겨받지 않은 계정 — `CASHBOOK_OWNER_EMAIL` 계정이 처음 로그인할 때 넘겨받는다).
+/// - `user_id`는 users를 가리키는 외래 키이고 기본값이 0이라, 계정 없이 넣으면 외래 키 오류가 난다.
+/// - 장부·결제수단 이름은 계정 안에서만 겹치지 않으면 된다. SQLite는 컬럼에 붙은 UNIQUE를 지울 수 없어 두 테이블을 다시 만든다.
+/// - 자동 입력 중복 방지 키도 계정마다 따로 (`uq_transactions_user_external`).
+///
+/// SQLite에서 테이블을 다시 만들 때 다른 테이블의 외래 키 동작(CASCADE)이 돌지 않도록 외래 키를 끄고 한 트랜잭션으로 돌린다.
+/// `PRAGMA foreign_keys`는 연결마다 따로라 `db::connect`가 SQLite 마이그레이션을 연결 하나로 돌린다.
+mod m20261123_000013_users {
+    use super::*;
+    use chrono::Utc;
+    use sea_orm::{ConnectionTrait, DbBackend, TransactionTrait};
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261123_000013_users"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum Users {
+        Table,
+        Id,
+        GoogleSub,
+        Email,
+        Name,
+        Picture,
+        CreatedAt,
+        LastLoginAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum Ledgers {
+        Table,
+        Id,
+        UserId,
+        Name,
+        Description,
+        IsDefault,
+        SortOrder,
+        CreatedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum PaymentMethods {
+        Table,
+        Id,
+        UserId,
+        Name,
+        Kind,
+        Issuer,
+        ProductName,
+        Last4,
+        Aliases,
+        AccountId,
+        PaymentDay,
+        ClosingDay,
+        ClosingMonthOffset,
+        MonthlyTarget,
+        AnnualFee,
+        ExpiresOn,
+        Color,
+        Memo,
+        SortOrder,
+        Archived,
+        CreatedAt,
+        ParentId,
+    }
+
+    #[derive(DeriveIden)]
+    enum Accounts {
+        Table,
+        Id,
+    }
+
+    #[derive(DeriveIden)]
+    enum Transactions {
+        Table,
+        UserId,
+        Date,
+        ExternalId,
+    }
+
+    #[derive(DeriveIden)]
+    enum UserId {
+        UserId,
+    }
+
+    /// 장부·결제수단 말고 `user_id` 컬럼만 더하는 테이블
+    const OWNED: [&str; 6] = ["categories", "plan_items", "accounts", "recurring_rules", "transactions", "api_tokens"];
+    /// `user_id` 단독 인덱스를 두는 테이블 (거래는 날짜와 묶은 인덱스)
+    const USER_INDEXED: [&str; 5] = ["categories", "plan_items", "accounts", "recurring_rules", "api_tokens"];
+
+    fn user_fk(table: &str) -> ForeignKeyCreateStatement {
+        ForeignKey::create()
+            .name(format!("fk_{table}_user"))
+            .from(Alias::new(table), UserId::UserId)
+            .to(Users::Table, Users::Id)
+            .on_delete(ForeignKeyAction::Cascade)
+            .on_update(ForeignKeyAction::Cascade)
+            .to_owned()
+    }
+
+    async fn create_users(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        m.create_table(
+            Table::create()
+                .table(Users::Table)
+                .col(pk_auto(Users::Id))
+                .col(string_null(Users::GoogleSub))
+                .col(string_null(Users::Email))
+                .col(string_null(Users::Name))
+                .col(text_null(Users::Picture))
+                .col(timestamp_with_time_zone(Users::CreatedAt))
+                .col(timestamp_with_time_zone_null(Users::LastLoginAt))
+                .to_owned(),
+        )
+        .await?;
+        m.create_index(Index::create().name("uq_users_google_sub").table(Users::Table).col(Users::GoogleSub).unique().to_owned())
+            .await?;
+        // 기존 데이터의 계정 (id 1)
+        m.get_connection()
+            .execute(
+                &Query::insert()
+                    .into_table(Users::Table)
+                    .columns([Users::Id, Users::Name, Users::CreatedAt])
+                    .values_panic([1.into(), "기본 계정".into(), Utc::now().into()])
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// 두 DB 공통: 계정 안에서 겹치지 않는 이름, 계정별 인덱스, 자동 입력 중복 방지 키
+    async fn create_indexes(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        m.create_index(
+            Index::create().name("uq_ledgers_user_name").table(Ledgers::Table).col(Ledgers::UserId).col(Ledgers::Name).unique().to_owned(),
+        )
+        .await?;
+        m.create_index(
+            Index::create()
+                .name("uq_payment_methods_user_name")
+                .table(PaymentMethods::Table)
+                .col(PaymentMethods::UserId)
+                .col(PaymentMethods::Name)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
+        for table in USER_INDEXED {
+            m.create_index(Index::create().name(format!("ix_{table}_user")).table(Alias::new(table)).col(UserId::UserId).to_owned())
+                .await?;
+        }
+        m.create_index(
+            Index::create()
+                .name("ix_transactions_user_date")
+                .table(Transactions::Table)
+                .col(Transactions::UserId)
+                .col(Transactions::Date)
+                .to_owned(),
+        )
+        .await?;
+        m.drop_index(Index::drop().name("uq_transactions_external_id").table(Transactions::Table).to_owned()).await?;
+        m.create_index(
+            Index::create()
+                .name("uq_transactions_user_external")
+                .table(Transactions::Table)
+                .col(Transactions::UserId)
+                .col(Transactions::ExternalId)
+                .unique()
+                .to_owned(),
+        )
+        .await
+    }
+
+    fn ledgers_table(name: &str) -> TableCreateStatement {
+        Table::create()
+            .table(Alias::new(name))
+            .col(pk_auto(Ledgers::Id))
+            .col(integer(Ledgers::UserId))
+            .col(string(Ledgers::Name))
+            .col(text_null(Ledgers::Description))
+            .col(boolean(Ledgers::IsDefault))
+            .col(integer(Ledgers::SortOrder))
+            .col(timestamp_with_time_zone(Ledgers::CreatedAt))
+            .foreign_key(&mut user_fk("ledgers"))
+            .to_owned()
+    }
+
+    fn payment_methods_table(name: &str) -> TableCreateStatement {
+        Table::create()
+            .table(Alias::new(name))
+            .col(pk_auto(PaymentMethods::Id))
+            .col(integer(PaymentMethods::UserId))
+            .col(string(PaymentMethods::Name))
+            .col(string(PaymentMethods::Kind))
+            .col(string_null(PaymentMethods::Issuer))
+            .col(string_null(PaymentMethods::ProductName))
+            .col(string_null(PaymentMethods::Last4))
+            .col(text_null(PaymentMethods::Aliases))
+            .col(integer_null(PaymentMethods::AccountId))
+            .col(integer_null(PaymentMethods::PaymentDay))
+            .col(integer_null(PaymentMethods::ClosingDay))
+            .col(integer_null(PaymentMethods::ClosingMonthOffset))
+            .col(big_integer_null(PaymentMethods::MonthlyTarget))
+            .col(big_integer_null(PaymentMethods::AnnualFee))
+            .col(string_null(PaymentMethods::ExpiresOn))
+            .col(string_null(PaymentMethods::Color))
+            .col(text_null(PaymentMethods::Memo))
+            .col(integer(PaymentMethods::SortOrder))
+            .col(boolean(PaymentMethods::Archived))
+            .col(timestamp_with_time_zone(PaymentMethods::CreatedAt))
+            .col(integer_null(PaymentMethods::ParentId))
+            .foreign_key(&mut user_fk("payment_methods"))
+            .foreign_key(
+                ForeignKey::create()
+                    .name("fk_payment_methods_account")
+                    .from(Alias::new(name), PaymentMethods::AccountId)
+                    .to(Accounts::Table, Accounts::Id)
+                    .on_delete(ForeignKeyAction::SetNull)
+                    .on_update(ForeignKeyAction::Cascade),
+            )
+            .to_owned()
+    }
+
+    /// SQLite: 테이블을 새로 만들어 옮긴다 (새 테이블 → 복사 → 예전 테이블 삭제 → 이름 바꾸기, 외래 키를 끈 상태여야 한다)
+    async fn rebuild<C: ConnectionTrait>(db: &C, table: &str, create: TableCreateStatement, columns: &[&str]) -> Result<(), DbErr> {
+        let tmp = format!("{table}_new");
+        db.execute(&create).await?;
+        let cols = columns.join(", ");
+        let src = columns.iter().map(|c| if *c == "user_id" { "1" } else { c }).collect::<Vec<_>>().join(", ");
+        db.execute_unprepared(&format!("INSERT INTO {tmp} ({cols}) SELECT {src} FROM {table}")).await?;
+        db.execute_unprepared(&format!("DROP TABLE {table}")).await?;
+        db.execute_unprepared(&format!("ALTER TABLE {tmp} RENAME TO {table}")).await?;
+        Ok(())
+    }
+
+    async fn up_sqlite(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        let db = m.get_connection();
+        create_users(m).await?;
+        rebuild(
+            db,
+            "ledgers",
+            ledgers_table("ledgers_new"),
+            &["id", "user_id", "name", "description", "is_default", "sort_order", "created_at"],
+        )
+        .await?;
+        rebuild(
+            db,
+            "payment_methods",
+            payment_methods_table("payment_methods_new"),
+            &[
+                "id", "user_id", "name", "kind", "issuer", "product_name", "last4", "aliases", "account_id", "payment_day",
+                "closing_day", "closing_month_offset", "monthly_target", "annual_fee", "expires_on", "color", "memo",
+                "sort_order", "archived", "created_at", "parent_id",
+            ],
+        )
+        .await?;
+        m.create_index(
+            Index::create().name("ix_payment_methods_parent").table(PaymentMethods::Table).col(PaymentMethods::ParentId).to_owned(),
+        )
+        .await?;
+        // 외래 키를 끈 상태라 REFERENCES와 0이 아닌 기본값을 함께 붙일 수 있다
+        for table in OWNED {
+            db.execute_unprepared(&format!(
+                "ALTER TABLE {table} ADD COLUMN user_id integer NOT NULL DEFAULT 0 REFERENCES users (id) ON DELETE CASCADE ON UPDATE CASCADE"
+            ))
+            .await?;
+            db.execute_unprepared(&format!("UPDATE {table} SET user_id = 1")).await?;
+        }
+        create_indexes(m).await
+    }
+
+    /// MySQL: 컬럼 UNIQUE 인덱스(이름은 MySQL이 정한다)를 찾아 지운다
+    async fn drop_unique_name_index(m: &SchemaManager<'_>, table: &str) -> Result<(), DbErr> {
+        let db = m.get_connection();
+        let rows = db
+            .query_all_raw(sea_orm::Statement::from_sql_and_values(
+                DbBackend::MySql,
+                "SELECT INDEX_NAME AS index_name FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() \
+                 AND TABLE_NAME = ? AND NON_UNIQUE = 0 AND INDEX_NAME <> 'PRIMARY' GROUP BY INDEX_NAME \
+                 HAVING COUNT(*) = 1 AND MAX(COLUMN_NAME) = 'name'",
+                [table.into()],
+            ))
+            .await?;
+        for row in rows {
+            let index: String = row.try_get("", "index_name")?;
+            m.drop_index(Index::drop().name(index).table(Alias::new(table)).to_owned()).await?;
+        }
+        Ok(())
+    }
+
+    async fn up_mysql(m: &SchemaManager<'_>) -> Result<(), DbErr> {
+        let db = m.get_connection();
+        create_users(m).await?;
+        let all = ["ledgers", "payment_methods"].into_iter().chain(OWNED);
+        for table in all.clone() {
+            m.alter_table(Table::alter().table(Alias::new(table)).add_column(integer(UserId::UserId).default(0)).to_owned()).await?;
+            db.execute_unprepared(&format!("UPDATE {table} SET user_id = 1")).await?;
+        }
+        drop_unique_name_index(m, "ledgers").await?;
+        drop_unique_name_index(m, "payment_methods").await?;
+        create_indexes(m).await?;
+        for table in all {
+            m.create_foreign_key(user_fk(table)).await?;
+        }
+        Ok(())
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+            match manager.get_database_backend() {
+                DbBackend::Sqlite => {
+                    let conn = manager.get_connection();
+                    conn.execute_unprepared("PRAGMA foreign_keys = OFF").await?;
+                    let result = async {
+                        let txn = conn.begin().await?;
+                        super::sqlite_foreign_keys_off(&txn).await?;
+                        up_sqlite(&SchemaManager::new(&txn)).await?;
+                        super::sqlite_foreign_key_check(&txn).await?;
+                        txn.commit().await
+                    }
+                    .await;
+                    conn.execute_unprepared("PRAGMA foreign_keys = ON").await?;
+                    result
+                }
+                _ => up_mysql(manager).await,
+            }
+        }
+    }
+}
+
+/// SQLite 테이블을 다시 만드는 마이그레이션의 안전장치: 외래 키가 꺼져 있지 않으면(다른 연결에서 돌았으면)
+/// 예전 테이블을 지울 때 CASCADE로 다른 테이블 행이 지워지므로 멈춘다.
+async fn sqlite_foreign_keys_off<C: sea_orm::ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+    let row = db
+        .query_one_raw(sea_orm::Statement::from_string(sea_orm::DbBackend::Sqlite, "PRAGMA foreign_keys"))
+        .await?
+        .ok_or_else(|| DbErr::Migration("PRAGMA foreign_keys 결과가 없습니다".into()))?;
+    let on: i32 = row.try_get_by_index(0)?;
+    if on != 0 {
+        return Err(DbErr::Migration("SQLite 외래 키를 끄지 못했습니다. 마이그레이션은 연결 하나로 실행해야 합니다".into()));
+    }
+    Ok(())
+}
+
+/// 테이블을 다시 만든 뒤 외래 키가 모두 맞는지 확인한다
+async fn sqlite_foreign_key_check<C: sea_orm::ConnectionTrait>(db: &C) -> Result<(), DbErr> {
+    let rows = db.query_all_raw(sea_orm::Statement::from_string(sea_orm::DbBackend::Sqlite, "PRAGMA foreign_key_check")).await?;
+    if !rows.is_empty() {
+        return Err(DbErr::Migration(format!("외래 키가 맞지 않는 행이 {}개 있습니다", rows.len())));
+    }
+    Ok(())
 }

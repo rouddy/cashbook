@@ -2,11 +2,11 @@
 
 use async_graphql::{Context, Object, Result, SimpleObject};
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, EntityTrait, QueryOrder, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
-use super::{db, user_error};
+use super::{db, uid, user_error};
 use crate::auth::{generate_token, sha256_hex};
-use crate::entity::api_token;
+use crate::entity::{OfUser, api_token};
 
 #[derive(SimpleObject)]
 pub struct CreatedApiToken {
@@ -21,7 +21,8 @@ pub struct TokenQuery;
 #[Object]
 impl TokenQuery {
     async fn api_tokens(&self, ctx: &Context<'_>) -> Result<Vec<api_token::Model>> {
-        Ok(api_token::Entity::find().order_by_desc(api_token::Column::Id).all(db(ctx)).await?)
+        let uid = uid(ctx)?;
+        Ok(api_token::Entity::find().of_user(uid).order_by_desc(api_token::Column::Id).all(db(ctx)).await?)
     }
 }
 
@@ -38,6 +39,7 @@ impl TokenMutation {
         }
         let token = generate_token();
         let saved = api_token::ActiveModel {
+            user_id: Set(uid(ctx)?),
             name: Set(name),
             token_hash: Set(sha256_hex(&token)),
             token_prefix: Set(token.chars().take(10).collect()),
@@ -51,6 +53,7 @@ impl TokenMutation {
     }
 
     async fn delete_api_token(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
-        Ok(api_token::Entity::delete_by_id(id).exec(db(ctx)).await?.rows_affected > 0)
+        let uid = uid(ctx)?;
+        Ok(api_token::Entity::delete_many().of_user(uid).filter(api_token::Column::Id.eq(id)).exec(db(ctx)).await?.rows_affected > 0)
     }
 }

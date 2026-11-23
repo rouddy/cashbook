@@ -12,7 +12,8 @@ use std::fmt;
 use chrono::Utc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QueryOrder, Set};
 
-use crate::entity::{category, enums::TxStatus, ledger, transaction, transaction_benefit};
+use crate::entity::{
+    OfUser, category, enums::TxStatus, ledger, transaction, transaction_benefit};
 
 #[derive(Debug)]
 pub enum SplitError {
@@ -62,13 +63,14 @@ impl SplitGroup {
 /// 거래가 속한 분할 묶음. 분할되지 않은 거래(또는 부모가 없는 자식)면 None.
 pub async fn group_of<C: ConnectionTrait>(db: &C, tx: &transaction::Model) -> Result<Option<SplitGroup>, DbErr> {
     let parent = match tx.split_parent_id {
-        Some(pid) => match transaction::Entity::find_by_id(pid).one(db).await? {
+        Some(pid) => match transaction::Entity::find_by_id(pid).of_user(tx.user_id).one(db).await? {
             Some(p) => p,
             None => return Ok(None),
         },
         None => tx.clone(),
     };
     let children = transaction::Entity::find()
+        .of_user(tx.user_id)
         .filter(transaction::Column::SplitParentId.eq(parent.id))
         .order_by_asc(transaction::Column::Id)
         .all(db)
@@ -84,8 +86,10 @@ pub async fn any_split<C: ConnectionTrait>(db: &C, txs: &[transaction::Model]) -
     if txs.iter().any(|t| t.split_parent_id.is_some()) {
         return Ok(true);
     }
+    let Some(first) = txs.first() else { return Ok(false) };
     let ids: Vec<i32> = txs.iter().map(|t| t.id).collect();
     let child = transaction::Entity::find()
+        .of_user(first.user_id)
         .filter(transaction::Column::SplitParentId.is_in(ids))
         .one(db)
         .await?;
@@ -146,12 +150,13 @@ pub enum CategoryChoice {
 /// 확정 거래 `id`에서 `amount`를 떼어 `ledger_id` 장부의 새 거래(자식)로 만든다. 원래 거래 금액은 그만큼 줄인다.
 pub async fn split<C: ConnectionTrait>(
     db: &C,
+    uid: i32,
     id: i32,
     ledger_id: i32,
     amount: i64,
     category: CategoryChoice,
 ) -> Result<transaction::Model, SplitError> {
-    let tx = transaction::Entity::find_by_id(id).one(db).await?.ok_or_else(|| invalid("거래가 없습니다"))?;
+    let tx = transaction::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| invalid("거래가 없습니다"))?;
     if tx.status != TxStatus::Confirmed {
         return Err(invalid("확정된 거래만 나눌 수 있습니다"));
     }
@@ -164,20 +169,20 @@ pub async fn split<C: ConnectionTrait>(
     if tx.ledger_id == ledger_id {
         return Err(invalid("지금 장부가 아닌 다른 장부를 고르세요"));
     }
-    ledger::Entity::find_by_id(ledger_id).one(db).await?.ok_or_else(|| invalid("장부가 없습니다"))?;
+    ledger::Entity::find_by_id(ledger_id).of_user(uid).one(db).await?.ok_or_else(|| invalid("장부가 없습니다"))?;
     check_part(tx.amount, amount).map_err(invalid)?;
     let category_id = match category {
         CategoryChoice::SameName => match tx.category_id {
             Some(cid) => {
                 let categories: HashMap<i32, category::Model> =
-                    category::Entity::find().all(db).await?.into_iter().map(|c| (c.id, c)).collect();
+                    category::Entity::find().of_user(uid).all(db).await?.into_iter().map(|c| (c.id, c)).collect();
                 categories.get(&cid).and_then(|c| same_category_in(&categories, ledger_id, c))
             }
             None => None,
         },
         CategoryChoice::Set(None) => None,
         CategoryChoice::Set(Some(cid)) => {
-            let c = category::Entity::find_by_id(cid).one(db).await?.ok_or_else(|| invalid("카테고리가 없습니다"))?;
+            let c = category::Entity::find_by_id(cid).of_user(uid).one(db).await?.ok_or_else(|| invalid("카테고리가 없습니다"))?;
             if c.ledger_id != ledger_id {
                 return Err(invalid(format!("'{}' 카테고리는 다른 장부의 카테고리입니다", c.name)));
             }
@@ -190,6 +195,7 @@ pub async fn split<C: ConnectionTrait>(
     parent.updated_at = Set(now);
     parent.update(db).await?;
     let child = transaction::ActiveModel {
+        user_id: Set(tx.user_id),
         ledger_id: Set(ledger_id),
         date: Set(tx.date),
         amount: Set(amount),
@@ -226,7 +232,7 @@ pub async fn merge<C: ConnectionTrait>(db: &C, group: SplitGroup) -> Result<tran
         .filter(transaction_benefit::Column::TransactionId.is_in(child_ids.clone()))
         .exec(db)
         .await?;
-    transaction::Entity::delete_many().filter(transaction::Column::Id.is_in(child_ids)).exec(db).await?;
+    transaction::Entity::delete_many().of_user(group.parent.user_id).filter(transaction::Column::Id.is_in(child_ids)).exec(db).await?;
     let mut parent: transaction::ActiveModel = group.parent.into();
     parent.amount = Set(total);
     parent.updated_at = Set(Utc::now());
@@ -234,8 +240,8 @@ pub async fn merge<C: ConnectionTrait>(db: &C, group: SplitGroup) -> Result<tran
 }
 
 /// 분할을 되돌린다. `id`는 묶음의 어느 거래든 된다. 합친 거래(부모)를 돌려준다.
-pub async fn unsplit<C: ConnectionTrait>(db: &C, id: i32) -> Result<transaction::Model, SplitError> {
-    let tx = transaction::Entity::find_by_id(id).one(db).await?.ok_or_else(|| invalid("거래가 없습니다"))?;
+pub async fn unsplit<C: ConnectionTrait>(db: &C, uid: i32, id: i32) -> Result<transaction::Model, SplitError> {
+    let tx = transaction::Entity::find_by_id(id).of_user(uid).one(db).await?.ok_or_else(|| invalid("거래가 없습니다"))?;
     let group = group_of(db, &tx).await?.ok_or_else(|| invalid("분할된 거래가 아닙니다"))?;
     Ok(merge(db, group).await?)
 }
@@ -275,6 +281,7 @@ mod tests {
 
     async fn ledger(db: &sea_orm::DatabaseConnection, name: &str, sort_order: i32) -> i32 {
         ledger::ActiveModel {
+            user_id: Set(1),
             name: Set(name.into()),
             description: Set(None),
             is_default: Set(sort_order == 0),
@@ -290,6 +297,7 @@ mod tests {
 
     async fn category(db: &sea_orm::DatabaseConnection, ledger_id: i32, name: &str) -> i32 {
         category::ActiveModel {
+            user_id: Set(1),
             ledger_id: Set(ledger_id),
             name: Set(name.into()),
             kind: Set(CategoryKind::Expense),
@@ -311,6 +319,7 @@ mod tests {
     async fn tx(db: &sea_orm::DatabaseConnection, ledger_id: i32, amount: i64, category_id: Option<i32>, status: TxStatus) -> transaction::Model {
         let now = Utc::now();
         transaction::ActiveModel {
+            user_id: Set(1),
             ledger_id: Set(ledger_id),
             date: Set(NaiveDate::from_ymd_opt(2026, 11, 3).unwrap()),
             amount: Set(amount),
@@ -362,7 +371,7 @@ mod tests {
         let pocket_mart = category(&db, pocket, "장보기").await;
         let t = tx(&db, home, 20_000, Some(mart), TxStatus::Confirmed).await;
 
-        let child = split(&db, t.id, pocket, 8_000, CategoryChoice::SameName).await.unwrap();
+        let child = split(&db, 1, t.id, pocket, 8_000, CategoryChoice::SameName).await.unwrap();
         assert_eq!((child.ledger_id, child.amount, child.category_id), (pocket, 8_000, Some(pocket_mart)));
         assert_eq!(child.split_parent_id, Some(t.id));
         assert_eq!((child.date, child.memo.as_deref(), child.source), (t.date, Some("메모"), TxSource::Api));
@@ -370,14 +379,14 @@ mod tests {
         assert_eq!(get(&db, t.id).await.unwrap().amount, 12_000);
 
         // 이미 분할된 거래는 다시 나누지 않는다 (부모·자식 모두)
-        assert!(split(&db, t.id, pocket, 1_000, CategoryChoice::SameName).await.is_err());
-        assert!(split(&db, child.id, home, 1_000, CategoryChoice::SameName).await.is_err());
+        assert!(split(&db, 1, t.id, pocket, 1_000, CategoryChoice::SameName).await.is_err());
+        assert!(split(&db, 1, child.id, home, 1_000, CategoryChoice::SameName).await.is_err());
 
         // 자식 쪽에서 되돌려도 부모 한 건으로 합쳐진다
-        let merged = unsplit(&db, child.id).await.unwrap();
+        let merged = unsplit(&db, 1, child.id).await.unwrap();
         assert_eq!((merged.id, merged.amount, merged.ledger_id), (t.id, 20_000, home));
         assert!(get(&db, child.id).await.is_none());
-        assert!(unsplit(&db, t.id).await.is_err(), "분할되지 않은 거래");
+        assert!(unsplit(&db, 1, t.id).await.is_err(), "분할되지 않은 거래");
     }
 
     #[tokio::test]
@@ -388,13 +397,13 @@ mod tests {
         let home_cat = category(&db, home, "외식").await;
         let planned = tx(&db, home, 10_000, None, TxStatus::Planned).await;
         let t = tx(&db, home, 10_000, Some(home_cat), TxStatus::Confirmed).await;
-        assert!(split(&db, planned.id, pocket, 1_000, CategoryChoice::SameName).await.is_err(), "예정 거래");
-        assert!(split(&db, t.id, home, 1_000, CategoryChoice::SameName).await.is_err(), "같은 장부");
-        assert!(split(&db, t.id, pocket, 10_000, CategoryChoice::SameName).await.is_err(), "전액");
-        assert!(split(&db, t.id, pocket, 1_000, CategoryChoice::Set(Some(home_cat))).await.is_err(), "다른 장부 카테고리");
+        assert!(split(&db, 1, planned.id, pocket, 1_000, CategoryChoice::SameName).await.is_err(), "예정 거래");
+        assert!(split(&db, 1, t.id, home, 1_000, CategoryChoice::SameName).await.is_err(), "같은 장부");
+        assert!(split(&db, 1, t.id, pocket, 10_000, CategoryChoice::SameName).await.is_err(), "전액");
+        assert!(split(&db, 1, t.id, pocket, 1_000, CategoryChoice::Set(Some(home_cat))).await.is_err(), "다른 장부 카테고리");
         assert_eq!(get(&db, t.id).await.unwrap().amount, 10_000);
         // 옮길 장부에 같은 이름 항목이 없으면 미분류
-        let c = split(&db, t.id, pocket, 1_000, CategoryChoice::SameName).await.unwrap();
+        let c = split(&db, 1, t.id, pocket, 1_000, CategoryChoice::SameName).await.unwrap();
         assert_eq!(c.category_id, None);
     }
 
@@ -404,7 +413,7 @@ mod tests {
         let home = ledger(&db, "가계부", 0).await;
         let pocket = ledger(&db, "용돈", 1).await;
         let t = tx(&db, home, 20_000, None, TxStatus::Confirmed).await;
-        let child = split(&db, t.id, pocket, 8_000, CategoryChoice::SameName).await.unwrap();
+        let child = split(&db, 1, t.id, pocket, 8_000, CategoryChoice::SameName).await.unwrap();
         let parent = get(&db, t.id).await.unwrap();
         let group = group_of(&db, &child).await.unwrap().unwrap();
         assert_eq!(group.total(), 20_000);
@@ -431,7 +440,7 @@ mod tests {
         let a = tx(&db, home, 20_000, None, TxStatus::Confirmed).await;
         let b = tx(&db, home, 30_000, None, TxStatus::Confirmed).await;
         assert!(!any_split(&db, &[a.clone(), b.clone()]).await.unwrap());
-        let child = split(&db, a.id, pocket, 8_000, CategoryChoice::SameName).await.unwrap();
+        let child = split(&db, 1, a.id, pocket, 8_000, CategoryChoice::SameName).await.unwrap();
         let a = get(&db, a.id).await.unwrap();
         assert!(any_split(&db, &[a, b.clone()]).await.unwrap(), "부모");
         assert!(any_split(&db, &[child]).await.unwrap(), "자식");

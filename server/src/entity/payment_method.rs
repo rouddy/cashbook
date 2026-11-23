@@ -11,7 +11,10 @@ use super::enums::PaymentKind;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
-    #[sea_orm(unique)]
+    /// 계정 (`users.id`)
+    #[graphql(skip)]
+    pub user_id: i32,
+    /// 계정 안에서 겹치지 않는다
     pub name: String,
     pub kind: PaymentKind,
     /// 카드사/은행
@@ -65,4 +68,4 @@ impl Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {}
 
-impl ActiveModelBehavior for ActiveModel {}
+super::user_owned!();

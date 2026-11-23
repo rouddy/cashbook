@@ -521,6 +521,7 @@ mod tests {
     fn cat(id: i32, name: &str, kind: CategoryKind, fixed: bool, budget: Option<i64>) -> category::Model {
         category::Model {
             id,
+            user_id: 1,
             ledger_id: 1,
             name: name.into(),
             kind,
@@ -535,6 +536,7 @@ mod tests {
     fn tx(id: i32, date: (i32, u32, u32), amount: i64, cat: Option<i32>, status: TxStatus, member: Option<&str>) -> transaction::Model {
         transaction::Model {
             id,
+            user_id: 1,
             ledger_id: 1,
             date: NaiveDate::from_ymd_opt(date.0, date.1, date.2).unwrap(),
             amount,
@@ -580,8 +582,8 @@ mod tests {
         .collect();
         let pms = HashMap::new();
         let plan_items = vec![
-            plan_item::Model { id: 2, ledger_id: 1, kind: PlanItemKind::Allocation, name: "저축".into(), amount: 100_000, member: None, sort_order: 1 },
-            plan_item::Model { id: 3, ledger_id: 1, kind: PlanItemKind::MemberAllowance, name: "송화 용돈".into(), amount: 500_000, member: Some("송화".into()), sort_order: 2 },
+            plan_item::Model { id: 2, user_id: 1, ledger_id: 1, kind: PlanItemKind::Allocation, name: "저축".into(), amount: 100_000, member: None, sort_order: 1 },
+            plan_item::Model { id: 3, user_id: 1, ledger_id: 1, kind: PlanItemKind::MemberAllowance, name: "송화 용돈".into(), amount: 500_000, member: Some("송화".into()), sort_order: 2 },
         ];
         let ctx = SummaryContext { categories: &categories, payment_methods: &pms, ledger_id: Some(1), plan_items: &plan_items };
         let txs = vec![

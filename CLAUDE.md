@@ -40,6 +40,7 @@ cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug   # 에뮬레�
 
 ## 놓치기 쉬운 것
 
+- 계정: 계정별 테이블(장부·카테고리·지출계획·계좌·결제수단·반복 규칙·거래·API 토큰)은 `user_id`(users 외래 키)를 갖고, 조회·수정·삭제는 항상 `.of_user(uid)`(`entity::OfUser`)로 한정한다. GraphQL 리졸버는 `graphql::uid(ctx)`, 모델의 하위 필드는 `self.user_id`, `Lookup`은 요청 계정 것만 담는다. 입력으로 받은 id(장부·카테고리·결제수단·계좌)도 그 계정 것인지 확인한다. 새 행에는 `user_id`를 꼭 넣는다(빠지면 `before_save`가 거절하고, DB 기본값 0은 외래 키 오류). 예정 거래 생성(`ensure_planned`)만 모든 계정의 규칙을 돌고 만든 거래는 규칙의 계정 것이다. 이름 유일성(장부·결제수단)과 자동 입력 중복 방지 키는 계정 안에서만. id 1은 계정 기능 이전 데이터의 계정이고 인증 없는 로컬 실행도 이 계정이다. SQLite 테이블을 다시 만드는 마이그레이션은 외래 키를 끄고 한 트랜잭션으로(`db::connect`가 SQLite 마이그레이션을 연결 하나로 돌린다, `m20261123_000013_users` 참고).
 - 금액 부호: 지출 카테고리는 +지출/−환불, 수입 카테고리는 +수입. 카드 청구·결제수단 합계는 `summary::outflow()`(수입이면 부호 반전, 장부 이체는 0)를 쓴다.
 - 장부 이체: `transfer_ledger_id`가 있는 거래 한 행 = `ledger_id`에서 그 장부로 옮긴 돈(항목·결제수단 없음, 반복 규칙도 같은 컬럼). 소비·수입이 아니라 `summary::classify(tx, cats, ledger_id)`가 보는 장부 기준으로 받은/보낸 이체로 나누고, 전체 장부 합계·카드·여유자금·추천(`ingest::history`)에서는 뺀다. 장부를 정한 조회(`transactions` 필터, `monthlySummary`, `recurringRules`)는 받은 이체(`transfer_ledger_id = 장부`)도 함께 가져온다 — 장부별로 거래를 읽는 경로를 새로 만들면 받은 이체를 빠뜨리지 않는다. 월잔액 = 수입 + 받은 이체 − 소비 − 보낸 이체 − 배분. 지출계획의 월 수입(`INCOME`)과 카테고리 '합계 제외'는 없어졌다(정기수익 반복 수입, 장부 분리로 대체). 웹 표시는 `lib/transfer.ts`.
 - 반복 규칙이 이번 달 이후에 만든 항목은 상태와 관계없이 삭제하면 SKIPPED로 남긴다(유니크 `(recurring_rule_id, recurring_month)` 자리를 비우면 `ensure_planned`가 다시 만든다). 규칙 수정 시 이번 달 이후 PLANNED만 다시 만든다.
