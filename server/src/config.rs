@@ -31,6 +31,8 @@ pub struct AppConfig {
     /// `CASHBOOK_GOOGLE_CLIENT_ID`·`CASHBOOK_GOOGLE_CLIENT_SECRET`·`CASHBOOK_PUBLIC_URL`.
     /// 설정하면 Google 로그인과 API 토큰 인증을 요구하고, 없으면 인증 없이 기존 데이터 계정(id 1)으로 동작한다(로컬 전용).
     pub google: Option<GoogleConfig>,
+    /// `CASHBOOK_PUBLIC_URL` (끝의 `/` 제외). Google 로그인 리디렉션과 MCP OAuth(발급자·리소스 주소)의 기준
+    pub public_url: Option<String>,
     /// `CASHBOOK_OWNER_EMAIL`. 이 Google 계정이 처음 로그인하면 기존 데이터 계정(id 1)을 넘겨받는다. 관리자이기도 하다.
     pub owner_email: Option<String>,
     /// `CASHBOOK_ADMIN_EMAILS` (쉼표 구분). 모든 카드 상품을 고칠 수 있는 계정
@@ -115,6 +117,7 @@ impl AppConfig {
         Ok(Self {
             database_url: var("DATABASE_URL").unwrap_or_else(|| "sqlite://data/cashbook.db?mode=rwc".into()),
             google,
+            public_url,
             owner_email: var("CASHBOOK_OWNER_EMAIL").map(|e| e.to_lowercase()),
             admin_emails: list("CASHBOOK_ADMIN_EMAILS"),
             legacy_password_set: var("CASHBOOK_PASSWORD").is_some(),
@@ -150,6 +153,7 @@ impl AppConfig {
         Self {
             database_url: "sqlite::memory:".into(),
             google: None,
+            public_url: None,
             owner_email: None,
             admin_emails: vec![],
             legacy_password_set: false,

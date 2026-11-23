@@ -23,6 +23,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261122_000012_family_cards::Migration),
             Box::new(m20261123_000013_users::Migration),
             Box::new(m20261123_000014_card_products::Migration),
+            Box::new(m20261123_000015_oauth::Migration),
         ]
     }
 }
@@ -2302,6 +2303,113 @@ mod m20261123_000014_card_products {
                 }
                 _ => up_mysql(manager).await,
             }
+        }
+    }
+}
+
+/// MCP 클라이언트용 OAuth: 동적 등록한 클라이언트와 계정별 연결(액세스·리프레시 토큰 해시).
+mod m20261123_000015_oauth {
+    use super::*;
+
+    pub struct Migration;
+
+    impl MigrationName for Migration {
+        fn name(&self) -> &str {
+            "m20261123_000015_oauth"
+        }
+    }
+
+    #[derive(DeriveIden)]
+    enum OauthClients {
+        Table,
+        Id,
+        ClientId,
+        SecretHash,
+        Name,
+        RedirectUris,
+        CreatedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum OauthGrants {
+        Table,
+        Id,
+        UserId,
+        OauthClientId,
+        ClientName,
+        Scope,
+        Resource,
+        AccessHash,
+        AccessExpiresAt,
+        RefreshHash,
+        RefreshExpiresAt,
+        CreatedAt,
+        LastUsedAt,
+    }
+
+    #[derive(DeriveIden)]
+    enum Users {
+        Table,
+        Id,
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for Migration {
+        async fn up(&self, m: &SchemaManager) -> Result<(), DbErr> {
+            m.create_table(
+                Table::create()
+                    .table(OauthClients::Table)
+                    .col(pk_auto(OauthClients::Id))
+                    .col(string(OauthClients::ClientId))
+                    .col(string_null(OauthClients::SecretHash))
+                    .col(string(OauthClients::Name))
+                    .col(text(OauthClients::RedirectUris))
+                    .col(timestamp_with_time_zone(OauthClients::CreatedAt))
+                    .to_owned(),
+            )
+            .await?;
+            m.create_index(
+                Index::create().name("uq_oauth_clients_client_id").table(OauthClients::Table).col(OauthClients::ClientId).unique().to_owned(),
+            )
+            .await?;
+            m.create_table(
+                Table::create()
+                    .table(OauthGrants::Table)
+                    .col(pk_auto(OauthGrants::Id))
+                    .col(integer(OauthGrants::UserId))
+                    .col(integer(OauthGrants::OauthClientId))
+                    .col(string(OauthGrants::ClientName))
+                    .col(string(OauthGrants::Scope))
+                    .col(string(OauthGrants::Resource))
+                    .col(string(OauthGrants::AccessHash))
+                    .col(timestamp_with_time_zone(OauthGrants::AccessExpiresAt))
+                    .col(string(OauthGrants::RefreshHash))
+                    .col(timestamp_with_time_zone(OauthGrants::RefreshExpiresAt))
+                    .col(timestamp_with_time_zone(OauthGrants::CreatedAt))
+                    .col(timestamp_with_time_zone_null(OauthGrants::LastUsedAt))
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_oauth_grants_user")
+                            .from(OauthGrants::Table, OauthGrants::UserId)
+                            .to(Users::Table, Users::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_oauth_grants_client")
+                            .from(OauthGrants::Table, OauthGrants::OauthClientId)
+                            .to(OauthClients::Table, OauthClients::Id)
+                            .on_delete(ForeignKeyAction::Cascade)
+                            .on_update(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+            for (name, col) in [("uq_oauth_grants_access", OauthGrants::AccessHash), ("uq_oauth_grants_refresh", OauthGrants::RefreshHash)] {
+                m.create_index(Index::create().name(name).table(OauthGrants::Table).col(col).unique().to_owned()).await?;
+            }
+            m.create_index(Index::create().name("ix_oauth_grants_user").table(OauthGrants::Table).col(OauthGrants::UserId).to_owned()).await
         }
     }
 }

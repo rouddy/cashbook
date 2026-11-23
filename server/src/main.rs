@@ -13,6 +13,7 @@ mod db;
 mod domain;
 mod entity;
 mod graphql;
+mod mcp;
 mod oauth;
 mod routes;
 
@@ -33,6 +34,8 @@ pub struct AppState {
     pub db: DatabaseConnection,
     /// Google 로그인 토큰 교환용
     pub http: reqwest::Client,
+    /// MCP OAuth 인가 코드 (5분, 메모리)
+    pub oauth_codes: mcp::auth::CodeStore,
 }
 
 impl AppState {
@@ -42,7 +45,7 @@ impl AppState {
             .user_agent(concat!("cashbook/", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("http client");
-        Self { config, db, http }
+        Self { config, db, http, oauth_codes: mcp::auth::CodeStore::default() }
     }
 }
 
@@ -53,6 +56,8 @@ pub fn build_rocket(figment: rocket::figment::Figment, state: AppState) -> rocke
         .manage(schema)
         .manage(state)
         .mount("/api", routes::api())
+        .mount("/api", mcp::api_routes())
+        .mount("/", mcp::root_routes())
         .mount("/", routes::web())
         .register("/api", routes::api_catchers())
 }
