@@ -13,6 +13,7 @@ mod db;
 mod domain;
 mod entity;
 mod graphql;
+mod oauth;
 mod routes;
 
 use std::error::Error;
@@ -23,7 +24,6 @@ use std::time::Duration;
 use rand::RngCore;
 use sea_orm::DatabaseConnection;
 
-use crate::auth::LoginLimiter;
 use crate::config::AppConfig;
 use crate::domain::recurring;
 
@@ -31,7 +31,30 @@ use crate::domain::recurring;
 pub struct AppState {
     pub config: AppConfig,
     pub db: DatabaseConnection,
-    pub login_limiter: LoginLimiter,
+    /// Google 로그인 토큰 교환용
+    pub http: reqwest::Client,
+}
+
+impl AppState {
+    pub fn new(config: AppConfig, db: DatabaseConnection) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .user_agent(concat!("cashbook/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .expect("http client");
+        Self { config, db, http }
+    }
+}
+
+/// 라우트·스키마·상태를 붙인 Rocket (서버 실행과 테스트가 같이 쓴다)
+pub fn build_rocket(figment: rocket::figment::Figment, state: AppState) -> rocket::Rocket<rocket::Build> {
+    let schema = graphql::build_schema(state.db.clone(), state.config.clone());
+    rocket::custom(figment)
+        .manage(schema)
+        .manage(state)
+        .mount("/api", routes::api())
+        .mount("/", routes::web())
+        .register("/api", routes::api_catchers())
 }
 
 const USAGE: &str = "사용법:
@@ -157,15 +180,27 @@ async fn serve(config: AppConfig) -> Result<(), Box<dyn Error>> {
         figment = figment.merge(("secret_key", load_or_create_secret(&config.secret_key_file)?));
     }
     let address: IpAddr = figment.extract_inner("address")?;
-    if !config.auth_enabled() {
-        if !address.is_loopback() && !config.allow_insecure {
-            return Err(format!(
-                "CASHBOOK_PASSWORD 없이 {address} 로 열 수 없습니다. 비밀번호를 설정하거나 \
-                 로컬(127.0.0.1)로 실행하세요. (정말 필요하면 CASHBOOK_ALLOW_INSECURE=1)"
-            )
-            .into());
+    if config.legacy_password_set {
+        eprintln!("⚠️  CASHBOOK_PASSWORD는 더 쓰지 않습니다. 로그인은 Google 계정으로 합니다 (CASHBOOK_GOOGLE_CLIENT_ID 등)");
+    }
+    match &config.google {
+        Some(g) => {
+            println!("Google 로그인 리디렉션 URI: {}", g.redirect_uri);
+            if config.owner_email.is_none() {
+                eprintln!("⚠️  CASHBOOK_OWNER_EMAIL이 없어 기존 데이터(계정 id 1)를 넘겨받을 계정이 없습니다");
+            }
         }
-        eprintln!("⚠️  CASHBOOK_PASSWORD가 없어 인증 없이 실행합니다 ({address})");
+        None => {
+            if !address.is_loopback() && !config.allow_insecure {
+                return Err(format!(
+                    "Google 로그인 설정(CASHBOOK_GOOGLE_CLIENT_ID·CASHBOOK_GOOGLE_CLIENT_SECRET·CASHBOOK_PUBLIC_URL) 없이 \
+                     {address} 로 열 수 없습니다. 로그인을 설정하거나 로컬(127.0.0.1)로 실행하세요. \
+                     (정말 필요하면 CASHBOOK_ALLOW_INSECURE=1)"
+                )
+                .into());
+            }
+            eprintln!("⚠️  Google 로그인을 설정하지 않아 인증 없이 기본 계정(id 1)으로 실행합니다 ({address})");
+        }
     }
 
     let db = db::connect(&config.database_url).await?;
@@ -190,15 +225,6 @@ async fn serve(config: AppConfig) -> Result<(), Box<dyn Error>> {
         });
     }
 
-    let schema = graphql::build_schema(db.clone(), config.clone());
-    let state = AppState { config, db, login_limiter: LoginLimiter::default() };
-    let _ = rocket::custom(figment)
-        .manage(schema)
-        .manage(state)
-        .mount("/api", routes::api())
-        .mount("/", routes::web())
-        .register("/api", routes::api_catchers())
-        .launch()
-        .await?;
+    let _ = build_rocket(figment, AppState::new(config, db)).launch().await?;
     Ok(())
 }

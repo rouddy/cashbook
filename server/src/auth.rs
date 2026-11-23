@@ -1,11 +1,8 @@
-//! 인증: 비밀번호 로그인(암호화 쿠키 세션)과 API 토큰(Bearer). 토큰은 자동 입력과 GraphQL을 모두 쓴다.
+//! 인증: Google 로그인 세션(암호화 쿠키, `oauth`)과 API 토큰(Bearer). 둘 다 계정 하나를 가리키고,
+//! 토큰은 자동 입력과 GraphQL을 모두 쓴다.
 //!
-//! `CASHBOOK_PASSWORD`가 없으면 인증을 끈다 (로컬 전용 실행). 이때는 루프백 주소로만 띄우도록 main에서 막는다.
-
-use std::collections::{HashMap, VecDeque};
-use std::net::IpAddr;
-use std::sync::Mutex;
-use std::time::{Duration as StdDuration, Instant};
+//! Google 로그인을 설정하지 않으면 인증을 끄고 기존 데이터 계정(id 1)으로 동작한다 (로컬 전용 실행).
+//! 이때는 루프백 주소로만 띄우도록 main에서 막는다.
 
 use chrono::Utc;
 use rand::{Rng, distr::Alphanumeric};
@@ -48,69 +45,24 @@ pub async fn verify_token<C: ConnectionTrait>(db: &C, token: &str) -> Result<Opt
     Ok(Some(found))
 }
 
-/// 비밀번호를 바꾸면 기존 세션이 무효가 되도록 세션 값에 비밀번호 지문을 넣는다.
-fn password_fingerprint(password: &str) -> String {
-    sha256_hex(&format!("cashbook-session:{password}"))[..16].to_string()
+/// 세션 쿠키 값: 계정 id와 로그인 시각. 쿠키는 Rocket 비밀 키로 암호화·서명돼 바꿀 수 없다.
+pub fn session_value(user_id: i32) -> String {
+    format!("v2:{user_id}:{}", Utc::now().timestamp())
 }
 
-pub fn session_value(password: &str) -> String {
-    format!("v1:{}:{}", Utc::now().timestamp(), password_fingerprint(password))
-}
-
-pub fn session_valid(value: &str, password: &str) -> bool {
+/// 세션 쿠키 값에서 계정 id (형식이 다르거나 `SESSION_DAYS`가 지났으면 None)
+pub fn session_user(value: &str) -> Option<i32> {
     let mut parts = value.split(':');
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
-        (Some("v1"), Some(ts), Some(fp), None) => {
+        (Some("v2"), Some(id), Some(ts), None) => {
             let fresh = ts.parse::<i64>().is_ok_and(|ts| Utc::now().timestamp() - ts < SESSION_DAYS * 86_400);
-            fresh && fp == password_fingerprint(password)
+            id.parse().ok().filter(|_| fresh)
         }
-        _ => false,
+        _ => None,
     }
 }
 
-/// 길이와 내용이 달라도 같은 시간이 걸리도록 해시끼리 비교한다.
-pub fn check_password(input: &str, expected: &str) -> bool {
-    let (a, b) = (Sha256::digest(input.as_bytes()), Sha256::digest(expected.as_bytes()));
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
-
-/// 로그인 실패 제한: IP마다 10분에 10번, 전체로는 10분에 100번.
-/// 한 곳에서 비밀번호를 계속 틀려도 다른 곳(본인)의 로그인은 막히지 않는다.
-#[derive(Default)]
-pub struct LoginLimiter {
-    per_ip: Mutex<HashMap<Option<IpAddr>, VecDeque<Instant>>>,
-    global: Mutex<VecDeque<Instant>>,
-}
-
-impl LoginLimiter {
-    const WINDOW: StdDuration = StdDuration::from_secs(600);
-    const MAX_PER_IP: usize = 10;
-    const MAX_GLOBAL: usize = 100;
-
-    fn prune(q: &mut VecDeque<Instant>) {
-        while q.front().is_some_and(|t| t.elapsed() > Self::WINDOW) {
-            q.pop_front();
-        }
-    }
-
-    pub fn allowed(&self, ip: Option<IpAddr>) -> bool {
-        let mut global = self.global.lock().unwrap();
-        Self::prune(&mut global);
-        let mut per_ip = self.per_ip.lock().unwrap();
-        per_ip.retain(|_, q| {
-            Self::prune(q);
-            !q.is_empty()
-        });
-        global.len() < Self::MAX_GLOBAL && per_ip.get(&ip).is_none_or(|q| q.len() < Self::MAX_PER_IP)
-    }
-
-    pub fn record_failure(&self, ip: Option<IpAddr>) {
-        self.global.lock().unwrap().push_back(Instant::now());
-        self.per_ip.lock().unwrap().entry(ip).or_default().push_back(Instant::now());
-    }
-}
-
-/// 인증된 요청의 계정 (로그인 세션 또는 API 토큰). 인증이 꺼져 있으면 기존 데이터 계정(id 1).
+/// 인증된 요청의 계정 (로그인 세션 또는 API 토큰). 인증이 꺼져 있으면 기존 데이터 계정(id 1, 관리자).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Auth {
     pub user_id: i32,
@@ -118,6 +70,10 @@ pub struct Auth {
 }
 
 impl Auth {
+    pub fn of(config: &AppConfig, user: &user::Model) -> Self {
+        Self { user_id: user.id, is_admin: config.is_admin_email(user.email.as_deref()) }
+    }
+
     pub fn current_user(&self) -> crate::graphql::CurrentUser {
         crate::graphql::CurrentUser { id: self.user_id, is_admin: self.is_admin }
     }
@@ -192,23 +148,27 @@ impl<'r> FromRequest<'r> for Auth {
         if !origin_allowed(&state.config, headers.get_one("Origin"), host, headers.get_one("X-Forwarded-Host")) {
             return forbid(req, "다른 사이트에서 보낸 요청은 받지 않습니다 (CASHBOOK_ALLOWED_ORIGINS 참고)");
         }
-        let Some(password) = state.config.password.as_deref() else {
+        if !state.config.auth_enabled() {
             if !host_allowed_without_auth(&state.config, host) {
-                return forbid(req, "비밀번호 없이 실행 중이라 localhost 주소로만 접속할 수 있습니다");
+                return forbid(req, "인증 없이 실행 중이라 localhost 주소로만 접속할 수 있습니다");
             }
             return Outcome::Success(Auth { user_id: user::LEGACY_USER_ID, is_admin: true });
-        };
-        if let Some(token) = bearer_token(req) {
-            return match verify_token(&state.db, token).await {
-                Ok(Some(t)) => Outcome::Success(Auth { user_id: t.user_id, is_admin: t.user_id == user::LEGACY_USER_ID }),
-                Ok(None) => Outcome::Error((Status::Unauthorized, "invalid api token")),
-                Err(_) => Outcome::Error((Status::InternalServerError, "database error")),
-            };
         }
-        if let Some(cookie) = req.cookies().get_private(SESSION_COOKIE)
-            && session_valid(cookie.value(), password)
-        {
-            return Outcome::Success(Auth { user_id: user::LEGACY_USER_ID, is_admin: true });
+        let user_id = if let Some(token) = bearer_token(req) {
+            match verify_token(&state.db, token).await {
+                Ok(Some(t)) => Some(t.user_id),
+                Ok(None) => return Outcome::Error((Status::Unauthorized, "invalid api token")),
+                Err(_) => return Outcome::Error((Status::InternalServerError, "database error")),
+            }
+        } else {
+            req.cookies().get_private(SESSION_COOKIE).and_then(|c| session_user(c.value()))
+        };
+        if let Some(id) = user_id {
+            match user::Entity::find_by_id(id).one(&state.db).await {
+                Ok(Some(u)) => return Outcome::Success(Auth::of(&state.config, &u)),
+                Ok(None) => {}
+                Err(_) => return Outcome::Error((Status::InternalServerError, "database error")),
+            }
         }
         Outcome::Error((Status::Unauthorized, "login required"))
     }
@@ -219,29 +179,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sessions_and_passwords() {
-        let v = session_value("pw");
-        assert!(session_valid(&v, "pw"));
-        assert!(!session_valid(&v, "other"));
-        assert!(!session_valid("v1:0:abc", "pw"));
-        assert!(!session_valid("garbage", "pw"));
-        assert!(check_password("secret", "secret"));
-        assert!(!check_password("secret", "secret2"));
+    fn sessions_and_tokens() {
+        assert_eq!(session_user(&session_value(7)), Some(7));
+        assert_eq!(session_user("v2:7:0"), None, "오래된 세션");
+        assert_eq!(session_user("v1:0:abc"), None, "비밀번호 시절 세션");
+        assert_eq!(session_user("garbage"), None);
         let t = generate_token();
         assert!(t.starts_with("cb_") && t.len() == 43);
     }
 
     #[test]
-    fn limiter_is_per_ip() {
-        let l = LoginLimiter::default();
-        let attacker: Option<IpAddr> = "203.0.113.9".parse().ok();
-        let me: Option<IpAddr> = "198.51.100.7".parse().ok();
-        for _ in 0..10 {
-            assert!(l.allowed(attacker));
-            l.record_failure(attacker);
-        }
-        assert!(!l.allowed(attacker));
-        assert!(l.allowed(me));
+    fn admins_are_owner_and_listed_emails() {
+        let mut cfg = AppConfig::for_tests();
+        cfg.owner_email = Some("owner@example.com".into());
+        cfg.admin_emails = vec!["admin@example.com".into()];
+        assert!(cfg.is_admin_email(Some("Owner@Example.com")));
+        assert!(cfg.is_admin_email(Some("admin@example.com")));
+        assert!(!cfg.is_admin_email(Some("someone@example.com")));
+        assert!(!cfg.is_admin_email(None));
     }
 
     #[test]
